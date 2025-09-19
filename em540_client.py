@@ -53,7 +53,13 @@ class Em540Client:
 
         values = []
         num_registers = count * 2
-        result = await self._client.read_holding_registers(start_register, count=num_registers)
+        from pymodbus import ModbusException
+        try:
+            result = await self._client.read_holding_registers(start_register, count=num_registers)
+        except ModbusException:
+            logger.error("Not connected to EM540")
+            return None
+
         if not result.isError():
             # Combine every two registers into one INT32
             for i in range(0, num_registers, 2):
