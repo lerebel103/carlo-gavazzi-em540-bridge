@@ -2,33 +2,59 @@
 # -*- coding: utf-8 -*-
 import argparse
 import asyncio
-from em540_client import Em540Client
+
+from pymodbus import pymodbus_apply_logging_config
+
+from em540_master import Em540Master
 import logging
+
+from em540_slave import Em540Slave
 
 logger = logging.getLogger()
 
-read_interval = 0.5  # seconds
+read_interval = 0.1  # seconds
 
 def parse_args():
     parser = argparse.ArgumentParser(description='EM540 to Fronius TS-65A converter')
-    parser.add_argument('--source-host', type=str, default='127.0.0.1', help='Default EM540 modbus host to bind to')
-    parser.add_argument('--source-port', type=int, default=503, help='Default modbus EM540 port to bind to')
-    parser.add_argument('--target-host', type=str, default='127.0.0.1', help='Host on which a TS-65A is emulated')
-    parser.add_argument('--target-port', type=int, default=502, help='Port on which a TS-65A is emulated')
+    parser.add_argument('--source-host', type=str, default='192.168.102.240', help='Default EM540 modbus host to bind to')
+    parser.add_argument('--source-port', type=int, default=8899, help='Default modbus EM540 port to bind to')
+    parser.add_argument('--target-host', type=str, default='0.0.0.0', help='Host on which a TS-65A is emulated')
+    parser.add_argument('--target-port', type=int, default=5002, help='Port on which a TS-65A is emulated')
     return parser.parse_args()
 
 async def process_loop(source_host, source_port, target_host, target_port):
-    em540 = Em540Client(source_host, source_port)
+    pymodbus_apply_logging_config("INFO")
+
+    em540_master = Em540Master(source_host, source_port)
+    em540_slave = Em540Slave(target_host, target_port)
+
+    # Start our slave server
+    await em540_slave.start()
+    last_time = None
 
     while True:
         # Ensure em540 client is connected
-         if not em540.connected:
-             await em540.connect()
+        if not em540_master.connected:
+          await em540_master.connect()
 
-         # Now we can read data
-         await em540.read_data()
 
-         await asyncio.sleep(read_interval)
+        # Now we can read data
+        data = await em540_master.read_data()
+        #em540_slave.set_data(data)
+
+        from datetime import datetime
+        now = datetime.now()
+        slee_time = read_interval
+        if last_time:
+            delta = (now - last_time).total_seconds()
+            print("time delta:", delta)
+            if delta > .2:
+                logger.warning("Read time delta exceeded " +  str(delta) + ", at " + str(now))
+            slee_time = read_interval - delta
+
+        last_time = now
+        if slee_time > 0:
+            await asyncio.sleep(slee_time)
 
 
 async def main(source_host, source_port, target_host, target_port):
@@ -43,7 +69,7 @@ async def main(source_host, source_port, target_host, target_port):
 
 if __name__ == '__main__':
     args = parse_args()
-    # set up logger with default level of DEBUG and log to console
+    # set up logger with default level of DEBUG and log to console and time
     logging.basicConfig(level=logging.DEBUG)
 
 
