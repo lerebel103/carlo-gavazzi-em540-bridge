@@ -5,10 +5,10 @@ import asyncio
 
 from pymodbus import pymodbus_apply_logging_config
 
-from em540_master import Em540Master
+from Em540_master import Em540Master
 import logging
 
-from em540_slave import Em540Slave
+from Em540_slave import Em540Slave
 
 logger = logging.getLogger()
 
@@ -26,12 +26,11 @@ async def process_loop(source_host, source_port, target_host, target_port):
     pymodbus_apply_logging_config("INFO")
 
     em540_master = Em540Master(source_host, source_port)
-    em540_slave = Em540Slave(target_host, target_port)
-
-    # Start our slave server
+    em540_slave = Em540Slave(target_host, target_port, em540_master.data)
     await em540_slave.start()
-    last_time = None
 
+    from datetime import datetime
+    timeline = datetime.now().timestamp()
     while True:
         # Ensure em540 client is connected
         if not em540_master.connected:
@@ -39,22 +38,19 @@ async def process_loop(source_host, source_port, target_host, target_port):
 
 
         # Now we can read data
-        data = await em540_master.read_data()
-        #em540_slave.set_data(data)
+        if await em540_master.read_data():
+            await em540_slave.data_ready()
+        else:
+            em540_slave.data_failed()
 
-        from datetime import datetime
-        now = datetime.now()
-        slee_time = read_interval
-        if last_time:
-            delta = (now - last_time).total_seconds()
-            print("time delta:", delta)
-            if delta > .2:
-                logger.warning("Read time delta exceeded " +  str(delta) + ", at " + str(now))
-            slee_time = read_interval - delta
-
-        last_time = now
-        if slee_time > 0:
-            await asyncio.sleep(slee_time)
+        timeline += read_interval
+        delta = timeline - datetime.now().timestamp()
+        if delta < - 0.2:
+            logger.warning(f"Falling behind schedule by {delta:.2f} seconds")
+        if delta > 0:
+            await asyncio.sleep(delta)
+        else:
+            timeline = datetime.now().timestamp()
 
 
 async def main(source_host, source_port, target_host, target_port):
@@ -70,7 +66,7 @@ async def main(source_host, source_port, target_host, target_port):
 if __name__ == '__main__':
     args = parse_args()
     # set up logger with default level of DEBUG and log to console and time
-    logging.basicConfig(level=logging.DEBUG)
+    logging.basicConfig(level=logging.INFO)
 
 
     asyncio.run(main(args.source_host, args.source_port, args.target_host, args.target_port))
