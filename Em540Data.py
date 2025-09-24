@@ -137,6 +137,7 @@ reg_map = [
     #(0x6E, 0x00F8), (0x6F, 0x00F9),
 
 ]
+
 class RegisterDefinition:
     def __init__(self, description, values):
         self.description: str = description
@@ -155,7 +156,14 @@ class RegisterDefinition:
 
 
 class Em540Frame:
+    """Class representing a data frame from the EM540 device, or raw registers.
 
+    Attributes:
+        is_em530 (bool): Indicates if the device is an EM530 model.
+        static_reg_map (dict): A dictionary mapping static register addresses to their definitions.
+        dynamic_reg_map (dict): A dictionary mapping dynamic register addresses to their definitions.
+        remapped_reg_map (dict): A dictionary mapping remapped register addresses to their definitions.
+    """
     def __init__(self, is_em530=False):
         self.is_em530 = is_em530
 
