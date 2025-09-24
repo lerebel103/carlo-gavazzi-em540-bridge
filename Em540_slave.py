@@ -76,7 +76,7 @@ class Em540Slave:
             self.datablock.setValues(addr + REG_OFFSET, self.data.remapped_reg_map[addr].values)
 
 
-    def data_failed(self):
+    async def data_failed(self):
         pass
 
         # Deal with this later

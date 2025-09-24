@@ -9,6 +9,8 @@ from Em540_master import Em540Master
 import logging
 
 from Em540_slave import Em540Slave
+from FroniusSmartMeterEmulator import SmartMeterEmulator
+from MeterData import MeterData
 
 logger = logging.getLogger()
 
@@ -27,7 +29,11 @@ async def process_loop(source_host, source_port, target_host, target_port):
 
     em540_master = Em540Master(source_host, source_port)
     em540_slave = Em540Slave(target_host, target_port, em540_master.data)
+    fronius = SmartMeterEmulator(target_host, target_port+1, em540_master.data)
+    meter_data = MeterData()
+
     await em540_slave.start()
+    await fronius.start()
 
     from datetime import datetime
     timeline = datetime.now().timestamp()
@@ -39,9 +45,12 @@ async def process_loop(source_host, source_port, target_host, target_port):
 
         # Now we can read data
         if await em540_master.read_data():
+            meter_data.update(em540_master.data)
             await em540_slave.data_ready()
+            await fronius.update(meter_data)
         else:
-            em540_slave.data_failed()
+            await em540_slave.data_failed()
+            await fronius.data_failed()
 
         timeline += read_interval
         delta = timeline - datetime.now().timestamp()
