@@ -1,4 +1,5 @@
 import logging
+import sys
 
 from pymodbus import FramerType
 from pymodbus.datastore import (
@@ -48,7 +49,7 @@ class Em540Slave:
             ir=self.datablock,
         )
         context = ModbusServerContext(devices=self._context, single=True)
-        self._server = ModbusTcpServer(framer=FramerType.RTU,
+        self._server = ModbusTcpServer(framer=FramerType.SOCKET,
                                        context=context,
                                        address=(self.host, self.port),
                                        trace_pdu=self.on_pdu)
@@ -56,7 +57,10 @@ class Em540Slave:
 
 
     def on_pdu(self, flag: bool, pdu: ModbusPDU) -> ModbusPDU:
-        logger.debug("got pdu " + str(pdu))
+        print(str(pdu))
+        if pdu.exception_code != 0:
+            logger.error(pdu)
+            sys.exit(1)
         return pdu
 
     async def start(self):
