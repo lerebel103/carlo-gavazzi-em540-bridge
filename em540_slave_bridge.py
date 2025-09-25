@@ -8,7 +8,7 @@ from pymodbus.datastore import (
 )
 from pymodbus.server import ModbusTcpServer
 
-from em_540_data import Em540Frame
+from em540_data import Em540Frame
 from em540_master import MeterDataListener
 from meter_data import MeterData
 from pdu_helper import PduHelper
