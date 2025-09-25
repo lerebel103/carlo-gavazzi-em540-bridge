@@ -33,9 +33,6 @@ async def process_loop():
     conf = configparser.get_config()
     pymodbus_apply_logging_config(conf.pymodbus.logging)
 
-    if conf.mqtt.enabled:
-        mqtt_bridge = MqttBridge(conf.mqtt)
-
     # Create our master and slave instances
     em540_master = Em540Master(conf.em540_master)
     em540_slave = Em540Slave(conf.em540_slave, em540_master.data.frame)
@@ -45,6 +42,8 @@ async def process_loop():
     em540_master.add_listener(em540_slave)
     em540_master.add_listener(ts65a_slave)
     if conf.mqtt.enabled:
+        mqtt_bridge = MqttBridge(conf.mqtt)
+        mqtt_bridge.connect()
         em540_master.add_listener(mqtt_bridge)
 
     # Start all
