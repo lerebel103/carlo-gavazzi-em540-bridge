@@ -20,7 +20,9 @@ logger = logging.getLogger('ha-bridge')
 
 
 class HABridge(MeterDataListener):
-
+    """ Represents a MQTT bridge to Home Assistant
+    Sensors are defined in ha_sensors.py
+    """
     def __init__(self, conf):
         client_id = f'publish-{random.randint(0, 1000)}'
         self.host = conf.host

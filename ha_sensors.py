@@ -9,6 +9,7 @@ class Sensor:
         self.name = name
         self.state_topic = state_topic
         self.device_class = device_class
+        self.state_class = state_class
         self.value_template = "{{ value_json." + self.safe_name + " }}"
         self.unit_of_measurement = unit
         self.suggested_display_precision = precision
@@ -39,6 +40,7 @@ class Sensor:
             "name": self.name,
             "state_topic": self.state_topic,
             "device_class": self.device_class,
+            "state_class": self.state_class,
             "value_template": self.value_template,
             "unit_of_measurement": self.unit_of_measurement,
             "suggested_display_precision": self.suggested_display_precision,
