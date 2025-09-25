@@ -28,6 +28,7 @@ SCHEMA_CONFIG = {
         'logging': And(Use(str), lambda n: n in ['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL']),
     },
     'mqtt': {
+        'enabled': Use(bool),
         'host': str,
         'port': And(Use(int), lambda n: 0 < n < 65535),
         'username': str,

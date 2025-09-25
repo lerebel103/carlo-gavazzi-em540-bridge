@@ -11,6 +11,7 @@ from Em540_master import Em540Master
 import logging
 
 from Em540_slave_bridge import Em540Slave
+from MqttComms import MqttBridge
 from TS65A_slave_bridge import Ts65aSlaveBridge
 
 logger = logging.getLogger()
@@ -32,6 +33,9 @@ async def process_loop():
     conf = configparser.get_config()
     pymodbus_apply_logging_config(conf.pymodbus.logging)
 
+    if conf.mqtt.enabled:
+        mqtt_bridge = MqttBridge(conf.mqtt)
+
     # Create our master and slave instances
     em540_master = Em540Master(conf.em540_master)
     em540_slave = Em540Slave(conf.em540_slave, em540_master.data.frame)
@@ -40,6 +44,8 @@ async def process_loop():
     # register listeners on master to receive data updates
     em540_master.add_listener(em540_slave)
     em540_master.add_listener(ts65a_slave)
+    if conf.mqtt.enabled:
+        em540_master.add_listener(mqtt_bridge)
 
     # Start all
     await em540_slave.start()
