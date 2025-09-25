@@ -28,7 +28,7 @@ class Ts65aSlaveBridge(MeterDataListener):
         self.port: int = port
         self._slave_id: int = 0x01
         self.bridge_timeout: float = bridge_timeout
-        self._pdu_helper = PduHelper(bridge_timeout)
+        self._pdu_helper = PduHelper(logger, bridge_timeout)
 
         # Smart Meter TS 65A-3
         datablock = ModbusSparseDataBlock({

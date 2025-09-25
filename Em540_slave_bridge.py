@@ -23,8 +23,7 @@ class Em540Slave(MeterDataListener):
         self.host = host
         self.port = port
         self.last_pdu = None
-        self._last_rx_timestamp = None
-        self._pdu_helper = PduHelper(bridge_timeout)
+        self._pdu_helper = PduHelper(logger, bridge_timeout)
 
         # Build a sparse datablock with the size of the frame registers
         values = {}
@@ -51,7 +50,7 @@ class Em540Slave(MeterDataListener):
             ir=self.datablock,
         )
         context = ModbusServerContext(devices=self._context, single=True)
-        self._server = ModbusTcpServer(framer=FramerType.SOCKET,
+        self._server = ModbusTcpServer(framer=FramerType.RTU,
                                        context=context,
                                        address=(self.host, self.port),
                                        trace_pdu=self._pdu_helper.on_pdu)

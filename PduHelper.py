@@ -3,10 +3,10 @@ from datetime import datetime
 
 from pymodbus.pdu import ModbusPDU
 
-logger = logging.getLogger('PduHelper')
 
 class PduHelper:
-    def __init__(self, bridge_timeout: float):
+    def __init__(self, logger, bridge_timeout: float):
+        self.logger = logger
         self.bridge_timeout = bridge_timeout
         self.last_pdu = None
         self._last_rx_timestamp = None
@@ -16,13 +16,13 @@ class PduHelper:
         # within the bridge timeout period.
         now = datetime.now().timestamp()
         if self._last_rx_timestamp is None or (now - self._last_rx_timestamp)  > self.bridge_timeout:
-            logger.warning("Dropping request since no data received from master within timeout period")
+            self.logger.warning("Dropping request since no data received from master within timeout period")
             return ModbusPDU()
 
         # Log some exceptions so we can debug any issues with register access not accounted for
         if pdu.exception_code != 0:
-            logger.error(pdu)
-            logger.error(f"Prior PDU: {self.last_pdu}")
+            self.logger.error(pdu)
+            self.logger.error(f"Prior PDU: {self.last_pdu}")
 
         self.last_pdu = pdu
         return pdu
