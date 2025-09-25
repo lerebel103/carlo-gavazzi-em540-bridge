@@ -25,7 +25,7 @@ class Em540Slave(MeterDataListener):
         self.last_pdu = None
         self._slave_id: int = config.slave_id
         self._pdu_helper = PduHelper(logger, config.update_timeout)
-        logger.setLevel(config.logging)
+        logger.setLevel(config.log_level)
 
         # Build a sparse datablock with the size of the frame registers
         values = {}

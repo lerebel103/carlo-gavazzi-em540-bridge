@@ -26,7 +26,7 @@ class Ts65aSlaveBridge(MeterDataListener):
         self.port: int = config.port
         self._slave_id: int = config.slave_id
         self._pdu_helper = PduHelper(logger, config.update_timeout)
-        logger.setLevel(config.logging)
+        logger.setLevel(config.log_level)
 
         # Smart Meter TS 65A-3
         datablock = ModbusSparseDataBlock({

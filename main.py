@@ -31,7 +31,7 @@ def parse_args():
 
 async def process_loop():
     conf = configparser.get_config()
-    pymodbus_apply_logging_config(conf.pymodbus.logging)
+    pymodbus_apply_logging_config(conf.pymodbus.log_level)
 
     # Create our master and slave instances
     em540_master = Em540Master(conf.em540_master)
@@ -81,5 +81,5 @@ if __name__ == '__main__':
     load_config(args.config)
 
     # set up logger with default level of DEBUG and log to console and time
-    logging.basicConfig(level=configparser.get_config().root.logging)
+    logging.basicConfig(level=configparser.get_config().root.log_level)
     asyncio.run(main())

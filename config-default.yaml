@@ -5,21 +5,21 @@ em540_master:
   update_interval: 0.1
   timeout: 0.15
   retries: 0
-  logging: INFO
+  log_level: INFO
 
 em540_slave:
   host: 0.0.0.0
   port: 5002
   slave_id: 1
   update_timeout: 0.5
-  logging: INFO
+  log_level: INFO
 
 ts65a_slave:
   host: 0.0.0.0
   port: 5003
   slave_id: 1
   update_timeout: 0.5
-  logging: INFO
+  log_level: INFO
 
 mqtt:
   enabled: true
@@ -28,10 +28,10 @@ mqtt:
   username: ""
   password: ""
   update_interval: 0.5
-  logging: INFO
+  log_level: INFO
 
 pymodbus:
-  logging: INFO
+  log_level: INFO
 
 root:
-    logging: INFO
+    log_level: INFO

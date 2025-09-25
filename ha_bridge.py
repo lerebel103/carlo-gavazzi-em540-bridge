@@ -34,7 +34,7 @@ class HABridge(MeterDataListener):
         self.connected = False
         self._update_interval = conf.update_interval
         self._last_update = 0
-        logger.setLevel(conf.logging)
+        logger.setLevel(conf.log_level)
 
         self.sensors = EnergyMeterSensor()
 

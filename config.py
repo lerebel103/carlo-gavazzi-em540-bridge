@@ -11,21 +11,21 @@ SCHEMA_CONFIG = {
         'timeout': And(Use(float), lambda n: 0 < n < 60),
         'retries': And(Use(int), lambda n: 0 <= n < 10),
         'update_interval': And(Use(float), lambda n: 0 < n < 10000),
-        'logging': And(Use(str), lambda n: n in ['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL']),
+        'log_level': And(Use(str), lambda n: n in ['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL']),
     },
     'em540_slave': {
         'host': str,
         'port': And(Use(int), lambda n: 0 < n < 65535),
         'slave_id': And(Use(int), lambda n: 0 < n < 256),
         'update_timeout': And(Use(float), lambda n: 0 < n < 60),
-        'logging': And(Use(str), lambda n: n in ['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL']),
+        'log_level': And(Use(str), lambda n: n in ['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL']),
     },
     'ts65a_slave': {
         'host': str,
         'port': And(Use(int), lambda n: 0 < n < 65535),
         'slave_id': And(Use(int), lambda n: 0 < n < 256),
         'update_timeout': And(Use(float), lambda n: 0 < n < 60),
-        'logging': And(Use(str), lambda n: n in ['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL']),
+        'log_level': And(Use(str), lambda n: n in ['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL']),
     },
     'mqtt': {
         'enabled': Use(bool),
@@ -34,13 +34,13 @@ SCHEMA_CONFIG = {
         'username': str,
         'password': str,
         'update_interval': And(Use(float), lambda n: 0 < n < 10000),
-        'logging': And(Use(str), lambda n: n in ['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL']),
+        'log_level': And(Use(str), lambda n: n in ['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL']),
     },
     'pymodbus': {
-        'logging': And(Use(str), lambda n: n in ['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL']),
+        'log_level': And(Use(str), lambda n: n in ['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL']),
     },
     'root': {
-        'logging': And(Use(str), lambda n: n in ['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL']),
+        'log_level': And(Use(str), lambda n: n in ['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL']),
     }
 }
 

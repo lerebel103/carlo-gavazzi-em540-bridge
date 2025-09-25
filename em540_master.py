@@ -25,7 +25,7 @@ class Em540Master:
         self.slave_id = config.slave_id
         self._first_read = True
         self._listeners: list[MeterDataListener] = []
-        logger.setLevel(config.logging)
+        logger.setLevel(config.log_level)
 
         # Create Modbus client
         self._client = AsyncModbusTcpClient(
