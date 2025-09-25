@@ -8,6 +8,7 @@ import time
 from paho.mqtt.enums import CallbackAPIVersion
 
 from em540_master import MeterDataListener
+from ha_sensors import EnergyMeterSensor
 from meter_data import MeterData
 
 FIRST_RECONNECT_DELAY = 1
@@ -15,7 +16,8 @@ RECONNECT_RATE = 2
 MAX_RECONNECT_COUNT = sys.maxsize
 MAX_RECONNECT_DELAY = 60
 
-logger = logging.getLogger('MqttBridge')
+logger = logging.getLogger('ha-bridge')
+
 
 class HABridge(MeterDataListener):
 
@@ -28,7 +30,11 @@ class HABridge(MeterDataListener):
         self.client.on_connect = HABridge.on_connect
         self.client.on_disconnect = HABridge.on_disconnect
         self.connected = False
+        self._update_interval = conf.update_interval
+        self._last_update = 0
         logger.setLevel(conf.logging)
+
+        self.sensors = EnergyMeterSensor()
 
     def connect(self):
         if len(self.host):
@@ -61,6 +67,9 @@ class HABridge(MeterDataListener):
         if rc == 0:
             print("Connected to MQTT Broker")
             userdata.connected = True
+
+            # Great advertise sensors
+            userdata.advertise()
         else:
             print("Failed to connect, return code %d\n", rc)
 
@@ -69,7 +78,29 @@ class HABridge(MeterDataListener):
             self.client.publish(topic, msg)
 
     async def new_data(self, data: MeterData):
-        pass
+        # Update sensor if enough time has passed
+        if data.timestamp - self._last_update > self._update_interval:
+            self._last_update = data.timestamp
+            self.sensors.update(data)
+
+            # Now publish all sensor data
+            topic, payload = self.sensors.mqtt_data()
+            try:
+               self.publish(topic, payload)
+            except Exception as err:
+                logger.error(f"Failed to publish sensor data on topic {topic}: {err}")
 
     async def read_failed(self):
         pass
+
+    def advertise(self):
+        payloads = self.sensors.advertise_data()
+        for payload in payloads:
+            topic, msg = payload
+            logger.info(f"Advertising sensor on topic {topic} with payload {msg}")
+
+            try:
+                self.publish(topic, msg)
+            except Exception as err:
+                logger.error(f"Failed to advertise sensor on topic {topic}: {err}")
+
