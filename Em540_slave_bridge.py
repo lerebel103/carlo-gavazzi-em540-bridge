@@ -19,11 +19,13 @@ logger = logging.getLogger('Em540Slave')
 
 
 class Em540Slave(MeterDataListener):
-    def __init__(self, host, port, bridge_timeout: float, frame: Em540Frame):
-        self.host = host
-        self.port = port
+    def __init__(self, config, frame: Em540Frame):
+        self.host = config.host
+        self.port = config.port
         self.last_pdu = None
-        self._pdu_helper = PduHelper(logger, bridge_timeout)
+        self._slave_id: int = config.slave_id
+        self._pdu_helper = PduHelper(logger, config.update_timeout)
+        logger.setLevel(config.logging)
 
         # Build a sparse datablock with the size of the frame registers
         values = {}

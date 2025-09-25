@@ -23,12 +23,12 @@ def _append_registers(registers, values):
 
 
 class Ts65aSlaveBridge(MeterDataListener):
-    def __init__(self, host, port, bridge_timeout: float):
-        self.host = host
-        self.port: int = port
-        self._slave_id: int = 0x01
-        self.bridge_timeout: float = bridge_timeout
-        self._pdu_helper = PduHelper(logger, bridge_timeout)
+    def __init__(self, config):
+        self.host = config.host
+        self.port: int = config.port
+        self._slave_id: int = config.slave_id
+        self._pdu_helper = PduHelper(logger, config.update_timeout)
+        logger.setLevel(config.logging)
 
         # Smart Meter TS 65A-3
         datablock = ModbusSparseDataBlock({

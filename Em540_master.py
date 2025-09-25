@@ -18,17 +18,19 @@ class MeterDataListener:
 
 
 class Em540Master:
-    def __init__(self, host, port, slave_id=1):
-        self.host = host
-        self.port = port
+    def __init__(self, config):
+        self.host = config.host
+        self.port = config.port
         self._data = MeterData()
-        self.slave_id = slave_id
+        self.slave_id = config.slave_id
         self._first_read = True
         self._listeners: list[MeterDataListener] = []
+        logger.setLevel(config.logging)
 
         # Create Modbus client
         self._client = AsyncModbusTcpClient(
-            host=self.host, port=self.port, framer=FramerType.RTU, timeout=0.2, retries=1)
+            host=self.host, port=self.port, framer=FramerType.RTU,
+            timeout=config.timeout, retries=config.retries)
 
     async def connect(self):
         # Simulate connecting to the EM540 device

@@ -1,0 +1,36 @@
+em540_master:
+  host: 192.168.102.240
+  port: 8899
+  slave_id: 1
+  update_interval: 0.1
+  timeout: 0.15
+  retries: 0
+  logging: INFO
+
+em540_slave:
+  host: 0.0.0.0
+  port: 5002
+  slave_id: 1
+  update_timeout: 0.5
+  logging: INFO
+
+ts65a_slave:
+  host: 0.0.0.0
+  port: 5003
+  slave_id: 1
+  update_timeout: 0.5
+  logging: INFO
+
+mqtt:
+  host: localhost
+  port: 1883
+  username: ""
+  password: ""
+  update_interval: 0.5
+  logging: INFO
+
+pymodbus:
+  logging: INFO
+
+root:
+    logging: INFO
