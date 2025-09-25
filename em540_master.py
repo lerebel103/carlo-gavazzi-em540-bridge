@@ -4,7 +4,7 @@ from pymodbus import FramerType
 from pymodbus.client import AsyncModbusTcpClient
 from pymodbus import ModbusException
 
-from MeterData import MeterData
+from meter_data import MeterData
 
 logger = logging.getLogger('Em540Master')
 

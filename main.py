@@ -6,13 +6,13 @@ import asyncio
 from pyconfigparser import configparser
 from pymodbus import pymodbus_apply_logging_config
 
-from Config import load_config
-from Em540_master import Em540Master
+from config import load_config
+from em540_master import Em540Master
 import logging
 
-from Em540_slave_bridge import Em540Slave
-from MqttComms import MqttBridge
-from TS65A_slave_bridge import Ts65aSlaveBridge
+from em540_slave_bridge import Em540Slave
+from ha_bridge import HABridge
+from ts65A_slave_bridge import Ts65aSlaveBridge
 
 logger = logging.getLogger()
 
@@ -42,7 +42,7 @@ async def process_loop():
     em540_master.add_listener(em540_slave)
     em540_master.add_listener(ts65a_slave)
     if conf.mqtt.enabled:
-        mqtt_bridge = MqttBridge(conf.mqtt)
+        mqtt_bridge = HABridge(conf.mqtt)
         mqtt_bridge.connect()
         em540_master.add_listener(mqtt_bridge)
 

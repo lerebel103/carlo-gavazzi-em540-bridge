@@ -1,15 +1,13 @@
 import logging
-import threading
 
 from pymodbus import FramerType
 from pymodbus.client import ModbusTcpClient
 from pymodbus.datastore import ModbusSparseDataBlock, ModbusDeviceContext, ModbusServerContext
-from pymodbus.pdu import ModbusPDU
 from pymodbus.server import ModbusTcpServer
 
-import MeterData
-from Em540_master import MeterDataListener
-from PduHelper import PduHelper
+import meter_data
+from em540_master import MeterDataListener
+from pdu_helper import PduHelper
 
 logger = logging.getLogger('TS65A')
 
@@ -121,7 +119,7 @@ class Ts65aSlaveBridge(MeterDataListener):
     def stop(self):
         pass
 
-    async def new_data(self, data: MeterData):
+    async def new_data(self, data: meter_data.MeterData):
         self._pdu_helper.data_received(data.timestamp)
 
         address = 40072

@@ -7,8 +7,8 @@ import time
 
 from paho.mqtt.enums import CallbackAPIVersion
 
-from Em540_master import MeterDataListener
-from MeterData import MeterData
+from em540_master import MeterDataListener
+from meter_data import MeterData
 
 FIRST_RECONNECT_DELAY = 1
 RECONNECT_RATE = 2
@@ -17,7 +17,7 @@ MAX_RECONNECT_DELAY = 60
 
 logger = logging.getLogger('MqttBridge')
 
-class MqttBridge(MeterDataListener):
+class HABridge(MeterDataListener):
 
     def __init__(self, conf):
         client_id = f'publish-{random.randint(0, 1000)}'
@@ -25,8 +25,8 @@ class MqttBridge(MeterDataListener):
         self.port = conf.port
         self.client = mqtt_client.Client(CallbackAPIVersion.VERSION2, client_id, userdata=self)
         self.client.username_pw_set(conf.username, conf.password)
-        self.client.on_connect = MqttBridge.on_connect
-        self.client.on_disconnect = MqttBridge.on_disconnect
+        self.client.on_connect = HABridge.on_connect
+        self.client.on_disconnect = HABridge.on_disconnect
         self.connected = False
         logger.setLevel(conf.logging)
 
