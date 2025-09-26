@@ -1,17 +1,15 @@
 import logging
-import threading
 
 from pymodbus import FramerType
 from pymodbus.client import ModbusTcpClient
 from pymodbus.datastore import ModbusSparseDataBlock, ModbusDeviceContext, ModbusServerContext
-from pymodbus.pdu import ModbusPDU
 from pymodbus.server import ModbusTcpServer
 
-import MeterData
-from Em540_master import MeterDataListener
-from PduHelper import PduHelper
+import meter_data
+from em540_master import MeterDataListener
+from pdu_helper import PduHelper
 
-logger = logging.getLogger('TS65A')
+logger = logging.getLogger('ts65a-slave')
 
 
 def _append_registers(registers, values):
@@ -23,12 +21,12 @@ def _append_registers(registers, values):
 
 
 class Ts65aSlaveBridge(MeterDataListener):
-    def __init__(self, host, port, bridge_timeout: float):
-        self.host = host
-        self.port: int = port
-        self._slave_id: int = 0x01
-        self.bridge_timeout: float = bridge_timeout
-        self._pdu_helper = PduHelper(logger, bridge_timeout)
+    def __init__(self, config):
+        self.host = config.host
+        self.port: int = config.port
+        self._slave_id: int = config.slave_id
+        self._pdu_helper = PduHelper(logger, config.update_timeout)
+        logger.setLevel(config.log_level)
 
         # Smart Meter TS 65A-3
         datablock = ModbusSparseDataBlock({
@@ -121,7 +119,7 @@ class Ts65aSlaveBridge(MeterDataListener):
     def stop(self):
         pass
 
-    async def new_data(self, data: MeterData):
+    async def new_data(self, data: meter_data.MeterData):
         self._pdu_helper.data_received(data.timestamp)
 
         address = 40072

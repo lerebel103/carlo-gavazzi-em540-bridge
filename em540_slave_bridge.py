@@ -8,38 +8,33 @@ from pymodbus.datastore import (
 )
 from pymodbus.server import ModbusTcpServer
 
-from Em540Data import Em540Frame
-from Em540_master import MeterDataListener
-from MeterData import MeterData
-from PduHelper import PduHelper
+from em540_data import Em540Frame
+from em540_master import MeterDataListener
+from meter_data import MeterData
+from pdu_helper import PduHelper
 
 REG_OFFSET = 1  # Modbus addresses are 1-based, pymodbus uses 0-based
 
-logger = logging.getLogger('Em540Slave')
+logger = logging.getLogger('em540-slave')
 
 
 class Em540Slave(MeterDataListener):
-    def __init__(self, host, port, bridge_timeout: float, frame: Em540Frame):
-        self.host = host
-        self.port = port
+    def __init__(self, config, frame: Em540Frame):
+        self.host = config.host
+        self.port = config.port
         self.last_pdu = None
-        self._pdu_helper = PduHelper(logger, bridge_timeout)
+        self._slave_id: int = config.slave_id
+        self._pdu_helper = PduHelper(logger, config.update_timeout)
+        logger.setLevel(config.log_level)
 
         # Build a sparse datablock with the size of the frame registers
         values = {}
         logger.info('Building Modbus sparse datablock...')
 
-        for addr in frame.static_reg_map:
-            logger.info("Adding static reg " + hex(addr))
-            values[addr + REG_OFFSET] = frame.static_reg_map[addr].values
-
-        for addr in frame.dynamic_reg_map:
-            logger.info("Adding dynamic reg " + hex(addr))
-            values[addr + REG_OFFSET] = frame.dynamic_reg_map[addr].values
-
-        for addr in frame.remapped_reg_map:
-            logger.info("Adding remapped reg " + hex(addr))
-            values[addr + REG_OFFSET] = frame.remapped_reg_map[addr].values
+        for addr in frame.all_reg_map:
+            src_values = frame.all_reg_map[addr].values
+            logger.info(f"Adding reg [{hex(addr)} - {hex(addr + len(src_values))}] to datablock")
+            values[addr + REG_OFFSET] = src_values
 
         self.datablock = ModbusSparseDataBlock.create(values)
 
@@ -69,17 +64,9 @@ class Em540Slave(MeterDataListener):
         self._pdu_helper.data_received(data.timestamp)
         frame = data.frame
 
-        # Update dynamic registers in the datablock
-        for addr in frame.dynamic_reg_map:
-            self.datablock.setValues(addr + REG_OFFSET, frame.dynamic_reg_map[addr].values)
-
-        # Update static registers in the datablock (in case they changed)
-        for addr in frame.static_reg_map:
-            self.datablock.setValues(addr + REG_OFFSET, frame.static_reg_map[addr].values)
-
-        # Update remapped values
-        for addr in frame.remapped_reg_map:
-            self.datablock.setValues(addr + REG_OFFSET, frame.remapped_reg_map[addr].values)
+        # Update datablock with all registers
+        for addr in frame.all_reg_map:
+            self.datablock.setValues(addr + REG_OFFSET, frame.all_reg_map[addr].values)
 
     async def read_failed(self):
         pass

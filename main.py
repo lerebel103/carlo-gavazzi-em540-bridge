@@ -3,48 +3,48 @@
 import argparse
 import asyncio
 
+from pyconfigparser import configparser
 from pymodbus import pymodbus_apply_logging_config
 
-from Em540_master import Em540Master
+from config import load_config
+from em540_master import Em540Master
 import logging
 
-from Em540_slave_bridge import Em540Slave
-from TS65A_slave_bridge import Ts65aSlaveBridge
+from em540_slave_bridge import Em540Slave
+from ha_bridge import HABridge
+from ts65A_slave_bridge import Ts65aSlaveBridge
 
 logger = logging.getLogger()
-
-read_interval = 0.1  # seconds
-bridge_timeout = 1  # seconds
 
 
 def parse_args():
     parser = argparse.ArgumentParser(description='EM540 Modbus bridge')
 
-    parser.add_argument('--source-host', type=str, default='192.168.102.240',
-                        help='Default EM540 modbus host to bind to')
-    parser.add_argument('--source-port', type=int, default=8899,
-                        help='Default modbus EM540 port to bind to')
-    parser.add_argument('--target-host', type=str, default='0.0.0.0',
-                        help='Host on which a TS-65A is emulated')
-    parser.add_argument('--em540-port', type=int, default=5002,
-                        help='Port on which a EM540 is bridged')
-    parser.add_argument('--ts65a-port', type=int, default=5003,
-                        help='Port on which a TS-65-A is bridged')
+    parser.add_argument(
+        '--config',
+        type=str,
+        default='config/config.yaml',
+        help='Path to configuration file')
 
     return parser.parse_args()
 
 
-async def process_loop(args):
-    pymodbus_apply_logging_config("INFO")
+async def process_loop():
+    conf = configparser.get_config()
+    pymodbus_apply_logging_config(conf.pymodbus.log_level)
 
     # Create our master and slave instances
-    em540_master = Em540Master(args.source_host, args.source_port)
-    em540_slave = Em540Slave(args.target_host, args.em540_port, bridge_timeout, em540_master.data.frame)
-    ts65a_slave = Ts65aSlaveBridge(args.target_host, args.ts65a_port, bridge_timeout)
+    em540_master = Em540Master(conf.em540_master)
+    em540_slave = Em540Slave(conf.em540_slave, em540_master.data.frame)
+    ts65a_slave = Ts65aSlaveBridge(conf.ts65a_slave)
 
     # register listeners on master to receive data updates
     em540_master.add_listener(em540_slave)
     em540_master.add_listener(ts65a_slave)
+    if conf.mqtt.enabled:
+        mqtt_bridge = HABridge(conf.mqtt)
+        mqtt_bridge.connect()
+        em540_master.add_listener(mqtt_bridge)
 
     # Start all
     await em540_slave.start()
@@ -52,6 +52,7 @@ async def process_loop(args):
 
     from datetime import datetime
     timeline = datetime.now().timestamp()
+    read_interval = conf.em540_master.update_interval
     while True:
         # Ensure em540 client is connected
         if not em540_master.connected:
@@ -70,14 +71,15 @@ async def process_loop(args):
             timeline = datetime.now().timestamp()
 
 
-async def main(args):
-    logger.info("Starting EM540 to Fronius TS-65A converter")
-    await process_loop(args)
+async def main():
+    logger.info("Starting EM540 Energy Meter Bridge")
+    await process_loop()
 
 
 if __name__ == '__main__':
     args = parse_args()
+    load_config(args.config)
 
     # set up logger with default level of DEBUG and log to console and time
-    logging.basicConfig(level=logging.INFO)
-    asyncio.run(main(args))
+    logging.basicConfig(level=configparser.get_config().root.log_level)
+    asyncio.run(main())

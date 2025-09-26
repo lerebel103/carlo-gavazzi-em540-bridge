@@ -4,7 +4,7 @@ logger = logging.getLogger()
 
 ZERO_FILL = -1
 
-reg_map = [
+register_remap = [
     # V L1 - N - Value weight: Volt*10
     (0x0, 0x0120), (0x1, 0x0121),
     # V L2 - N - Value weight: Volt*10
@@ -150,9 +150,11 @@ class RegisterDefinition:
     @values.setter
     def values(self, new_values: list[int]) -> None:
         if len(new_values) == len(self._values):
-            self._values = new_values.copy()
+            # Copy each value to avoid reference issues
+            for i in range(len(self._values)):
+                self._values[i] = new_values[i]
         else:
-            raise ValueError(f"Expected {len(self._values)} values, got {len(new_values)}")
+            raise ValueError(f"Expected length of {len(self._values)} values, got {len(new_values)}")
 
 
 class Em540Frame:
@@ -206,13 +208,22 @@ class Em540Frame:
         # Define registers that are re-mapped in different ranges, these will be populated manually
         # by copying the values from the dynamic registers above
         self.remapped_reg_map = {}
-        for item in reg_map:
-            source_addr = item[0]
+        for item in register_remap:
             target_addr = item[1]
             self.remapped_reg_map[target_addr] = RegisterDefinition(f"Reserved {hex(target_addr)}", [0])
 
+        # Now aggregate all registers in a single map for easy access, and check that there are no duplicates
+        self.all_reg_map = {}
+        for reg_map in (self.static_reg_map, self.dynamic_reg_map, self.remapped_reg_map):
+            for addr in reg_map:
+                if addr in self.all_reg_map:
+                    raise IndexError(f"Duplicate register address {hex(addr)} found in reg maps")
+                elif addr == ZERO_FILL:
+                    continue
+                self.all_reg_map[addr] = reg_map[addr]
+
     def remap_registers(self):
-        for item in reg_map:
+        for item in register_remap:
             source_addr = item[0]
             target_addr = item[1]
 

@@ -2,7 +2,7 @@ from datetime import datetime
 
 from pymodbus.client import ModbusTcpClient
 
-from Em540Data import Em540Frame
+from em540_data import Em540Frame
 
 
 class SystemData:
