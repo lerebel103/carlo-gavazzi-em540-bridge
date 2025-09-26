@@ -2,8 +2,9 @@
 
 ## Overview
 
-This is a bridge application that can proxy a single Carlo Gavazzi EM540 Energy Meter to enable multiple clients to 
-independently access real-time data. This bridge is ideal for integrating the EM540 meter into home automation systems, 
+This bridge application allows multiple clients to independently access real-time data from a single Carlo Gavazzi EM540 Energy Meter.
+
+This bridge is ideal for integrating the EM540 meter into home automation systems, 
 Victron GX devices, Fronius inverters, and other energy management solutions—eliminating the need for each system to 
 have its own dedicated meter.
 
