@@ -2,9 +2,10 @@
 
 ## Overview
 
-EM540 MODBUS Bridge is a proxy application that enables multiple clients to access real-time data from a single EM540 smart meter. 
-This bridge is ideal for integrating the EM540 meter into home automation systems, Victron GX devices, Fronius inverters, 
-and other energy management solutions—eliminating the need for each system to have its own dedicated meter.
+This is a bridge application that can proxy a single Carlo Gavazzi EM540 Energy Meter to enable multiple clients to 
+independently access real-time data. This bridge is ideal for integrating the EM540 meter into home automation systems, 
+Victron GX devices, Fronius inverters, and other energy management solutions—eliminating the need for each system to 
+have its own dedicated meter.
 
 The bridge establishes a single high-speed connection to the EM540 meter, reads all relevant registers at a fast 
 polling interval (100ms), and efficiently re-serves this data to multiple consumers in various formats:
