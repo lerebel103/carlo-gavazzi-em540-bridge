@@ -90,7 +90,7 @@ class EnergyMeterSensor:
 
         self.apparent_power_sensors = [
             Sensor('Apparent Power', 'VA', 'apparent_power', 'measurement', self.state_topic),
-            Sensor('Apparent Power L1', 'VA', 'apparent_ower', 'measurement', self.state_topic),
+            Sensor('Apparent Power L1', 'VA', 'apparent_power', 'measurement', self.state_topic),
             Sensor('Apparent Power L2', 'VA', 'apparent_power', 'measurement', self.state_topic),
             Sensor('Apparent Power L3', 'VA', 'apparent_power', 'measurement', self.state_topic),
         ]
