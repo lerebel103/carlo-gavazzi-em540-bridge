@@ -9,7 +9,7 @@ import meter_data
 from em540_master import MeterDataListener
 from pdu_helper import PduHelper
 
-logger = logging.getLogger('TS65A')
+logger = logging.getLogger('ts65a-slave')
 
 
 def _append_registers(registers, values):
