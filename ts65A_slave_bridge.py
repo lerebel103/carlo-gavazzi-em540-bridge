@@ -100,14 +100,14 @@ class Ts65aSlaveBridge(MeterDataListener):
 
         self.datablock = datablock
 
-        slave_store = ModbusDeviceContext(
+        context = ModbusDeviceContext(
             di=datablock,
             co=datablock,
             hr=datablock,
             ir=datablock,
         )
 
-        self.context = ModbusServerContext(devices=slave_store, single=True)
+        self.context = ModbusServerContext({self._slave_id: context}, single=False)
         self._server = ModbusTcpServer(framer=FramerType.SOCKET,
                                        context=self.context,
                                        address=(self.host, self.port),

@@ -212,16 +212,6 @@ class Em540Frame:
             target_addr = item[1]
             self.remapped_reg_map[target_addr] = RegisterDefinition(f"Reserved {hex(target_addr)}", [0])
 
-        # Now aggregate all registers in a single map for easy access, and check that there are no duplicates
-        self.all_reg_map = {}
-        for reg_map in (self.static_reg_map, self.dynamic_reg_map, self.remapped_reg_map):
-            for addr in reg_map:
-                if addr in self.all_reg_map:
-                    raise IndexError(f"Duplicate register address {hex(addr)} found in reg maps")
-                elif addr == ZERO_FILL:
-                    continue
-                self.all_reg_map[addr] = reg_map[addr]
-
     def remap_registers(self):
         for item in register_remap:
             source_addr = item[0]

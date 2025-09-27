@@ -9,7 +9,8 @@ em540_master:
 
 em540_slave:
   host: 0.0.0.0
-  port: 5002
+  rtu_port: 5002
+  tcp_port: 5001
   slave_id: 1
   update_timeout: 0.5
   log_level: INFO

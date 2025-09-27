@@ -1,8 +1,11 @@
+import asyncio
 import logging
+import sys
 
 from pymodbus import FramerType
 from pymodbus.client import AsyncModbusTcpClient
 from pymodbus import ModbusException
+from pymodbus.exceptions import ModbusIOException
 
 from meter_data import MeterData
 
@@ -110,16 +113,24 @@ class Em540Master:
                 if result.isError():
                     logger.error(f"Error reading register {hex(reg_addr)}, count={num_registers}")
                     return False
+
                 # Check if we received the expected number of registers
+                # Force quit to be safe, as it seems at that stage the client is in a bad state and further reads will fail
+                # with out-of-order responses. Resetting the client could be better, but for now just exit.
                 if len(result.registers) != num_registers:
-                    logger.error(
+                    logger.fatal(
                         f"Expected {num_registers} registers but got {len(result.registers)} for address {hex(reg_addr)}")
-                    return False
+                    sys.exit(1)
+
+                self._bad_read_count = 0
 
                 # Store the read values
                 reg_map[reg_addr].values = result.registers
-        except ModbusException:
-            logger.error("Could not read dynamic registers")
+        except ModbusIOException as ex:
+            logger.error("Modbus IO error reading registers from EM540: %s", ex)
+            return False
+        except ModbusException as ex:
+            logger.error("Could not read dynamic registers from EM540: %s", ex)
             self._client.close()
             return False
 

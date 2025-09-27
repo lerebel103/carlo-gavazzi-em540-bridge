@@ -1,6 +1,8 @@
 import logging
 from datetime import datetime
 
+from pymodbus import ExceptionResponse
+from pymodbus.constants import ExcCodes
 from pymodbus.pdu import ModbusPDU
 
 
@@ -17,7 +19,12 @@ class PduHelper:
         now = datetime.now().timestamp()
         if self._last_rx_timestamp is None or (now - self._last_rx_timestamp)  > self.bridge_timeout:
             self.logger.warning("Dropping request since no data received from master within timeout period")
-            return ModbusPDU()
+
+            if flag:
+                # Only modify responses to say we are busy
+                # Modbus exception code 6 = Slave Device Busy
+                return ExceptionResponse(pdu.function_code,
+                                         exception_code=ExcCodes.DEVICE_BUSY, device_id=pdu.dev_id, transaction=pdu.transaction_id)
 
         # Log some exceptions so we can debug any issues with register access not accounted for
         if pdu.exception_code != 0:

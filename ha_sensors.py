@@ -75,24 +75,24 @@ class EnergyMeterSensor:
         ]
 
         self.power_sensors = [
-            Sensor('Power', 'W', 'power', 'measurement', self.state_topic),
-            Sensor('Power L1', 'W', 'power', 'measurement', self.state_topic),
-            Sensor('Power L2', 'W', 'power', 'measurement', self.state_topic),
-            Sensor('Power L3', 'W', 'power', 'measurement', self.state_topic),
+            Sensor('Power', 'W', 'power', 'measurement', self.state_topic, precision=0),
+            Sensor('Power L1', 'W', 'power', 'measurement', self.state_topic, precision=0),
+            Sensor('Power L2', 'W', 'power', 'measurement', self.state_topic, precision=0),
+            Sensor('Power L3', 'W', 'power', 'measurement', self.state_topic, precision=0),
         ]
 
         self.reactive_power_sensors = [
-            Sensor('Reactive Power', 'var', 'reactive_power', 'measurement', self.state_topic),
-            Sensor('Reactive Power L1', 'var', 'reactive_power', 'measurement', self.state_topic),
-            Sensor('Reactive Power L2', 'var', 'reactive_power', 'measurement', self.state_topic),
-            Sensor('Reactive Power L3', 'var', 'reactive_power', 'measurement', self.state_topic),
+            Sensor('Reactive Power', 'var', 'reactive_power', 'measurement', self.state_topic, precision=0),
+            Sensor('Reactive Power L1', 'var', 'reactive_power', 'measurement', self.state_topic, precision=0),
+            Sensor('Reactive Power L2', 'var', 'reactive_power', 'measurement', self.state_topic, precision=0),
+            Sensor('Reactive Power L3', 'var', 'reactive_power', 'measurement', self.state_topic, precision=0),
         ]
 
         self.apparent_power_sensors = [
-            Sensor('Apparent Power', 'VA', 'apparent_power', 'measurement', self.state_topic),
-            Sensor('Apparent Power L1', 'VA', 'apparent_power', 'measurement', self.state_topic),
-            Sensor('Apparent Power L2', 'VA', 'apparent_power', 'measurement', self.state_topic),
-            Sensor('Apparent Power L3', 'VA', 'apparent_power', 'measurement', self.state_topic),
+            Sensor('Apparent Power', 'VA', 'apparent_power', 'measurement', self.state_topic, precision=0),
+            Sensor('Apparent Power L1', 'VA', 'apparent_power', 'measurement', self.state_topic, precision=0),
+            Sensor('Apparent Power L2', 'VA', 'apparent_power', 'measurement', self.state_topic, precision=0),
+            Sensor('Apparent Power L3', 'VA', 'apparent_power', 'measurement', self.state_topic, precision=0),
         ]
 
         self.power_factor_sensors = [

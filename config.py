@@ -15,7 +15,8 @@ SCHEMA_CONFIG = {
     },
     'em540_slave': {
         'host': str,
-        'port': And(Use(int), lambda n: 0 < n < 65535),
+        'rtu_port': And(Use(int), lambda n: 0 < n < 65535),
+        'tcp_port': And(Use(int), lambda n: 0 < n < 65535),
         'slave_id': And(Use(int), lambda n: 0 < n < 256),
         'update_timeout': And(Use(float), lambda n: 0 < n < 60),
         'log_level': And(Use(str), lambda n: n in ['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL']),
