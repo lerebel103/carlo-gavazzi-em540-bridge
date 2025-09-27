@@ -26,8 +26,9 @@ class PduHelper:
                 return ExceptionResponse(pdu.function_code,
                                          exception_code=ExcCodes.DEVICE_BUSY, device_id=pdu.dev_id, transaction=pdu.transaction_id)
 
-        # Log some exceptions so we can debug any issues with register access not accounted for
-        if pdu.exception_code != 0:
+        # Log some exceptions so we can debug any issues with register access not accounted for...
+        # For whatever reason, Victron seems to be wanting slave_id 2, just mute this one
+        if pdu.exception_code != 0 and pdu.dev_id != 2:
             self.logger.error(pdu)
             self.logger.error(f"Prior PDU: {self.last_pdu}")
 
