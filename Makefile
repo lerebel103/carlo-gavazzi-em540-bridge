@@ -1,8 +1,11 @@
 
 build:
 	docker build -t lerebel103/em540-bridge:latest .
+	docker compose build
 
 run:
-	docker run -it --name em540-bridge \
-		--rm \
-		lerebel103/em540-bridge:latest
+	docker compose up --build
+
+run-service:
+	docker compose up -d --build
+
