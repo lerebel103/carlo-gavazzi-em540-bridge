@@ -44,7 +44,7 @@ class HABridge(MeterDataListener):
             self.client.loop_start()
 
     @staticmethod
-    def on_disconnect(client, userdata, rc, props):
+    def on_disconnect(client, userdata, flags, rc, props):
         userdata.connected = False
         print("Disconnected with result code: %s", rc)
         reconnect_count, reconnect_delay = 0, FIRST_RECONNECT_DELAY
