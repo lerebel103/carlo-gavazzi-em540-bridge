@@ -46,34 +46,34 @@ class HABridge(MeterDataListener):
     @staticmethod
     def on_disconnect(client, userdata, flags, rc, props):
         userdata.connected = False
-        print("Disconnected with result code: %s", rc)
+        logger.warning(f"Disconnected with result code: {rc}")
         reconnect_count, reconnect_delay = 0, FIRST_RECONNECT_DELAY
         while reconnect_count < MAX_RECONNECT_COUNT:
-            print("Reconnecting in %d seconds...", reconnect_delay)
+            logger.info(f"Reconnecting in {reconnect_delay} seconds...")
             time.sleep(reconnect_delay)
 
             try:
                 client.reconnect()
-                print("Reconnected successfully!")
+                logger.info("Reconnected successfully!")
                 return
             except Exception as err:
-                print("%s. Reconnect failed. Retrying...", err)
+                logger.info(f"{err}. Reconnect failed. Retrying...")
 
             reconnect_delay *= RECONNECT_RATE
             reconnect_delay = min(reconnect_delay, MAX_RECONNECT_DELAY)
             reconnect_count += 1
-        print("Reconnect failed after %s attempts. Exiting...", reconnect_count)
+        logger.info(f"Reconnect failed after {reconnect_count} attempts. Exiting...")
 
     @staticmethod
     def on_connect(client, userdata, flags, rc, props):
         if rc == 0:
-            print("Connected to MQTT Broker")
+            logger.info("Connected to MQTT Broker")
             userdata.connected = True
 
             # Great advertise sensors
             userdata.advertise()
         else:
-            print("Failed to connect, return code %d\n", rc)
+            logger.info("Failed to connect, return code %d\n", rc)
 
     def publish(self, topic, msg):
         if self.connected:
