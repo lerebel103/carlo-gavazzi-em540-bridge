@@ -75,9 +75,9 @@ class HABridge(MeterDataListener):
         else:
             logger.info("Failed to connect, return code %d\n", rc)
 
-    def publish(self, topic, msg):
+    def publish(self, topic, msg, retain=False):
         if self.connected:
-            self.client.publish(topic, msg)
+            self.client.publish(topic, msg, retain=retain)
 
     async def new_data(self, data: MeterData):
         # Update sensor if enough time has passed
@@ -102,7 +102,8 @@ class HABridge(MeterDataListener):
             logger.info(f"Advertising sensor on topic {topic} with payload {msg}")
 
             try:
-                self.publish(topic, msg)
+                # We want retained messages for discovery
+                self.publish(topic, msg, retain=True)
             except Exception as err:
                 logger.error(f"Failed to advertise sensor on topic {topic}: {err}")
 
