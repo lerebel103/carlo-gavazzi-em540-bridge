@@ -90,6 +90,7 @@ class Em540Slave(MeterDataListener):
             self._stats.rtu_client_count += 1
         else:
             self._stats.rtu_client_count -= 1
+        self._stats.changed()
 
     def _tcp_trace_connect(self, connect):
         logger.info(f"Client connection to TCP server: {connect}")
@@ -97,7 +98,6 @@ class Em540Slave(MeterDataListener):
             self._stats.tcp_client_count += 1
         else:
             self._stats.tcp_client_count -= 1
-
         self._stats.changed()
 
     def add_stats_listener(self, listener: Callable[['EM540SlaveStats'], None]):
