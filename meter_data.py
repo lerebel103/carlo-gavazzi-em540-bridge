@@ -188,4 +188,4 @@ class MeterData:
 
         # Parse other energies
         values = self.frame.dynamic_reg_map[0x0500].values
-        self.other_energies.parse(values[2:])
+        self.other_energies.parse(values)
