@@ -1,4 +1,5 @@
 import json
+import time
 
 from em540_slave_bridge import EM540SlaveStats
 from meter_data import MeterData
@@ -15,10 +16,13 @@ class HADiagnostics:
         self._last_update_timestamp = 0
         self._last_data_counter = 0
 
+        self._start_time = time.time()
         self._data_counter = 0
         self.state_topic = "lerebel/sensor/em540_energy_meter_bridge/state"
 
-        self._uptime = Sensor('Uptime', 's', 'duration', 'measurement', self.state_topic, precision=0, entity_category='diagnostic')
+        self._uptime = Sensor('Sys Uptime', 's', 'duration', 'measurement', self.state_topic, precision=0, entity_category='diagnostic')
+        self._bridge_uptime = Sensor('Bridge Uptime', 's', 'duration', 'measurement', self.state_topic, precision=0, entity_category='diagnostic')
+
         self.update_rate = Sensor('RS485 Master Read Rate', 'Hz', 'frequency', 'measurement', self.state_topic, precision=2, entity_category='diagnostic')
         self.read_failed_count = Sensor('RS485 Master Read Failures', None, None, None, self.state_topic, precision=0, entity_category='diagnostic')
 
@@ -47,6 +51,7 @@ class HADiagnostics:
     def advertise_data(self):
         sensors = [
             self._uptime,
+            self._bridge_uptime,
             self.update_rate,
             self.read_failed_count,
             self.em540_rtu_client_count,
@@ -62,6 +67,10 @@ class HADiagnostics:
         system_uptime_seconds = uptime.uptime()
         self._uptime.update_value(int(system_uptime_seconds))
 
+        # Get the bridge uptime in seconds
+        bridge_uptime_seconds = time.time() - self._start_time
+        self._bridge_uptime.update_value(int(bridge_uptime_seconds))
+
         # Update slave stats if available
         if self._em540_slave_stats is not None:
             self.em540_rtu_client_count.update_value(self._em540_slave_stats.rtu_client_count)
@@ -71,6 +80,7 @@ class HADiagnostics:
 
         sensors = [
             self._uptime,
+            self._bridge_uptime,
             self.update_rate,
             self.read_failed_count,
             self.em540_rtu_client_count,

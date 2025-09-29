@@ -50,15 +50,15 @@ class Em540Slave(MeterDataListener):
         logger.info('Building Modbus sparse datablock...')
 
         for addr in frame.static_reg_map:
-            logger.info("Adding static reg " + hex(addr))
+            logger.debug("Adding static reg " + hex(addr))
             values[addr + REG_OFFSET] = frame.static_reg_map[addr].values
 
         for addr in frame.dynamic_reg_map:
-            logger.info("Adding dynamic reg " + hex(addr))
+            logger.debug("Adding dynamic reg " + hex(addr))
             values[addr + REG_OFFSET] = frame.dynamic_reg_map[addr].values
 
         for addr in frame.remapped_reg_map:
-            logger.info("Adding remapped reg " + hex(addr))
+            logger.debug("Adding remapped reg " + hex(addr))
             values[addr + REG_OFFSET] = frame.remapped_reg_map[addr].values
 
         self.datablock = ModbusSparseDataBlock.create(values)
