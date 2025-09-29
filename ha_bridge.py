@@ -8,9 +8,11 @@ import time
 from paho.mqtt.enums import CallbackAPIVersion
 
 from em540_master import MeterDataListener
+from em540_slave_bridge import EM540SlaveStats
 from ha_diagnostics import HADiagnostics
 from ha_sensors import EnergyMeterSensor
 from meter_data import MeterData
+from ts65A_slave_bridge import Ts65aSlaveStats
 
 FIRST_RECONNECT_DELAY = 1
 RECONNECT_RATE = 2
@@ -35,8 +37,8 @@ class HABridge(MeterDataListener):
         self.connected = False
         self._update_interval = conf.update_interval
         self._last_update = 0
-        self._diagnostics = HADiagnostics()
         self.sensors = EnergyMeterSensor()
+        self._diagnostics = HADiagnostics()
 
         logger.setLevel(conf.log_level)
 
@@ -122,3 +124,9 @@ class HABridge(MeterDataListener):
             except Exception as err:
                 logger.error(f"Failed to advertise sensor on topic {topic}: {err}")
 
+
+    def set_ts65a_slave_stats(self, stats: Ts65aSlaveStats):
+        self._diagnostics.set_em540_slave_stats(stats)
+
+    def set_em540_slave_stats(self, stats: EM540SlaveStats):
+        self._diagnostics.set_em540_slave_stats(stats)

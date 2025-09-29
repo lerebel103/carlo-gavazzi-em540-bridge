@@ -17,6 +17,11 @@ REG_OFFSET = 1  # Modbus addresses are 1-based, pymodbus uses 0-based
 
 logger = logging.getLogger('em540-slave')
 
+class EM540SlaveStats:
+    def __init__(self):
+        self.rtu_client_count: int = 0
+        self.tcp_client_count: int = 0
+
 
 class Em540Slave(MeterDataListener):
     def __init__(self, config, frame: Em540Frame):
@@ -26,6 +31,7 @@ class Em540Slave(MeterDataListener):
         self.last_pdu = None
         self._slave_id: int = config.slave_id
         self._pdu_helper = PduHelper(logger, config.update_timeout)
+        self._stats = EM540SlaveStats()
         logger.setLevel(config.log_level)
 
         # Build a sparse datablock with the size of the frame registers
@@ -69,9 +75,21 @@ class Em540Slave(MeterDataListener):
 
     def _rtu_trace_connect(self, connect):
         logger.info(f"Client connection to RTU server: {connect}")
+        if connect:
+            self._stats.rtu_client_count += 1
+        else:
+            self._stats.rtu_client_count -= 1
 
     def _tcp_trace_connect(self, connect):
         logger.info(f"Client connection to TCP server: {connect}")
+        if connect:
+            self._stats.tcp_client_count += 1
+        else:
+            self._stats.tcp_client_count -= 1
+
+    @property
+    def stats(self) -> EM540SlaveStats:
+        return self._stats
 
     async def start(self):
         await self._rtu_server.serve_forever(background=True)

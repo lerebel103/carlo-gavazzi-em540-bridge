@@ -43,8 +43,10 @@ async def process_loop():
     em540_master.add_listener(ts65a_slave)
     if conf.mqtt.enabled:
         mqtt_bridge = HABridge(conf.mqtt)
-        mqtt_bridge.connect()
         em540_master.add_listener(mqtt_bridge)
+        mqtt_bridge.set_ts65a_slave_stats(ts65a_slave.stats)
+        mqtt_bridge.set_em540_slave_stats(em540_slave.stats)
+        mqtt_bridge.connect()
 
     # Start all
     await em540_slave.start()

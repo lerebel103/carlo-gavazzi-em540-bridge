@@ -20,6 +20,9 @@ def _append_registers(registers, values):
             ModbusTcpClient.convert_to_registers(value, ModbusTcpClient.DATATYPE.FLOAT32, "big")
         )
 
+class Ts65aSlaveStats:
+    def __init__(self):
+        self.client_count: int = 0
 
 class Ts65aSlaveBridge(MeterDataListener):
     def __init__(self, config):
@@ -27,6 +30,7 @@ class Ts65aSlaveBridge(MeterDataListener):
         self.port: int = config.port
         self._slave_id: int = config.slave_id
         self._pdu_helper = PduHelper(logger, config.update_timeout)
+        self._stats = Ts65aSlaveStats()
         logger.setLevel(config.log_level)
         
         self.meter_data = Ts65aMeterData(config.smoothing_num_points, config.grid_feed_in_hard_limit, logger)
@@ -120,7 +124,15 @@ class Ts65aSlaveBridge(MeterDataListener):
                                        trace_connect=self._trace_connect)
 
     def _trace_connect(self, connect):
-        logger.info(f"Client connection: {connect}")
+        logger.info(f"Client connection to TCP server: {connect}")
+        if connect:
+            self._stats.client_count += 1
+        else:
+            self._stats.client_count -= 1
+
+    @property
+    def stats(self) -> Ts65aSlaveStats:
+        return self._stats
 
     async def start(self):
         await self._server.serve_forever(background=True)

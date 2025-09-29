@@ -7,6 +7,9 @@ diag_interval = 5  # seconds
 
 class HADiagnostics:
     def __init__(self):
+        self._em540_slave_stats = None
+        self._ts65a_slave_stats = None
+
         self._last_update_timestamp = 0
         self._last_data_counter = 0
 
@@ -15,6 +18,10 @@ class HADiagnostics:
 
         self.update_rate = Sensor('RS485 Master Read Rate', 'Hz', 'frequency', 'measurement', self.state_topic, precision=2, entity_category='diagnostic')
         self.read_failed_count = Sensor('RS485 Master Read Failures', None, None, None, self.state_topic, precision=0, entity_category='diagnostic')
+
+        self.ts65a_tcp_client_count = Sensor('TS65A TCP Client Count', None, None, None, self.state_topic, precision=0, entity_category='diagnostic')
+        self.em540_rtu_client_count = Sensor('EM540 RTU Client Count', None, None, None, self.state_topic, precision=0, entity_category='diagnostic')
+        self.em540_tcp_client_count = Sensor('EM540 TCP Client Count', None, None, None, self.state_topic, precision=0, entity_category='diagnostic')
 
     def new_data(self, data: MeterData):
         # Keep track of how many updates we have received, so we can calculate an update rate
@@ -35,10 +42,33 @@ class HADiagnostics:
         self.read_failed_count.update_value(self.read_failed_count.value + 1)
 
     def advertise_data(self):
-        sensors = [self.update_rate, self.read_failed_count]
+        sensors = [
+            self.update_rate,
+            self.read_failed_count,
+            self.em540_rtu_client_count,
+            self.em540_tcp_client_count,
+            self.ts65a_tcp_client_count
+        ]
         return [sensor.discovery() for sensor in sensors]
 
     def mqtt_data(self):
-        sensors = [self.update_rate, self.read_failed_count]
+        # Update slave stats
+        self.em540_rtu_client_count.update_value(self._em540_slave_stats.rtu_client_count)
+        self.em540_tcp_client_count.update_value(self._em540_slave_stats.tcp_client_count)
+        self.ts65a_tcp_client_count.update_value(self._ts65a_slave_stats.tcp_client_count)
+
+        sensors = [
+            self.update_rate,
+            self.read_failed_count,
+            self.em540_rtu_client_count,
+            self.em540_tcp_client_count,
+            self.ts65a_tcp_client_count]
+
         payload = {sensor.safe_name: sensor.value for sensor in sensors}
         return self.state_topic, json.dumps(payload)
+
+    def set_em540_slave_stats(self, stats):
+        self._em540_slave_stats = stats
+
+    def set_ts_65a_slave_stats(self, stats):
+        self._ts65a_slave_stats = stats
