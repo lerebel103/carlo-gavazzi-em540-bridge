@@ -8,6 +8,7 @@ from pymodbus.server import ModbusTcpServer
 import meter_data
 from em540_master import MeterDataListener
 from pdu_helper import PduHelper
+from ts65a_data import Ts65aMeterData
 
 logger = logging.getLogger('ts65a-slave')
 
@@ -27,6 +28,8 @@ class Ts65aSlaveBridge(MeterDataListener):
         self._slave_id: int = config.slave_id
         self._pdu_helper = PduHelper(logger, config.update_timeout)
         logger.setLevel(config.log_level)
+        
+        self.meter_data = Ts65aMeterData(config.smoothing_num_points, config.grid_feed_in_hard_limit, logger)
 
         # Smart Meter TS 65A-3
         datablock = ModbusSparseDataBlock({
@@ -125,81 +128,75 @@ class Ts65aSlaveBridge(MeterDataListener):
         address = 40072
         registers = list()
 
-        # Current
+        # Run the data through our smoothing and grid feed-in limiter
+        self.meter_data.update(data)
+
+        # now update the registers in the Modbus datastore
         _append_registers(registers, [
-            data.system.An,
-            data.phases[0].current,
-            data.phases[1].current,
-            data.phases[2].current,
+            self.meter_data.current_an,
+            self.meter_data.current_a,
+            self.meter_data.current_b,
+            self.meter_data.current_c,
         ])
 
-        # Voltage - L-N
         _append_registers(registers, [
-            data.system.line_neutral_voltage,
-            data.phases[0].line_neutral_voltage,
-            data.phases[1].line_neutral_voltage,
-            data.phases[2].line_neutral_voltage,
+            self.meter_data.voltage_ln,
+            self.meter_data.voltage_ln_a,
+            self.meter_data.voltage_ln_b,
+            self.meter_data.voltage_ln_c,
         ])
 
-        # Voltage - L-L
         _append_registers(registers, [
-            data.system.line_line_voltage,
-            data.phases[0].line_line_voltage,
-            data.phases[1].line_line_voltage,
-            data.phases[2].line_line_voltage,
+            self.meter_data.voltage_ll,
+            self.meter_data.voltage_ll_a,
+            self.meter_data.voltage_ll_b,
+            self.meter_data.voltage_ll_c,
         ])
 
-        # Freguency
         _append_registers(registers, [
-            data.system.frequency,
+            self.meter_data.frequency,
         ])
 
-        # Power
         _append_registers(registers, [
-            data.system.power,
-            data.phases[0].power,
-            data.phases[1].power,
-            data.phases[2].power,
+            self.meter_data.power,
+            self.meter_data.power_a,
+            self.meter_data.power_b,
+            self.meter_data.power_c,
         ])
 
-        # Apparent apparent
         _append_registers(registers, [
-            data.system.apparent_power,
-            data.phases[0].apparent_power,
-            data.phases[1].apparent_power,
-            data.phases[2].apparent_power,
+            self.meter_data.apparent_power,
+            self.meter_data.apparent_power_a,
+            self.meter_data.apparent_power_b,
+            self.meter_data.apparent_power_c,
         ])
 
-        # Reactive power
         _append_registers(registers, [
-            data.system.reactive_power,
-            data.phases[0].reactive_power,
-            data.phases[1].reactive_power,
-            data.phases[2].reactive_power,
+            self.meter_data.reactive_power,
+            self.meter_data.reactive_power_a,
+            self.meter_data.reactive_power_b,
+            self.meter_data.reactive_power_c,
         ])
 
-        # Power factor
         _append_registers(registers, [
-            data.system.power_factor,
-            data.phases[0].power_factor,
-            data.phases[1].power_factor,
-            data.phases[2].power_factor,
+            self.meter_data.power_factor,
+            self.meter_data.power_factor_a,
+            self.meter_data.power_factor_b,
+            self.meter_data.power_factor_c,
         ])
 
-        # Total Watt Hours exported (Wh)
         _append_registers(registers, [
-            data.other_energies.kwh_neg_total,
-            0,  # phase A
-            0,  # phase B
-            0,  # phase C
+            self.meter_data.kwh_neg_total,
+            self.meter_data.kwh_neg_a,
+            self.meter_data.kwh_neg_b,
+            self.meter_data.kwh_neg_c,
         ])
 
-        # Total Watt Hours imported phase A (Wh)
         _append_registers(registers, [
-            data.other_energies.kwh_plus_total,
-            data.other_energies.kwh_plus_l1,
-            data.other_energies.kwh_plus_l2,
-            data.other_energies.kwh_plus_l3,
+            self.meter_data.kwh_plus_total,
+            self.meter_data.kwh_plus_l1,
+            self.meter_data.kwh_plus_l2,
+            self.meter_data.kwh_plus_l3,
         ])
 
         self.datablock.setValues(address, registers)

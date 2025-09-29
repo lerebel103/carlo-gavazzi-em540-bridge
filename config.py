@@ -26,6 +26,8 @@ SCHEMA_CONFIG = {
         'port': And(Use(int), lambda n: 0 < n < 65535),
         'slave_id': And(Use(int), lambda n: 0 < n < 256),
         'update_timeout': And(Use(float), lambda n: 0 < n < 60),
+        'grid_feed_in_hard_limit': And(Use(float), lambda n: n <= 0),
+        'smoothing_num_points': And(Use(int), lambda n: 1 <= n <= 20),
         'log_level': And(Use(str), lambda n: n in ['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL']),
     },
     'mqtt': {

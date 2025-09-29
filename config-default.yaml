@@ -20,6 +20,8 @@ ts65a_slave:
   port: 5003
   slave_id: 1
   update_timeout: 0.5
+  grid_feed_in_hard_limit: -5000
+  smoothing_num_points: 20
   log_level: INFO
 
 mqtt:

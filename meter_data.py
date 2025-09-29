@@ -16,7 +16,7 @@ class SystemData:
         self.frequency: float = 0.0
         self.run_hour_meter: float = 0.0
         self.run_hour_meter_neg: float = 0.0
-        self.An = 0
+        self.An: float = 0
 
     def parse(self, registers):
         # Pick from registers
