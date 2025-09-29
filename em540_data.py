@@ -98,44 +98,6 @@ register_remap = [
     # n.a.
     (0x4C, ZERO_FILL), (0x4D, ZERO_FILL),
 
-    # Kwh (-) Total - Value weight: kWh*10
-    (0x4E, 0x0116), (0x4F, 0x0117),
-    # Kvarh (-) Total - Value weight: kvarh*10
-    (0x50, 0x0118), (0x51, 0x0119),
-    # Kwh (-) PARTIAL - Value weight: kWh*10
-    (0x52, 0x015A), (0x53, 0x015B),
-    # Kvarh (-) PARTIAL - Value weight: kvarh*10
-    (0x54, 0x015C), (0x55, 0x015D),
-    # KVah Total - Value weight: kVAh*10
-    (0x56, 0x015E), (0x57, 0x015F),
-    # KVAh partial - Value weight: kVAh*10
-    (0x58, 0x0160), (0x59, 0x0161),
-
-    # Run hour meter, Value weight: hours*100
-    #(0x5C, 0x00FE), (0x5D, 0x00FF),
-    # Run hour meter KWh (-), Value weight: hours*100
-    #(0x5A, 0x00F6), (0x5B, 0x00F7),
-
-    # n.a.
-    #(0x5E, ZERO_FILL), (0x5F, ZERO_FILL),
-    # n.a.
-    #(0x60, ZERO_FILL), (0x61, ZERO_FILL),
-    # n.a.
-    #(0x62, ZERO_FILL), (0x63, ZERO_FILL),
-    # n.a.
-    #(0x64, ZERO_FILL), (0x65, ZERO_FILL),
-    # n.a.
-    #(0x66, ZERO_FILL), (0x67, ZERO_FILL),
-    # n.a.
-    #(0x68, ZERO_FILL), (0x69, ZERO_FILL),
-    # n.a.
-    #(0x6A, ZERO_FILL), (0x6B, ZERO_FILL),
-    # n.a.
-    #(0x6C, ZERO_FILL), (0x6D, ZERO_FILL),
-
-    # Run hour meter partial
-    #(0x6E, 0x00F8), (0x6F, 0x00F9),
-
 ]
 
 class RegisterDefinition:
@@ -200,9 +162,8 @@ class Em540Frame:
 
         # Define our dynamic registers that are read often
         self.dynamic_reg_map = {
-            0x0000: RegisterDefinition("Meter Data1", [0] * 0x5E),
-            #0x006E: RegisterDefinition("Meter Data2", [0] * (0xDA - 0x6E)),
-            0x04FE: RegisterDefinition("Meter Data3", [0] * (0x053E - 0x04FE + 2)),
+            0x0000: RegisterDefinition("Meter Data1", [0] * 0x52),
+            0x0500: RegisterDefinition("Meter Data3", [0] * (0x053E - 0x0500 + 2)),
         }
 
         # Define registers that are re-mapped in different ranges, these will be populated manually

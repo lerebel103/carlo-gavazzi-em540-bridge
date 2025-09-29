@@ -37,10 +37,6 @@ class SystemData:
                                                                    ModbusTcpClient.DATATYPE.INT16, "little") / 1000
         self.frequency = ModbusTcpClient.convert_from_registers(registers[0x033: 0x033 + 1],
                                                                 ModbusTcpClient.DATATYPE.INT16, "little") / 10
-        self.run_hour_meter_neg = ModbusTcpClient.convert_from_registers(registers[0x05C: 0x05C + 2],
-                                                                         ModbusTcpClient.DATATYPE.INT32, "little") / 100
-        self.run_hour_meter = ModbusTcpClient.convert_from_registers(registers[0x05A: 0x05A + 2],
-                                                                     ModbusTcpClient.DATATYPE.INT32, "little") / 100
 
         # print all above values
         # print(self)
@@ -53,9 +49,7 @@ class SystemData:
                f"apparent_power: {self.apparent_power}, " \
                f"reactive_power: {self.reactive_power}, " \
                f"pf: {self.power_factor}, " \
-               f"frequency: {self.frequency}, " \
-               f"meter_hours_neg: {self.run_hour_meter_neg}, " \
-               f"meter_hours: {self.run_hour_meter}"
+               f"frequency: {self.frequency}, "
 
 
 class OtherEnergies:
@@ -193,5 +187,5 @@ class MeterData:
         self.system.parse(values)
 
         # Parse other energies
-        values = self.frame.dynamic_reg_map[0x04FE].values
+        values = self.frame.dynamic_reg_map[0x0500].values
         self.other_energies.parse(values[2:])
