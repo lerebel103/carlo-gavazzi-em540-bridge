@@ -5,7 +5,7 @@ from meter_data import MeterData
 
 class Sensor:
     def __init__(self, name, unit, device_class, state_class, state_topic, precision=1, entity_category :str | None = None):
-        self.value: float = None
+        self.value: float = 0
         self.name = name
         self.state_topic = state_topic
         self.device_class = device_class

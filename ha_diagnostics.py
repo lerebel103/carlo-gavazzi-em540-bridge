@@ -33,7 +33,7 @@ class HADiagnostics:
             self._last_update_timestamp = data.timestamp
 
     def read_failed(self):
-        self.read_failed_count.update_value(self.update_rate.value + 1)
+        self.read_failed_count.update_value(self.read_failed_count.value + 1)
 
     def advertise_data(self):
         sensors = [self.update_rate, self.read_failed_count]
