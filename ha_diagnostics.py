@@ -18,6 +18,7 @@ class HADiagnostics:
         self._data_counter = 0
         self.state_topic = "lerebel/sensor/em540_energy_meter_bridge/state"
 
+        self._uptime = Sensor('Uptime', 's', 'duration', 'measurement', self.state_topic, precision=0, entity_category='diagnostic')
         self.update_rate = Sensor('RS485 Master Read Rate', 'Hz', 'frequency', 'measurement', self.state_topic, precision=2, entity_category='diagnostic')
         self.read_failed_count = Sensor('RS485 Master Read Failures', None, None, None, self.state_topic, precision=0, entity_category='diagnostic')
 
@@ -45,6 +46,7 @@ class HADiagnostics:
 
     def advertise_data(self):
         sensors = [
+            self._uptime,
             self.update_rate,
             self.read_failed_count,
             self.em540_rtu_client_count,
@@ -54,6 +56,12 @@ class HADiagnostics:
         return [sensor.discovery() for sensor in sensors]
 
     def mqtt_data(self):
+        import uptime
+
+        # Get the system uptime in seconds
+        system_uptime_seconds = uptime.uptime()
+        self._uptime.update_value(int(system_uptime_seconds))
+
         # Update slave stats if available
         if self._em540_slave_stats is not None:
             self.em540_rtu_client_count.update_value(self._em540_slave_stats.rtu_client_count)
@@ -62,6 +70,7 @@ class HADiagnostics:
             self.ts65a_tcp_client_count.update_value(self._ts65a_slave_stats.tcp_client_count)
 
         sensors = [
+            self._uptime,
             self.update_rate,
             self.read_failed_count,
             self.em540_rtu_client_count,

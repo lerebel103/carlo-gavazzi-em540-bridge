@@ -23,7 +23,7 @@ def _append_registers(registers, values):
 
 class Ts65aSlaveStats:
     def __init__(self):
-        self.client_count: int = 0
+        self.tcp_client_count: int = 0
         self._listeners: list[Callable[['Ts65aSlaveStats'], None]] = []
 
     def changed(self):
@@ -135,9 +135,9 @@ class Ts65aSlaveBridge(MeterDataListener):
     def _trace_connect(self, connect):
         logger.info(f"Client connection to TCP server: {connect}")
         if connect:
-            self._stats.client_count += 1
+            self._stats.tcp_client_count += 1
         else:
-            self._stats.client_count -= 1
+            self._stats.tcp_client_count -= 1
         self._stats.changed()
 
     def add_stats_listener(self, listener: Callable[['Ts65aSlaveStats'], None]):
