@@ -58,17 +58,25 @@ class Em540Slave(MeterDataListener):
         self._rtu_server = ModbusTcpServer(framer=FramerType.RTU,
                                        context=context,
                                        address=(self.host, self.rtu_port),
-                                       trace_pdu=self._pdu_helper.on_pdu)
+                                       trace_connect=self._rtu_trace_connect)
 
         # Modbus TCP server
         self._tcp_server = ModbusTcpServer(framer=FramerType.SOCKET,
                                        context=context,
                                        address=(self.host, self.tcp_port),
-                                       trace_pdu=self._pdu_helper.on_pdu)
+                                       trace_pdu=self._pdu_helper.on_pdu,
+                                       trace_connect=self._tcp_trace_connect)
+
+    def _rtu_trace_connect(self, connect):
+        logger.info(f"Client connection to RTU server: {connect}")
+
+    def _tcp_trace_connect(self, connect):
+        logger.info(f"Client connection to TCP server: {connect}")
 
     async def start(self):
         await self._rtu_server.serve_forever(background=True)
         await self._tcp_server.serve_forever(background=True)
+
 
     async def new_data(self, data: MeterData):
         """Handle new data from the master.

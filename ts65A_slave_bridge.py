@@ -33,6 +33,8 @@ class Ts65aSlaveBridge(MeterDataListener):
 
         # Smart Meter TS 65A-3
         datablock = ModbusSparseDataBlock({
+            769: [0],
+            1707: [0],
             40001: [21365, 28243],
             40003: [1],
             40004: [65],
@@ -114,7 +116,11 @@ class Ts65aSlaveBridge(MeterDataListener):
         self._server = ModbusTcpServer(framer=FramerType.SOCKET,
                                        context=self.context,
                                        address=(self.host, self.port),
-                                       trace_pdu=self._pdu_helper.on_pdu)
+                                       trace_pdu=self._pdu_helper.on_pdu,
+                                       trace_connect=self._trace_connect)
+
+    def _trace_connect(self, connect):
+        logger.info(f"Client connection: {connect}")
 
     async def start(self):
         await self._server.serve_forever(background=True)
