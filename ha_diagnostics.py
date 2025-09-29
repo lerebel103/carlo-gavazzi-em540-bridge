@@ -1,7 +1,9 @@
 import json
 
+from em540_slave_bridge import EM540SlaveStats
 from meter_data import MeterData
 from ha_sensors import Sensor
+from ts65a_slave_bridge import Ts65aSlaveStats
 
 diag_interval = 5  # seconds
 
@@ -54,13 +56,10 @@ class HADiagnostics:
     def mqtt_data(self):
         # Update slave stats if available
         if self._em540_slave_stats is not None:
-            if self.em540_rtu_client_count.value is None:
-                self.em540_rtu_client_count.update_value(self._em540_slave_stats.rtu_client_count)
-            if self.em540_tcp_client_count.value is None:
-                self.em540_tcp_client_count.update_value(self._em540_slave_stats.tcp_client_count)
+            self.em540_rtu_client_count.update_value(self._em540_slave_stats.rtu_client_count)
+            self.em540_tcp_client_count.update_value(self._em540_slave_stats.tcp_client_count)
         if self._ts65a_slave_stats is not None:
-            if self.ts65a_tcp_client_count.value is None:
-                self.ts65a_tcp_client_count.update_value(self._ts65a_slave_stats.tcp_client_count)
+            self.ts65a_tcp_client_count.update_value(self._ts65a_slave_stats.tcp_client_count)
 
         sensors = [
             self.update_rate,
@@ -72,8 +71,8 @@ class HADiagnostics:
         payload = {sensor.safe_name: sensor.value for sensor in sensors}
         return self.state_topic, json.dumps(payload)
 
-    def set_em540_slave_stats(self, stats):
+    def set_em540_slave_stats(self, stats: EM540SlaveStats):
         self._em540_slave_stats = stats
 
-    def set_ts_65a_slave_stats(self, stats):
+    def set_ts_65a_slave_stats(self, stats: Ts65aSlaveStats):
         self._ts65a_slave_stats = stats

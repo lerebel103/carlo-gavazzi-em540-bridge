@@ -12,7 +12,7 @@ import logging
 
 from em540_slave_bridge import Em540Slave
 from ha_bridge import HABridge
-from ts65A_slave_bridge import Ts65aSlaveBridge
+from ts65a_slave_bridge import Ts65aSlaveBridge
 
 logger = logging.getLogger()
 

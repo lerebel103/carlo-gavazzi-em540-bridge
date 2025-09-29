@@ -12,7 +12,7 @@ from em540_slave_bridge import EM540SlaveStats
 from ha_diagnostics import HADiagnostics
 from ha_sensors import EnergyMeterSensor
 from meter_data import MeterData
-from ts65A_slave_bridge import Ts65aSlaveStats
+from ts65a_slave_bridge import Ts65aSlaveStats
 
 FIRST_RECONNECT_DELAY = 1
 RECONNECT_RATE = 2
@@ -116,7 +116,7 @@ class HABridge(MeterDataListener):
 
         for payload in payloads:
             topic, msg = payload
-            logger.info(f"Advertising sensor on topic {topic} with payload {msg}")
+            logger.debug(f"Advertising sensor on topic {topic} with payload {msg}")
 
             try:
                 # We want retained messages for discovery

@@ -21,18 +21,16 @@ def _append_registers(registers, values):
             ModbusTcpClient.convert_to_registers(value, ModbusTcpClient.DATATYPE.FLOAT32, "big")
         )
 
-Ts65aSlaveStatsListener = Callable[['Ts65aSlaveStats'], None]
-
 class Ts65aSlaveStats:
     def __init__(self):
         self.client_count: int = 0
-        self._listeners = [Ts65aSlaveStatsListener]
+        self._listeners = []
 
     def changed(self):
         for listener in self._listeners:
             listener(self)
 
-    def add_listener(self, listener: Ts65aSlaveStatsListener):
+    def add_listener(self, listener):
         self._listeners.append(listener)
 
 class Ts65aSlaveBridge(MeterDataListener):
