@@ -122,7 +122,7 @@ class Ts65aSlaveBridge(MeterDataListener):
     def stop(self):
         pass
 
-    async def new_data(self, data: meter_data.MeterData):
+    def new_data(self, data: meter_data.MeterData):
         self._pdu_helper.data_received(data.timestamp)
 
         address = 40072
@@ -201,5 +201,5 @@ class Ts65aSlaveBridge(MeterDataListener):
 
         self.datablock.setValues(address, registers)
 
-    async def read_failed(self):
+    def read_failed(self):
         pass

@@ -63,7 +63,7 @@ async def process_loop():
 
         timeline += read_interval
         delta = timeline - datetime.now().timestamp()
-        print(delta)
+        # print(delta)
         if delta < - 0.2:
             logger.warning(f"Falling behind schedule by {delta:.2f} seconds")
         if delta > 0:

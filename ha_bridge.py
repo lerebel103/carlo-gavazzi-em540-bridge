@@ -79,7 +79,7 @@ class HABridge(MeterDataListener):
         if self.connected:
             self.client.publish(topic, msg, retain=retain)
 
-    async def new_data(self, data: MeterData):
+    def new_data(self, data: MeterData):
         # Update sensor if enough time has passed
         if data.timestamp - self._last_update > self._update_interval:
             self._last_update = data.timestamp
@@ -92,7 +92,7 @@ class HABridge(MeterDataListener):
             except Exception as err:
                 logger.error(f"Failed to publish sensor data on topic {topic}: {err}")
 
-    async def read_failed(self):
+    def read_failed(self):
         pass
 
     def advertise(self):

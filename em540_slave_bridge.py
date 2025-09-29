@@ -70,7 +70,7 @@ class Em540Slave(MeterDataListener):
         await self._rtu_server.serve_forever(background=True)
         await self._tcp_server.serve_forever(background=True)
 
-    async def new_data(self, data: MeterData):
+    def new_data(self, data: MeterData):
         """Handle new data from the master.
 
         We update the Modbus datastore with the new register values as is from the master.
@@ -92,5 +92,5 @@ class Em540Slave(MeterDataListener):
         for addr in frame.remapped_reg_map:
             self.datablock.setValues(addr + REG_OFFSET, frame.remapped_reg_map[addr].values)
 
-    async def read_failed(self):
+    def read_failed(self):
         pass
