@@ -24,13 +24,13 @@ class EM540SlaveStats:
         self.rtu_client_count: int = 0
         self.tcp_client_count: int = 0
 
-        self._listeners = []
+        self._listeners: list[Callable[['EM540SlaveStats'], None]] = []
 
-    def changed(self):
+    def changed(self) -> None:
         for listener in self._listeners:
             listener(self)
 
-    def add_listener(self, listener):
+    def add_listener(self, listener: Callable[['EM540SlaveStats'], None]) -> None:
         self._listeners.append(listener)
 
 
@@ -100,7 +100,7 @@ class Em540Slave(MeterDataListener):
 
         self._stats.changed()
 
-    def add_stats_listener(self, listener):
+    def add_stats_listener(self, listener: Callable[['EM540SlaveStats'], None]):
         self._stats.add_listener(listener)
 
     async def start(self):

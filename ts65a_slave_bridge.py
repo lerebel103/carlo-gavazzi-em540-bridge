@@ -24,13 +24,13 @@ def _append_registers(registers, values):
 class Ts65aSlaveStats:
     def __init__(self):
         self.client_count: int = 0
-        self._listeners = []
+        self._listeners: list[Callable[['Ts65aSlaveStats'], None]] = []
 
     def changed(self):
         for listener in self._listeners:
             listener(self)
 
-    def add_listener(self, listener):
+    def add_listener(self, listener: Callable[['Ts65aSlaveStats'], None]):
         self._listeners.append(listener)
 
 class Ts65aSlaveBridge(MeterDataListener):
@@ -140,7 +140,7 @@ class Ts65aSlaveBridge(MeterDataListener):
             self._stats.client_count -= 1
         self._stats.changed()
 
-    def add_stats_listener(self, listener: Ts65aSlaveStatsListener):
+    def add_stats_listener(self, listener: Callable[['Ts65aSlaveStats'], None]):
         self._stats.add_listener(listener)
 
     async def start(self):
