@@ -24,11 +24,11 @@ class HADiagnostics:
         self._bridge_uptime = Sensor('Bridge Uptime', 's', 'duration', 'measurement', self.state_topic, precision=0, entity_category='diagnostic')
 
         self.update_rate = Sensor('RS485 Master Read Rate', 'Hz', 'frequency', 'measurement', self.state_topic, precision=2, entity_category='diagnostic')
-        self.read_failed_count = Sensor('RS485 Master Read Failures', None, None, None, self.state_topic, precision=0, entity_category='diagnostic')
+        self.read_failed_count = Sensor('RS485 Master Read Failures', None, None, 'measurement', self.state_topic, precision=0, entity_category='diagnostic')
 
-        self.ts65a_tcp_client_count = Sensor('TS65A TCP Client Count', None, None, None, self.state_topic, precision=0, entity_category='diagnostic')
-        self.em540_rtu_client_count = Sensor('EM540 RTU Client Count', None, None, None, self.state_topic, precision=0, entity_category='diagnostic')
-        self.em540_tcp_client_count = Sensor('EM540 TCP Client Count', None, None, None, self.state_topic, precision=0, entity_category='diagnostic')
+        self.ts65a_tcp_client_count = Sensor('TS65A TCP Client Count', None, None, 'measurement', self.state_topic, precision=0, entity_category='diagnostic')
+        self.em540_rtu_client_count = Sensor('EM540 RTU Client Count', None, None, 'measurement', self.state_topic, precision=0, entity_category='diagnostic')
+        self.em540_tcp_client_count = Sensor('EM540 TCP Client Count', None, None, 'measurement', self.state_topic, precision=0, entity_category='diagnostic')
 
     def new_data(self, data: MeterData):
         # Keep track of how many updates we have received, so we can calculate an update rate
