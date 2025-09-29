@@ -15,10 +15,10 @@ logger = logging.getLogger('Em540Master')
 
 
 class MeterDataListener:
-    def new_data(self, data: MeterData):
+    async def new_data(self, data: MeterData):
         raise NotImplementedError()
 
-    def read_failed(self):
+    async def read_failed(self):
         raise NotImplementedError()
 
 
@@ -71,7 +71,7 @@ class Em540Master:
                 self._data.update_from_frame()
 
                 for listener in self._listeners:
-                    listener.new_data(self._data)
+                    asyncio.run(listener.new_data(self._data))
 
     @property
     def data(self) -> MeterData:
