@@ -4,7 +4,7 @@ from meter_data import MeterData
 
 
 class Sensor:
-    def __init__(self, name, unit, device_class, state_class, state_topic, precision=1):
+    def __init__(self, name, unit, device_class, state_class, state_topic, precision=1, entity_category :str | None = None):
         self.value: float = None
         self.name = name
         self.state_topic = state_topic
@@ -15,6 +15,7 @@ class Sensor:
         self.suggested_display_precision = precision
         self.unique_id = f'em540_bridge_{self.safe_name}'
         self.advertisement_topic = f"homeassistant/sensor/em540_bridge_{self.safe_name}/config"
+        self.entity_category = entity_category
         self.device = {
             "name": "EM540 Energy Meter Bridge",
             "identifiers": ["em540_bridge"],
@@ -33,10 +34,11 @@ class Sensor:
     def __repr__(self):
         return (f"Sensor(name={self.name}, state_topic={self.state_topic}, "
                 f"device_class={self.device_class}, value_template={self.value_template}, "
-                f"unique_id={self.unique_id}, device={self.device}, value={self.value})")
+                f"unique_id={self.unique_id}, device={self.device}, value={self.value}), "
+                f"entity_category={self.entity_category}")
 
     def discovery(self):
-        return self.advertisement_topic, json.dumps({
+        obj = {
             "name": self.name,
             "state_topic": self.state_topic,
             "device_class": self.device_class,
@@ -46,7 +48,19 @@ class Sensor:
             "suggested_display_precision": self.suggested_display_precision,
             "unique_id": self.unique_id,
             "device": self.device,
-        }, indent=2)
+            "entity_category": self.entity_category
+        }
+        # Remove device_class, state_class, unit_of_measurement if None
+        if self.device_class is None:
+            del obj["device_class"]
+        if self.state_class is None:
+            del obj["state_class"]
+        if self.unit_of_measurement is None:
+            del obj["unit_of_measurement"]
+        if self.entity_category is None:
+            del obj["entity_category"]
+
+        return self.advertisement_topic, json.dumps(obj, indent=2)
 
 
 class EnergyMeterSensor:

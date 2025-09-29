@@ -98,11 +98,20 @@ class HABridge(MeterDataListener):
             except Exception as err:
                 logger.error(f"Failed to publish sensor data on topic {topic}: {err}")
 
+            # Do the same with diagnostics
+            topic, payload = self._diagnostics.mqtt_data()
+            try:
+               self.publish(topic, payload)
+            except Exception as err:
+                logger.error(f"Failed to publish diagnostics data on topic {topic}: {err}")
+
     async def read_failed(self):
         self._diagnostics.read_failed()
 
     def advertise(self):
         payloads = self.sensors.advertise_data()
+        payloads.extend(self._diagnostics.advertise_data())
+
         for payload in payloads:
             topic, msg = payload
             logger.info(f"Advertising sensor on topic {topic} with payload {msg}")
