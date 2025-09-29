@@ -8,6 +8,7 @@ import time
 from paho.mqtt.enums import CallbackAPIVersion
 
 from em540_master import MeterDataListener
+from ha_diagnostics import HADiagnostics
 from ha_sensors import EnergyMeterSensor
 from meter_data import MeterData
 
@@ -34,9 +35,11 @@ class HABridge(MeterDataListener):
         self.connected = False
         self._update_interval = conf.update_interval
         self._last_update = 0
+        self._diagnostics = HADiagnostics()
+        self.sensors = EnergyMeterSensor()
+
         logger.setLevel(conf.log_level)
 
-        self.sensors = EnergyMeterSensor()
 
     def connect(self):
         if len(self.host):
@@ -80,9 +83,12 @@ class HABridge(MeterDataListener):
             self.client.publish(topic, msg, retain=retain)
 
     async def new_data(self, data: MeterData):
+        self._diagnostics.new_data(data)
+
         # Update sensor if enough time has passed
         if data.timestamp - self._last_update > self._update_interval:
             self._last_update = data.timestamp
+
             self.sensors.update(data)
 
             # Now publish all sensor data
@@ -93,7 +99,7 @@ class HABridge(MeterDataListener):
                 logger.error(f"Failed to publish sensor data on topic {topic}: {err}")
 
     async def read_failed(self):
-        pass
+        self._diagnostics.read_failed()
 
     def advertise(self):
         payloads = self.sensors.advertise_data()
