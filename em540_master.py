@@ -1,6 +1,8 @@
 import asyncio
 import logging
 import sys
+import threading
+from threading import Thread
 
 from pymodbus import FramerType
 from pymodbus.client import AsyncModbusTcpClient
@@ -35,6 +37,13 @@ class Em540Master:
             host=self.host, port=self.port, framer=FramerType.RTU,
             timeout=config.timeout, retries=config.retries)
 
+        # create notify mutex
+        self._condition = threading.Condition()
+
+        self._notify_thread = Thread(target=self._notify_loop, daemon=True)
+        self._notify_thread.start()
+
+
     async def connect(self):
         # Simulate connecting to the EM540 device
         logger.info(f"Connecting to EM540 at {self.host}:{self.port}...")
@@ -52,6 +61,17 @@ class Em540Master:
                     self._client.close()
         else:
             logger.info("Failed to connect to EM540.")
+
+    def _notify_loop(self):
+        while True:
+            with self._condition:
+                self._condition.wait()
+
+                # Now update the MeterData from the frame we have just received
+                self._data.update_from_frame()
+
+                for listener in self._listeners:
+                    asyncio.run(listener.new_data(self._data))
 
     @property
     def data(self) -> MeterData:
@@ -87,12 +107,13 @@ class Em540Master:
         # Read our dynamic registers
         is_ok = await self._read_registers(frame.dynamic_reg_map)
         if is_ok:
-            # Now update the MeterData from the frame we have just received
-            self._data.update_from_frame()
 
             # Now notify listeners
-            for listener in self._listeners:
-                await listener.new_data(self._data)
+            with self._condition:
+                self._condition.notify()
+
+            #for listener in self._listeners:
+            #    await listener.new_data(self._data)
         else:
             # Now notify listeners
             for listener in self._listeners:
