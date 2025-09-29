@@ -27,7 +27,6 @@ class HADiagnostics:
         if data.timestamp - self._last_update_timestamp > diag_interval:
             update_rate = (self._data_counter - self._last_data_counter) / (data.timestamp - self._last_update_timestamp)
             self.update_rate.update_value(update_rate)
-            print(update_rate)
 
             self._last_data_counter = self._data_counter
             self._last_update_timestamp = data.timestamp
