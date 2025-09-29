@@ -1,4 +1,5 @@
 import logging
+from typing import Callable
 
 from pymodbus import FramerType
 from pymodbus.client import ModbusTcpClient
@@ -20,9 +21,19 @@ def _append_registers(registers, values):
             ModbusTcpClient.convert_to_registers(value, ModbusTcpClient.DATATYPE.FLOAT32, "big")
         )
 
+Ts65aSlaveStatsListener = Callable[['Ts65aSlaveStats'], None]
+
 class Ts65aSlaveStats:
     def __init__(self):
         self.client_count: int = 0
+        self._listeners = [Ts65aSlaveStatsListener]
+
+    def changed(self):
+        for listener in self._listeners:
+            listener(self)
+
+    def add_listener(self, listener: Ts65aSlaveStatsListener):
+        self._listeners.append(listener)
 
 class Ts65aSlaveBridge(MeterDataListener):
     def __init__(self, config):
@@ -129,10 +140,10 @@ class Ts65aSlaveBridge(MeterDataListener):
             self._stats.client_count += 1
         else:
             self._stats.client_count -= 1
+        self._stats.changed()
 
-    @property
-    def stats(self) -> Ts65aSlaveStats:
-        return self._stats
+    def add_stats_listener(self, listener: Ts65aSlaveStatsListener):
+        self._stats.add_listener(listener)
 
     async def start(self):
         await self._server.serve_forever(background=True)

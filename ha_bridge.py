@@ -125,8 +125,8 @@ class HABridge(MeterDataListener):
                 logger.error(f"Failed to advertise sensor on topic {topic}: {err}")
 
 
-    def set_ts65a_slave_stats(self, stats: Ts65aSlaveStats):
+    def on_ts65a_slave_stats(self, stats: Ts65aSlaveStats):
         self._diagnostics.set_em540_slave_stats(stats)
 
-    def set_em540_slave_stats(self, stats: EM540SlaveStats):
+    def on_em540_slave_stats(self, stats: EM540SlaveStats):
         self._diagnostics.set_em540_slave_stats(stats)

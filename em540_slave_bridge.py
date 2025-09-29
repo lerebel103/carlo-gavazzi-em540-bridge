@@ -1,4 +1,5 @@
 import logging
+from typing import Callable
 
 from pymodbus import FramerType
 from pymodbus.datastore import (
@@ -17,10 +18,21 @@ REG_OFFSET = 1  # Modbus addresses are 1-based, pymodbus uses 0-based
 
 logger = logging.getLogger('em540-slave')
 
+EM540SlaveStatsListener = Callable[['EM540SlaveStats'], None]
+
 class EM540SlaveStats:
     def __init__(self):
         self.rtu_client_count: int = 0
         self.tcp_client_count: int = 0
+
+        self._listeners = [EM540SlaveStatsListener]
+
+    def changed(self):
+        for listener in self._listeners:
+            listener(self)
+
+    def add_listener(self, listener: EM540SlaveStatsListener):
+        self._listeners.append(listener)
 
 
 class Em540Slave(MeterDataListener):
@@ -87,9 +99,10 @@ class Em540Slave(MeterDataListener):
         else:
             self._stats.tcp_client_count -= 1
 
-    @property
-    def stats(self) -> EM540SlaveStats:
-        return self._stats
+        self._stats.changed()
+
+    def add_stats_listener(self, listener):
+        self._stats.add_listener(listener)
 
     async def start(self):
         await self._rtu_server.serve_forever(background=True)
