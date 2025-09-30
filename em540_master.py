@@ -2,6 +2,7 @@ import asyncio
 import logging
 import sys
 import threading
+from datetime import datetime
 from threading import Thread
 
 from pymodbus import FramerType
@@ -28,7 +29,7 @@ class Em540Master:
         self.port = config.port
         self._data = MeterData()
         self.slave_id = config.slave_id
-        self._first_read = True
+        self._read_counter = 0
         self._listeners: list[MeterDataListener] = []
         logger.setLevel(config.log_level)
 
@@ -51,12 +52,10 @@ class Em540Master:
         await self._client.connect()
         if self._client.connected:
             logger.info("Connected to EM540.")
-            if self._first_read:
+            if self._read_counter == 0:
                 logger.debug("Reading static registers from EM540...")
                 frame = self._data.frame
-                if await self._read_registers(frame.static_reg_map):
-                    self._first_read = False
-                else:
+                if not await self._read_registers(frame.static_reg_map):
                     logger.error("Failed to read device info from EM540.")
                     self._client.close()
         else:
@@ -107,13 +106,9 @@ class Em540Master:
         # Read our dynamic registers
         is_ok = await self._read_registers(frame.dynamic_reg_map)
         if is_ok:
-
             # Now notify listeners
             with self._condition:
                 self._condition.notify()
-
-            #for listener in self._listeners:
-            #    await listener.new_data(self._data)
         else:
             # Now notify listeners
             for listener in self._listeners:
@@ -123,11 +118,22 @@ class Em540Master:
 
     async def _read_registers(self, reg_map) -> bool:
         try:
+            self._read_counter += 1
             # Read dynamic registers
+            # Only read the primary register every cycle, the rest are read less often
+            # This is because we can't keep up a 10Hz read rate if we read all registers.
             for reg_addr in reg_map:
-                num_registers = len(reg_map[reg_addr].values)
+                reg_desc = reg_map[reg_addr]
+                skip_n_read = reg_desc.skip_n_read
+
+                if skip_n_read > 0 and (self._read_counter % (skip_n_read + 1)) != 0:
+                    # Skip this read, just use existing values
+                    logger.debug(f">>>> Skipping read of '{reg_desc.description}' register at {hex(reg_addr)}, read counter={self._read_counter}, skip_n_read={skip_n_read}")
+                    continue
+
+                num_registers = len(reg_desc.values)
                 logger.debug(
-                    f"Reading '{reg_map[reg_addr].description}' from start register address {hex(reg_addr)}, count={num_registers}")
+                    f"Reading '{reg_desc.description}' from start register address {hex(reg_addr)}, count={num_registers}")
                 result = await self._client.read_holding_registers(reg_addr, count=num_registers,
                                                                    device_id=self.slave_id)
 
