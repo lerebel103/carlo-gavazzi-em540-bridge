@@ -8,11 +8,11 @@ import time
 from paho.mqtt.enums import CallbackAPIVersion
 
 from em540_master import MeterDataListener
-from em540_slave_bridge import EM540SlaveStats
+from em540_slave_stats import EM540SlaveStats
 from ha_diagnostics import HADiagnostics
 from ha_sensors import EnergyMeterSensor
 from meter_data import MeterData
-from ts65a_slave_bridge import Ts65aSlaveStats
+from ts65a_slave_stats import Ts65aSlaveStats
 
 FIRST_RECONNECT_DELAY = 1
 RECONNECT_RATE = 2

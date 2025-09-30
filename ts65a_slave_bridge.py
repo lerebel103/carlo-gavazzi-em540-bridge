@@ -10,6 +10,7 @@ import meter_data
 from em540_master import MeterDataListener
 from pdu_helper import PduHelper
 from ts65a_data import Ts65aMeterData
+from ts65a_slave_stats import Ts65aSlaveStats
 
 logger = logging.getLogger('ts65a-slave')
 
@@ -21,17 +22,6 @@ def _append_registers(registers, values):
             ModbusTcpClient.convert_to_registers(value, ModbusTcpClient.DATATYPE.FLOAT32, "big")
         )
 
-class Ts65aSlaveStats:
-    def __init__(self):
-        self.tcp_client_count: int = 0
-        self._listeners: list[Callable[['Ts65aSlaveStats'], None]] = []
-
-    def changed(self):
-        for listener in self._listeners:
-            listener(self)
-
-    def add_listener(self, listener: Callable[['Ts65aSlaveStats'], None]):
-        self._listeners.append(listener)
 
 class Ts65aSlaveBridge(MeterDataListener):
     def __init__(self, config):
@@ -42,7 +32,7 @@ class Ts65aSlaveBridge(MeterDataListener):
         self._stats = Ts65aSlaveStats()
         logger.setLevel(config.log_level)
         
-        self.meter_data = Ts65aMeterData(config.smoothing_num_points, config.grid_feed_in_hard_limit, logger)
+        self.meter_data = Ts65aMeterData(config.smoothing_num_points, config.grid_feed_in_hard_limit, logger, self._stats)
 
         # Smart Meter TS 65A-3
         datablock = ModbusSparseDataBlock({
@@ -138,6 +128,7 @@ class Ts65aSlaveBridge(MeterDataListener):
             self._stats.tcp_client_count += 1
         else:
             self._stats.tcp_client_count -= 1
+            self._stats.tcp_client_disconnect_count += 1
         self._stats.changed()
 
     def add_stats_listener(self, listener: Callable[['Ts65aSlaveStats'], None]):

@@ -11,27 +11,13 @@ from pymodbus.server import ModbusTcpServer
 
 from em540_data import Em540Frame
 from em540_master import MeterDataListener
+from em540_slave_stats import EM540SlaveStats
 from meter_data import MeterData
 from pdu_helper import PduHelper
 
 REG_OFFSET = 1  # Modbus addresses are 1-based, pymodbus uses 0-based
 
 logger = logging.getLogger('em540-slave')
-
-
-class EM540SlaveStats:
-    def __init__(self):
-        self.rtu_client_count: int = 0
-        self.tcp_client_count: int = 0
-
-        self._listeners: list[Callable[['EM540SlaveStats'], None]] = []
-
-    def changed(self) -> None:
-        for listener in self._listeners:
-            listener(self)
-
-    def add_listener(self, listener: Callable[['EM540SlaveStats'], None]) -> None:
-        self._listeners.append(listener)
 
 
 class Em540Slave(MeterDataListener):
@@ -90,6 +76,7 @@ class Em540Slave(MeterDataListener):
             self._stats.rtu_client_count += 1
         else:
             self._stats.rtu_client_count -= 1
+            self._stats.rtu_client_disconnect_count += 1
         self._stats.changed()
 
     def _tcp_trace_connect(self, connect):
@@ -98,6 +85,7 @@ class Em540Slave(MeterDataListener):
             self._stats.tcp_client_count += 1
         else:
             self._stats.tcp_client_count -= 1
+            self._stats.tcp_client_disconnect_count += 1
         self._stats.changed()
 
     def add_stats_listener(self, listener: Callable[['EM540SlaveStats'], None]):

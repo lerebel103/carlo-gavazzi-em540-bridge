@@ -1,3 +1,6 @@
+from ts65a_slave_stats import Ts65aSlaveStats
+
+
 class RunningAverage:
     def __init__(self, max_points):
         self.max_points = max_points
@@ -24,8 +27,9 @@ class Ts65aMeterData:
     particularly with equipment that have pulsating power requirements (PID driven heat elments, some A/Cs like Actron)
     """
 
-    def __init__(self, max_points, grid_feed_in_hard_limit, logger):
-        self.grid_feed_in_hard_limit = grid_feed_in_hard_limit
+    def __init__(self, max_points, grid_feed_in_hard_limit, logger, stats: Ts65aSlaveStats):
+        self.stats = stats
+        self.stats.grid_feed_in_hard_limit = grid_feed_in_hard_limit
         self.logger = logger
 
         self._current_an = RunningAverage(max_points)
@@ -217,39 +221,11 @@ class Ts65aMeterData:
         return self._kwh_plus_l3
 
     def update(self, data):
-        # if we are over the feedback hard_limit, reset all running averages to current values
-        if data.system.power < self.grid_feed_in_hard_limit:
-            self._current_an.reset()
-            self._current_a.reset()
-            self._current_b.reset()
-            self._current_c.reset()
-            self._voltage_ln.reset()
-            self._voltage_ln_a.reset()
-            self._voltage_ln_b.reset()
-            self._voltage_ln_c.reset()
-            self._voltage_ll.reset()
-            self._voltage_ll_a.reset()
-            self._voltage_ll_b.reset()
-            self._voltage_ll_c.reset()
-            self._frequency.reset()
-            self._power.reset()
-            self._power_a.reset()
-            self._power_b.reset()
-            self._power_c.reset()
-            self._apparent_power.reset()
-            self._apparent_power_a.reset()
-            self._apparent_power_b.reset()
-            self._apparent_power_c.reset()
-            self._reactive_power.reset()
-            self._reactive_power_a.reset()
-            self._reactive_power_b.reset()
-            self._reactive_power_c.reset()
-            self._power_factor.reset()
-            self._power_factor_a.reset()
-            self._power_factor_b.reset()
-            self._power_factor_c.reset()
-            self.logger.warn("Power over feedback hard_limit, resetting running averages to current values")
+        # if we are over the feedback hard_limit, reset all running averages to current values and update stats
+        if self.stats.check_power_over_feed_in_limit(self.power):
+            self._reset_means()
 
+        # Update all running averages with new data
         self._current_an.add(data.system.An)
         self._current_a.add(data.phases[0].current)
         self._current_b.add(data.phases[1].current)
@@ -280,6 +256,7 @@ class Ts65aMeterData:
         self._power_factor_b.add(data.phases[1].power_factor)
         self._power_factor_c.add(data.phases[2].power_factor)
 
+        # And now all fixed values
         self._kwh_neg_total = data.other_energies.kwh_neg_total
         self._kwh_neg_a = 0
         self._kwh_neg_b = 0
@@ -288,3 +265,38 @@ class Ts65aMeterData:
         self._kwh_plus_l1 = data.other_energies.kwh_plus_l1
         self._kwh_plus_l2 = data.other_energies.kwh_plus_l2
         self._kwh_plus_l3 = data.other_energies.kwh_plus_l3
+
+    def _reset_means(self):
+        self.logger.warn("Power over feedback hard_limit, resetting running averages to current values")
+
+        # Reset all running averages to current values
+        self._current_an.reset()
+        self._current_a.reset()
+        self._current_b.reset()
+        self._current_c.reset()
+        self._voltage_ln.reset()
+        self._voltage_ln_a.reset()
+        self._voltage_ln_b.reset()
+        self._voltage_ln_c.reset()
+        self._voltage_ll.reset()
+        self._voltage_ll_a.reset()
+        self._voltage_ll_b.reset()
+        self._voltage_ll_c.reset()
+        self._frequency.reset()
+        self._power.reset()
+        self._power_a.reset()
+        self._power_b.reset()
+        self._power_c.reset()
+        self._apparent_power.reset()
+        self._apparent_power_a.reset()
+        self._apparent_power_b.reset()
+        self._apparent_power_c.reset()
+        self._reactive_power.reset()
+        self._reactive_power_a.reset()
+        self._reactive_power_b.reset()
+        self._reactive_power_c.reset()
+        self._power_factor.reset()
+        self._power_factor_a.reset()
+        self._power_factor_b.reset()
+        self._power_factor_c.reset()
+
