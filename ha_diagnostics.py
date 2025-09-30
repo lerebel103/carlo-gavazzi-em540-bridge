@@ -31,8 +31,8 @@ class HADiagnostics:
         # TS65A specific diagnostics
         self.ts65a_tcp_client_count = Sensor('TS65A TCP Client Count', None, None, 'measurement', self.state_topic, precision=0, entity_category='diagnostic')
         self.ts65a_tcp_client_disconnect_count = Sensor('TS65A TCP Client Disconnect Count', None, None, 'measurement', self.state_topic, precision=0, entity_category='diagnostic')
-        self.ts65a_power_over_feed_in_limit_count = Sensor('TS65A Power Over Feed-In Limit Count', None, None, 'measurement', self.state_topic, precision=0, entity_category='diagnostic')
-        self.ts65a_power_over_feed_limit_max_duration = Sensor('TS65A Power Over Feed-In Limit Max Duration', 'ms', 'duration', 'measurement', self.state_topic, precision=2, entity_category='diagnostic')
+        self.ts65a_power_over_feed_in_limit_count = Sensor('Overfeed Limit Count', None, None, 'measurement', self.state_topic, precision=0, entity_category='diagnostic')
+        self.ts65a_power_over_feed_limit_max_duration = Sensor('Overfeed Limit Max Duration', 'ms', 'duration', 'measurement', self.state_topic, precision=2, entity_category='diagnostic')
 
         self.em540_rtu_client_count = Sensor('EM540 RTU Client Count', None, None, 'measurement', self.state_topic, precision=0, entity_category='diagnostic')
         self.em540_rtu_client_disconnect_count = Sensor('EM540 RTU Client Disconnect Count', None, None, 'measurement', self.state_topic, precision=0, entity_category='diagnostic')
