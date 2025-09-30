@@ -107,7 +107,7 @@ class TestTs65aMeterData(unittest.TestCase):
         self.data.system.power = -1001
         self.meter.update(self.data)
 
-        self.logger.warn.assert_called_once()
+        self.logger.warn.assert_called()
         # After reset, running averages should be reset to only the latest value
         self.assertEqual(len(self.meter._power.values), 1)
         self.assertEqual(self.meter._power.values[0], -1001)

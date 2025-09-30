@@ -222,7 +222,7 @@ class Ts65aMeterData:
 
     def update(self, data):
         # if we are over the feedback hard_limit, reset all running averages to current values and update stats
-        if self.stats.check_power_over_feed_in_limit(self.power):
+        if self.stats.check_power_over_feed_in_limit(data):
             self.logger.warn(f'Power over the feed in limit reached: {self.power}W')
             self._reset_means()
 
