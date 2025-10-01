@@ -9,6 +9,7 @@ from pymodbus.client import AsyncModbusTcpClient
 from pymodbus import ModbusException
 from pymodbus.exceptions import ModbusIOException
 
+from em540_data import RegisterDefinition
 from meter_data import MeterData
 
 logger = logging.getLogger('Em540Master')
@@ -28,7 +29,7 @@ class Em540Master:
         self.port = config.port
         self._data = MeterData()
         self.slave_id = config.slave_id
-        self._read_counter = 0
+        self._dyn_reg_read_counter = 0
         self._listeners: list[MeterDataListener] = []
         logger.setLevel(config.log_level)
 
@@ -51,7 +52,7 @@ class Em540Master:
         await self._client.connect()
         if self._client.connected:
             logger.info("Connected to EM540.")
-            if self._read_counter == 0:
+            if self._dyn_reg_read_counter == 0:
                 logger.debug("Reading static registers from EM540...")
                 frame = self._data.frame
                 if not await self._read_registers(frame.static_reg_map):
@@ -103,7 +104,8 @@ class Em540Master:
         frame = self._data.frame
 
         # Read our dynamic registers
-        is_ok = await self._read_registers(frame.dynamic_reg_map)
+        self._dyn_reg_read_counter += 1
+        is_ok = await self._read_registers(frame.dynamic_reg_map, dyn_reg=True)
         if is_ok:
             # Now notify listeners
             with self._condition:
@@ -115,9 +117,8 @@ class Em540Master:
 
         return is_ok
 
-    async def _read_registers(self, reg_map) -> bool:
+    async def _read_registers(self, reg_map: {str, RegisterDefinition}, dyn_reg = False) -> bool:
         try:
-            self._read_counter += 1
             # Read dynamic registers
             # Only read the primary register every cycle, the rest are read less often
             # This is because we can't keep up a 10Hz read rate if we read all registers.
@@ -127,9 +128,9 @@ class Em540Master:
 
                 # Always perform the first read on all registers
                 # Then skip reads as configured
-                if self._read_counter > 1 and skip_n_read > 0:
-                    if (self._read_counter % (skip_n_read + 1)) != 0:
-                        logger.debug(f">>>> Skipping read of '{reg_desc.description}' register at {hex(reg_addr)}, read counter={self._read_counter}, skip_n_read={skip_n_read}")
+                if dyn_reg and self._dyn_reg_read_counter > 1 and skip_n_read > 0:
+                    if (self._dyn_reg_read_counter % (skip_n_read + 1)) != 0:
+                        logger.debug(f">>>> Skipping read of '{reg_desc.description}' register at {hex(reg_addr)}, read counter={self._dyn_reg_read_counter}, skip_n_read={skip_n_read}")
                         continue
 
                 num_registers = len(reg_desc.values)
