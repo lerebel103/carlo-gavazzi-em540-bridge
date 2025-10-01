@@ -24,6 +24,23 @@ class RunningAverage:
         self.values.clear()
 
 
+#def get_sign(number: float):
+#    if number >= 0:
+#        return 1
+#    else:
+#        return -1
+
+def _calculate_power_factor(pf, power, reactive_power):
+    # Not sure if this is correct, seems to be a convention that power factor indicates direction of power flow
+    return pf if power > 0 else -pf
+
+    # This is another definition of power factor that takes into account the sign of power and reactive power
+    #power_sign = get_sign(power)
+    #reactive_power_sign = get_sign(reactive_power)
+    #return pf * power_sign / reactive_power_sign
+
+
+
 class Ts65aMeterData:
     """Class to hold TS65A meter data with running averages.
 
@@ -178,19 +195,19 @@ class Ts65aMeterData:
 
     @property
     def power_factor(self):
-        return self._power_factor.mean
+        return _calculate_power_factor(self._power_factor.mean, self._power.mean, self._reactive_power.mean)
 
     @property
     def power_factor_a(self):
-        return self._power_factor_a.mean
+        return _calculate_power_factor(self._power_factor_a.mean, self._power_a.mean, self._reactive_power_a.mean)
 
     @property
     def power_factor_b(self):
-        return self._power_factor_b.mean
+        return _calculate_power_factor(self._power_factor_b.mean, self._power_b.mean, self._reactive_power_b.mean)
 
     @property
     def power_factor_c(self):
-        return self._power_factor_c.mean
+        return _calculate_power_factor(self._power_factor_c.mean, self._power_c.mean, self._reactive_power_c.mean)
 
     @property
     def kwh_neg_total(self):
@@ -256,10 +273,12 @@ class Ts65aMeterData:
         self._reactive_power_a.add(data.phases[0].reactive_power)
         self._reactive_power_b.add(data.phases[1].reactive_power)
         self._reactive_power_c.add(data.phases[2].reactive_power)
-        self._power_factor.add(data.system.power_factor)
-        self._power_factor_a.add(data.phases[0].power_factor)
-        self._power_factor_b.add(data.phases[1].power_factor)
-        self._power_factor_c.add(data.phases[2].power_factor)
+
+        # Power factor can be negative, so we need to handle that correctly
+        self._power_factor.add(abs(data.system.power_factor))
+        self._power_factor_a.add(abs(data.phases[0].power_factor))
+        self._power_factor_b.add(abs(data.phases[1].power_factor))
+        self._power_factor_c.add(abs(data.phases[2].power_factor))
 
         # And now all fixed values
         self._kwh_neg_total = data.other_energies.kwh_neg_total
