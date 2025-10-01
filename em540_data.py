@@ -203,7 +203,7 @@ class Em540Frame:
         # Define our dynamic registers that are read often
         self.dynamic_reg_map = {
             0x0000: RegisterDefinition("Meter Data1", [0] * 0x5A),
-            0x0500: RegisterDefinition("Meter Data3", [0] * (0x053E - 0x0500 + 2), skip_n_read=2),
+            0x0500: RegisterDefinition("Meter Data3", [0] * (0x053E - 0x0500 + 2), skip_n_read=4),
         }
 
         # Define registers that are re-mapped in different ranges, these will be populated manually
