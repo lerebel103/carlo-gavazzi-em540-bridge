@@ -103,7 +103,6 @@ class Em540Slave(MeterDataListener):
         Here we are only just resending the same values read upstream to connected clients without needing to do
         any parsing, since we are bridging EM540 to EM540.
         """
-        self._pdu_helper.data_received(data.timestamp)
         frame = data.frame
 
         # Update dynamic registers in the datablock
@@ -117,6 +116,9 @@ class Em540Slave(MeterDataListener):
         # Update remapped values
         for addr in frame.remapped_reg_map:
             self.datablock.setValues(addr + REG_OFFSET, frame.remapped_reg_map[addr].values)
+
+        # Now update our PDU helper with the timestamp of this data
+        self._pdu_helper.data_received(data.timestamp)
 
     async def read_failed(self):
         pass

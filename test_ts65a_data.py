@@ -31,7 +31,7 @@ class TestRunningAverage(unittest.TestCase):
         avg.add(2)
         avg.reset()
         self.assertEqual(avg.mean, 0.0)
-        self.assertEqual(avg.values, [])
+        self.assertEqual(len(avg.values), 0)
 
 class MockPhase:
     def __init__(self, current=1, line_neutral_voltage=2, line_line_voltage=3, power=4, apparent_power=5, reactive_power=6, power_factor=0.7):

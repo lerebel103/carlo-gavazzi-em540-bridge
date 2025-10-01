@@ -1,23 +1,27 @@
+import collections
+
 from ts65a_slave_stats import Ts65aSlaveStats
 
 
 class RunningAverage:
+    __slots__ = ('max_points', 'values')
+
     def __init__(self, max_points):
         self.max_points = max_points
-        self.values = []
+        self.values = collections.deque(maxlen=max_points)
 
     def add(self, value):
         self.values.append(value)
-        if len(self.values) > self.max_points:
-            self.values.pop(0)
 
     @property
     def mean(self):
-        return sum(self.values) / len(self.values) if self.values else 0.0
+        n = len(self.values)
+        if n == 0:
+            return 0.0
+        return sum(self.values) / n
 
-    # Addd a reset method to clear the running average
     def reset(self):
-        self.values = []
+        self.values.clear()
 
 
 class Ts65aMeterData:

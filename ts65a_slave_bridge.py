@@ -141,8 +141,6 @@ class Ts65aSlaveBridge(MeterDataListener):
         pass
 
     async def new_data(self, data: meter_data.MeterData):
-        self._pdu_helper.data_received(data.timestamp)
-
         address = 40072
         registers = list()
 
@@ -218,6 +216,10 @@ class Ts65aSlaveBridge(MeterDataListener):
         ])
 
         self.datablock.setValues(address, registers)
+
+        # Notify the PDU helper that we have new data
+        self._pdu_helper.data_received(data.timestamp)
+
 
     async def read_failed(self):
         pass

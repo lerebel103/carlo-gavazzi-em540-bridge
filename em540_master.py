@@ -2,7 +2,6 @@ import asyncio
 import logging
 import sys
 import threading
-from datetime import datetime
 from threading import Thread
 
 from pymodbus import FramerType
@@ -126,10 +125,12 @@ class Em540Master:
                 reg_desc = reg_map[reg_addr]
                 skip_n_read = reg_desc.skip_n_read
 
-                if skip_n_read > 0 and (self._read_counter % (skip_n_read + 1)) != 0:
-                    # Skip this read, just use existing values
-                    logger.debug(f">>>> Skipping read of '{reg_desc.description}' register at {hex(reg_addr)}, read counter={self._read_counter}, skip_n_read={skip_n_read}")
-                    continue
+                # Always perform the first read on all registers
+                # Then skip reads as configured
+                if self._read_counter > 1 and skip_n_read > 0:
+                    if (self._read_counter % (skip_n_read + 1)) != 0:
+                        logger.debug(f">>>> Skipping read of '{reg_desc.description}' register at {hex(reg_addr)}, read counter={self._read_counter}, skip_n_read={skip_n_read}")
+                        continue
 
                 num_registers = len(reg_desc.values)
                 logger.debug(
