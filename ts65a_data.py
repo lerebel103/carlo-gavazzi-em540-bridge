@@ -24,7 +24,7 @@ class RunningAverage:
         self.values.clear()
 
 
-#def get_sign(number: float):
+# def get_sign(number: float):
 #    if number >= 0:
 #        return 1
 #    else:
@@ -35,10 +35,9 @@ def _calculate_power_factor(pf, power, reactive_power):
     return pf if power > 0 else -pf
 
     # This is another definition of power factor that takes into account the sign of power and reactive power
-    #power_sign = get_sign(power)
-    #reactive_power_sign = get_sign(reactive_power)
-    #return pf * power_sign / reactive_power_sign
-
+    # power_sign = get_sign(power)
+    # reactive_power_sign = get_sign(reactive_power)
+    # return pf * power_sign / reactive_power_sign
 
 
 class Ts65aMeterData:
@@ -84,14 +83,22 @@ class Ts65aMeterData:
         self._power_factor_c = RunningAverage(max_points)
 
         # we don't do running average for kWh, just keep adding the latest value
-        self._kwh_neg_total = 0
-        self._kwh_neg_a = 0
-        self._kwh_neg_b = 0
-        self._kwh_neg_c = 0
-        self._kwh_plus_total = 0
-        self._kwh_plus_l1 = 0
-        self._kwh_plus_l2 = 0
-        self._kwh_plus_l3 = 0
+        self._wh_neg_total = 0
+        self._wh_neg_a = 0
+        self._wh_neg_b = 0
+        self._wh_neg_c = 0
+        self._wh_plus_total = 0
+        self._wh_plus_l1 = 0
+        self._wh_plus_l2 = 0
+        self._wh_plus_l3 = 0
+        self._vah_neg_total = 0
+        self._vah_neg_a = 0
+        self._vah_neg_b = 0
+        self._vah_neg_c = 0
+        self._vah_plus_total = 0
+        self._vah_plus_a = 0
+        self._vah_plus_b = 0
+        self._vah_plus_c = 0
 
     @property
     def current_an(self):
@@ -210,36 +217,68 @@ class Ts65aMeterData:
         return _calculate_power_factor(self._power_factor_c.mean, self._power_c.mean, self._reactive_power_c.mean)
 
     @property
-    def kwh_neg_total(self):
-        return self._kwh_neg_total
+    def wh_neg_total(self):
+        return self._wh_neg_total
 
     @property
-    def kwh_neg_a(self):
-        return self._kwh_neg_a
+    def wh_neg_a(self):
+        return self._wh_neg_a
 
     @property
-    def kwh_neg_b(self):
-        return self._kwh_neg_b
+    def wh_neg_b(self):
+        return self._wh_neg_b
 
     @property
-    def kwh_neg_c(self):
-        return self._kwh_neg_c
+    def wh_neg_c(self):
+        return self._wh_neg_c
 
     @property
-    def kwh_plus_total(self):
-        return self._kwh_plus_total
+    def wh_plus_total(self):
+        return self._wh_plus_total
 
     @property
-    def kwh_plus_l1(self):
-        return self._kwh_plus_l1
+    def wh_plus_l1(self):
+        return self._wh_plus_l1
 
     @property
-    def kwh_plus_l2(self):
-        return self._kwh_plus_l2
+    def wh_plus_l2(self):
+        return self._wh_plus_l2
 
     @property
-    def kwh_plus_l3(self):
-        return self._kwh_plus_l3
+    def wh_plus_l3(self):
+        return self._wh_plus_l3
+
+    @property
+    def vah_neg_total(self):
+        return self._vah_neg_total
+
+    @property
+    def vah_neg_a(self):
+        return self._vah_neg_a
+
+    @property
+    def vah_neg_b(self):
+        return self._vah_neg_b
+
+    @property
+    def vah_neg_c(self):
+        return self._vah_neg_c
+
+    @property
+    def vah_plus_total(self):
+        return self._vah_plus_total
+
+    @property
+    def vah_plus_a(self):
+        return self._vah_plus_a
+
+    @property
+    def vah_plus_b(self):
+        return self._vah_plus_b
+
+    @property
+    def vah_plus_c(self):
+        return self._vah_plus_c
 
     def update(self, data):
         # if we are over the feedback hard_limit, reset all running averages to current values and update stats
@@ -281,14 +320,25 @@ class Ts65aMeterData:
         self._power_factor_c.add(abs(data.phases[2].power_factor))
 
         # And now all fixed values
-        self._kwh_neg_total = data.other_energies.kwh_neg_total
-        self._kwh_neg_a = 0
-        self._kwh_neg_b = 0
-        self._kwh_neg_c = 0
-        self._kwh_plus_total = data.other_energies.kwh_plus_total
-        self._kwh_plus_l1 = data.other_energies.kwh_plus_l1
-        self._kwh_plus_l2 = data.other_energies.kwh_plus_l2
-        self._kwh_plus_l3 = data.other_energies.kwh_plus_l3
+        # export / import energy in Wh
+        self._wh_neg_total = data.other_energies.kwh_neg_total * 1000.0  # convert to Wh
+        self._wh_neg_a = 0  # Not available from em540
+        self._wh_neg_b = 0  # Not available from em540
+        self._wh_neg_c = 0  # Not available from em540
+        self._wh_plus_total = data.other_energies.kwh_plus_total * 1000.0  # convert to Wh
+        self._wh_plus_l1 = data.other_energies.kwh_plus_l1 * 1000.0  # convert to Wh
+        self._wh_plus_l2 = data.other_energies.kwh_plus_l2 * 1000.0  # convert to Wh
+        self._wh_plus_l3 = data.other_energies.kwh_plus_l3 * 1000.0  # convert to Wh
+
+        # export / import energy in VAh
+        self._vah_neg_total = 0 # Not available from em540
+        self._vah_neg_a = 0  # Not available from em540
+        self._vah_neg_b = 0  # Not available from em540
+        self._vah_neg_c = 0  # Not available from em540
+        self._vah_plus_total = 0 # Not available from em540
+        self._vah_plus_a = 0  # Not available from em540
+        self._vah_plus_b = 0  # Not available from em540
+        self._vah_plus_c = 0  # Not available from em540
 
     def _reset_means(self):
         self.logger.warn("Resetting running averages due to power over feed in limit")
@@ -323,4 +373,3 @@ class Ts65aMeterData:
         self._power_factor_a.reset()
         self._power_factor_b.reset()
         self._power_factor_c.reset()
-

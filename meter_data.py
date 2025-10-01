@@ -76,16 +76,41 @@ class OtherEnergies:
 
     def parse(self, registers):
         self.kwh_plus_total = ModbusTcpClient.convert_from_registers(registers[0x00: 0x00 + 4],
-                                                                     ModbusTcpClient.DATATYPE.INT64, "little")
+                                                                     ModbusTcpClient.DATATYPE.INT64, "little") / 1000.0
+
+        self.kvarh_plus_total = ModbusTcpClient.convert_from_registers(registers[0x04: 0x04 + 4],
+                                                                       ModbusTcpClient.DATATYPE.INT64,
+                                                                       "little") / 1000.0
+
         self.kwh_plus_l1 = ModbusTcpClient.convert_from_registers(registers[0x10: 0x10 + 4],
-                                                                  ModbusTcpClient.DATATYPE.INT64, "little")
+                                                                  ModbusTcpClient.DATATYPE.INT64, "little") / 1000.0
         self.kwh_plus_l2 = ModbusTcpClient.convert_from_registers(registers[0x14: 0x14 + 4],
-                                                                  ModbusTcpClient.DATATYPE.INT64, "little")
+                                                                  ModbusTcpClient.DATATYPE.INT64, "little") / 1000.0
         self.kwh_plus_l3 = ModbusTcpClient.convert_from_registers(registers[0x18: 0x18 + 4],
-                                                                  ModbusTcpClient.DATATYPE.INT64, "little")
+                                                                  ModbusTcpClient.DATATYPE.INT64, "little") / 1000.0
 
         self.kwh_neg_total = ModbusTcpClient.convert_from_registers(registers[0x1C: 0x1C + 4],
-                                                                    ModbusTcpClient.DATATYPE.INT64, "little")
+                                                                    ModbusTcpClient.DATATYPE.INT64, "little") / 1000.0
+
+        self.kvarh_neg_total = ModbusTcpClient.convert_from_registers(registers[0x24: 0x24 + 4],
+                                                                      ModbusTcpClient.DATATYPE.INT64, "little") / 1000.0
+
+        self.kvah_total = ModbusTcpClient.convert_from_registers(registers[0x2C: 0x2C + 4],
+                                                                 ModbusTcpClient.DATATYPE.INT64, "little") / 1000.0
+
+        self.run_hour_meter = ModbusTcpClient.convert_from_registers(registers[0x34: 0x34 + 2],
+                                                                     ModbusTcpClient.DATATYPE.INT32, "little") / 100.0
+
+        self.run_hour_meter_neg_kwh = ModbusTcpClient.convert_from_registers(registers[0x36: 0x36 + 2],
+                                                                             ModbusTcpClient.DATATYPE.INT32,
+                                                                             "little") / 100.0
+
+        self.frequency = ModbusTcpClient.convert_from_registers(registers[0x3C: 0x3C + 2],
+                                                                ModbusTcpClient.DATATYPE.INT32, "little") / 1000.0
+
+        self.run_hour_life_counter = ModbusTcpClient.convert_from_registers(registers[0x3E: 0x3E + 2],
+                                                                            ModbusTcpClient.DATATYPE.INT32,
+                                                                            "little") / 100.0
 
         # print(self)
 
@@ -158,7 +183,7 @@ class MeterData:
         self.phases = [PhaseData(), PhaseData(), PhaseData()]
         self.system = SystemData()
         self.other_energies = OtherEnergies()
-        self._timestamp :float = 0
+        self._timestamp: float = 0
 
     @property
     def timestamp(self) -> float:

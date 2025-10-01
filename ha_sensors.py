@@ -4,7 +4,8 @@ from meter_data import MeterData
 
 
 class Sensor:
-    def __init__(self, name, unit, device_class, state_class, state_topic, precision=1, entity_category :str | None = None):
+    def __init__(self, name, unit, device_class, state_class, state_topic, precision=1,
+                 entity_category: str | None = None):
         self.value: float = 0
         self.name = name
         self.state_topic = state_topic
@@ -118,6 +119,13 @@ class EnergyMeterSensor:
 
         self.energy_import = Sensor('Energy Import', 'kWh', 'energy', 'total_increasing', self.state_topic, precision=2)
         self.energy_export = Sensor('Energy Export', 'kWh', 'energy', 'total_increasing', self.state_topic, precision=2)
+        self.kvarh_neg_total = Sensor('Reactive Energy Export', 'kvarh', 'reactive_energy', 'total_increasing', self.state_topic,
+                                      precision=2)
+        self.kvarh_plus_total = Sensor('Reactive Energy Import', 'kvarh', 'reactive_energy', 'total_increasing', self.state_topic,
+                                      precision=2)
+        self.kvah_total = Sensor('Apparent Energy kvah', 'kWh', 'energy', 'total_increasing', self.state_topic, precision=2)
+
+        self.run_hour_meter = Sensor('Run Hours', 'h', 'duration', 'total_increasing', self.state_topic, precision=1)
 
     def update(self, data: MeterData):
         self.frequency.update_value(data.system.frequency)
@@ -187,8 +195,12 @@ class EnergyMeterSensor:
             sensor.update_value(value)
 
         # Energy sensors
-        self.energy_import.update_value(data.other_energies.kwh_plus_total / 1000)
-        self.energy_export.update_value(data.other_energies.kwh_neg_total / 1000)
+        self.energy_import.update_value(data.other_energies.kwh_plus_total)
+        self.energy_export.update_value(data.other_energies.kwh_neg_total)
+        self.kvarh_neg_total.update_value(data.other_energies.kvarh_neg_total)
+        self.kvarh_plus_total.update_value(data.other_energies.kvarh_plus_total)
+        self.kvah_total.update_value(data.other_energies.kvah_total)
+        self.run_hour_meter.update_value(data.other_energies.run_hour_meter)
 
     def advertise_data(self):
         sensors = (
@@ -199,7 +211,8 @@ class EnergyMeterSensor:
                 self.reactive_power_sensors +
                 self.apparent_power_sensors +
                 self.power_factor_sensors +
-                [self.energy_import, self.energy_export]
+                [self.energy_import, self.energy_export, self.kvarh_neg_total, self.kvarh_plus_total,
+                 self.run_hour_meter, self.kvah_total]
         )
         return [sensor.discovery() for sensor in sensors]
 
@@ -212,7 +225,8 @@ class EnergyMeterSensor:
                 self.reactive_power_sensors +
                 self.apparent_power_sensors +
                 self.power_factor_sensors +
-                [self.energy_import, self.energy_export]
+                [self.energy_import, self.energy_export, self.kvarh_neg_total, self.kvarh_plus_total,
+                 self.run_hour_meter, self.kvah_total]
         )
         payload = {sensor.safe_name: sensor.value for sensor in sensors}
         return self.state_topic, json.dumps(payload)

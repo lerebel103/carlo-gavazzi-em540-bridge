@@ -201,19 +201,37 @@ class Ts65aSlaveBridge(MeterDataListener):
             self.meter_data.power_factor_c,
         ])
 
+        # Exported energy (negative power)
         _append_registers(registers, [
-            self.meter_data.kwh_neg_total,
-            self.meter_data.kwh_neg_a,
-            self.meter_data.kwh_neg_b,
-            self.meter_data.kwh_neg_c,
+            self.meter_data.wh_neg_total,
+            self.meter_data.wh_neg_a,
+            self.meter_data.wh_neg_b,
+            self.meter_data.wh_neg_c,
+        ])
+        # Imported energy (positive power)
+        _append_registers(registers, [
+            self.meter_data.wh_plus_total,
+            self.meter_data.wh_plus_l1,
+            self.meter_data.wh_plus_l2,
+            self.meter_data.wh_plus_l3,
         ])
 
+        # Export apparent energy (VAh)
         _append_registers(registers, [
-            self.meter_data.kwh_plus_total,
-            self.meter_data.kwh_plus_l1,
-            self.meter_data.kwh_plus_l2,
-            self.meter_data.kwh_plus_l3,
+            self.meter_data.vah_neg_total,
+            self.meter_data.vah_neg_a,
+            self.meter_data.vah_neg_b,
+            self.meter_data.vah_neg_c,
         ])
+        # Import apparent energy (VAh)
+        _append_registers(registers, [
+            self.meter_data.vah_plus_total,
+            self.meter_data.vah_plus_a,
+            self.meter_data.vah_plus_b,
+            self.meter_data.vah_plus_c,
+        ])
+
+
 
         self.datablock.setValues(address, registers)
 
