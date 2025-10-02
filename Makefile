@@ -9,3 +9,8 @@ run:
 run-service:
 	docker compose up -d --build
 
+# Linting
+lint:
+	flake8 .
+	black --check .
+	isort --check-only .
