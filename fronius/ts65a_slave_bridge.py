@@ -6,8 +6,8 @@ from pymodbus.client import ModbusTcpClient
 from pymodbus.datastore import ModbusSparseDataBlock, ModbusDeviceContext, ModbusServerContext
 from pymodbus.server import ModbusTcpServer
 
-from carlo_gravazzi import meter_data
-from carlo_gravazzi.em540_master import MeterDataListener
+from carlo_gavazzi import meter_data
+from carlo_gavazzi.em540_master import MeterDataListener
 from utils.pdu_helper import PduHelper
 from fronius.ts65a_data import Ts65aMeterData
 from fronius.ts65a_slave_stats import Ts65aSlaveStats

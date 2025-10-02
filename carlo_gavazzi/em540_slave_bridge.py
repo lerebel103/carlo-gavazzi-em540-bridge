@@ -9,10 +9,10 @@ from pymodbus.datastore import (
 )
 from pymodbus.server import ModbusTcpServer
 
-from carlo_gravazzi.em540_data import Em540Frame
-from carlo_gravazzi.em540_master import MeterDataListener
-from carlo_gravazzi.em540_slave_stats import EM540SlaveStats
-from carlo_gravazzi.meter_data import MeterData
+from carlo_gavazzi.em540_data import Em540Frame
+from carlo_gavazzi.em540_master import MeterDataListener
+from carlo_gavazzi.em540_slave_stats import EM540SlaveStats
+from carlo_gavazzi.meter_data import MeterData
 from utils.pdu_helper import PduHelper
 
 REG_OFFSET = 1  # Modbus addresses are 1-based, pymodbus uses 0-based

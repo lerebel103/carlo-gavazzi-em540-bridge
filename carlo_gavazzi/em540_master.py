@@ -9,7 +9,7 @@ from pymodbus.client import AsyncModbusTcpClient
 from pymodbus import ModbusException
 from pymodbus.exceptions import ModbusIOException
 
-from carlo_gravazzi.meter_data import MeterData
+from carlo_gavazzi.meter_data import MeterData
 
 logger = logging.getLogger('Em540Master')
 
@@ -35,6 +35,7 @@ class Em540Master:
     Asyncio is used to avoid blocking the main thread while waiting for Modbus responses, listeners are notified
     in a separate thread.
     """
+
     def __init__(self, config) -> None:
         self.host: str = config.host
         self.port: int = config.port
@@ -144,12 +145,15 @@ class Em540Master:
                 # Then skip reads as configured
                 if dyn_reg and self._dyn_reg_read_counter > 1 and skip_n_read > 0:
                     if (self._dyn_reg_read_counter % (skip_n_read + 1)) != 0:
-                        logger.debug(f">>>> Skipping read of '{reg_desc.description}' register at {hex(reg_addr)}, read counter={self._dyn_reg_read_counter}, skip_n_read={skip_n_read}")
+                        logger.debug(
+                            f">>>> Skipping read of '{reg_desc.description}' register "
+                            f"at {hex(reg_addr)}, read counter={self._dyn_reg_read_counter}, skip_n_read={skip_n_read}")
                         continue
 
                 num_registers: int = len(reg_desc.values)
                 logger.debug(
-                    f"Reading '{reg_desc.description}' from start register address {hex(reg_addr)}, count={num_registers}")
+                    f"Reading '{reg_desc.description}' from start register address {hex(reg_addr)}, "
+                    f"count={num_registers}")
                 result = await self._client.read_holding_registers(reg_addr, count=num_registers,
                                                                    device_id=self.slave_id)
 
@@ -162,7 +166,8 @@ class Em540Master:
                 # with out-of-order responses. Resetting the client could be better, but for now just exit.
                 if len(result.registers) != num_registers:
                     logger.fatal(
-                        f"Expected {num_registers} registers but got {len(result.registers)} for address {hex(reg_addr)}")
+                        f"Expected {num_registers} registers but got {len(result.registers)} "
+                        f"for address {hex(reg_addr)}")
                     sys.exit(1)
 
                 self._bad_read_count = 0

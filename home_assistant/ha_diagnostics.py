@@ -1,8 +1,8 @@
 import json
 import time
 
-from carlo_gravazzi.em540_slave_stats import EM540SlaveStats
-from carlo_gravazzi.meter_data import MeterData
+from carlo_gavazzi.em540_slave_stats import EM540SlaveStats
+from carlo_gavazzi.meter_data import MeterData
 from home_assistant.ha_sensors import Sensor
 from fronius.ts65a_slave_stats import Ts65aSlaveStats
 

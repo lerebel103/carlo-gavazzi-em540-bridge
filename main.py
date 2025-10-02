@@ -7,10 +7,10 @@ from pyconfigparser import configparser
 from pymodbus import pymodbus_apply_logging_config
 
 from config import load_config
-from carlo_gravazzi.em540_master import Em540Master
+from carlo_gavazzi.em540_master import Em540Master
 import logging
 
-from carlo_gravazzi.em540_slave_bridge import Em540Slave
+from carlo_gavazzi.em540_slave_bridge import Em540Slave
 from home_assistant.ha_bridge import HABridge
 from fronius.ts65a_slave_bridge import Ts65aSlaveBridge
 

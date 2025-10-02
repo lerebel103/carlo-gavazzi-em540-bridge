@@ -1,6 +1,6 @@
 import unittest
 
-from carlo_gravazzi.meter_data import MeterData
+from carlo_gavazzi.meter_data import MeterData
 from fronius.ts65a_slave_stats import Ts65aSlaveStats
 
 

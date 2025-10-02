@@ -178,9 +178,7 @@ class RegisterDefinition:
     def values(self, new_values: List[int]) -> None:
         """Set new values for the register, ensuring the length matches."""
         if len(new_values) == len(self._values):
-            # Copy each value to avoid reference issues
-            for i in range(len(self._values)):
-                self._values[i] = new_values[i]
+            self._values = new_values
         else:
             raise ValueError(f"Expected length of {len(self._values)} values, got {len(new_values)}")
 
