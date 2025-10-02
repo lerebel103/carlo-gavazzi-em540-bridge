@@ -1,9 +1,27 @@
+"""
+Reference document used for the Modbus mapping:
+https://www.gavazziautomation.com/fileadmin/images/PIM/OTHERSTUFF/COMPRO/EM500_CPP_Mod_V1.3_13022024.pdf
+
+The reason for this register remap is that the EM540 offers two different groupings of registers for the same values,
+in different ranges:
+1. A contiguous block of registers from 0x0000 to 0x0DA (see section 4.1,
+"Instantaneous variables and meters (grouped by variable type)"), which we partially read up to 0x005D (94 registers).
+
+2. A second block of registers called "Instantaneous variables and meters (grouped by phase)" (see section 4.2),
+which is a remapping of the same values, but grouped by phases.
+
+We only read the first block (1) above, and then remap the values to the second block (2) below, so that clients can
+read the values in the more convenient grouping by phase. This optimizes read performance, since we can't read all registers fast enough to keep up with a 10Hz read rate. Even then, not all registers are read, only the most relevant ones.
+"""
+
 import logging
+from typing import List
 
 logger = logging.getLogger()
 
 ZERO_FILL = -1
 
+# Remaps registers from block 0x0000-xxxxx to block 0x0F6h-xxxx, per comments above
 register_remap = [
     # V L1 - N - Value weight: Volt*10
     (0x0, 0x0120), (0x1, 0x0121),
@@ -58,17 +76,17 @@ register_remap = [
     # var sys - Value weight: var*10
     (0x2C, 0x010A), (0x2D, 0x010B),
     # PF L1 - Value weight: PF*1000
-    (ZERO_FILL, 0x012A), (0x2E, 0x012B), # TODO must check that only lower part works in conversion
+    (ZERO_FILL, 0x012A), (0x2E, 0x012B),
     # PF L2 - Value weight: PF*1000
-    (ZERO_FILL, 0x0138), (0x2F, 0x0139), # TODO must check that only lower part works in conversion
+    (ZERO_FILL, 0x0138), (0x2F, 0x0139),
     # PF L3 - Value weight: PF*1000
-    (ZERO_FILL, 0x0146), (0x30, 0x0147), # TODO must check that only lower part works in conversion
+    (ZERO_FILL, 0x0146), (0x30, 0x0147),
     # PF sys - Value weight: PF*1000
-    (ZERO_FILL, 0x010C), (0x31, 0x010D), # TODO must check that only lower part works in conversion
+    (ZERO_FILL, 0x010C), (0x31, 0x010D),
     # Phase sequence
-    (ZERO_FILL, 0x010E), (0x32, 0x010F), # TODO must check that only lower part works in conversion
+    (ZERO_FILL, 0x010E), (0x32, 0x010F),
     # Frequency - Value weight: Hz*100
-    (ZERO_FILL, 0x0110),(0x33, 0x0111), # TODO must check that only lower part works in conversion
+    (ZERO_FILL, 0x0110), (0x33, 0x0111),
 
     # Kw+ Total - Value weight: kWh*10
     (0x34, 0x0112), (0x35, 0x00113),
@@ -138,19 +156,27 @@ register_remap = [
 ]
 
 class RegisterDefinition:
-    def __init__(self, description, values, skip_n_read=0):
+    """Class representing a Modbus register definition.
+    Attributes:
+        description (str): Description of the register.
+        values (List[int]): List of integer values representing the register data.
+        skip_n_read (int): Number of reads to skip before updating values (default is 0).
+        This is used to optimize read performance for non-critical values.
+        """
+    def __init__(self, description: str, values: List[int], skip_n_read: int = 0) -> None:
         self.description: str = description
-        self._values: list[int] = values
+        self._values: List[int] = values
 
         # Where set, only reads every n-th cycle to give better latency and read rates overall for non critical values
         self.skip_n_read: int = skip_n_read  # Number of reads to skip before updating values
 
     @property
-    def values(self) -> list[int]:
+    def values(self) -> List[int]:
         return self._values
 
     @values.setter
-    def values(self, new_values: list[int]) -> None:
+    def values(self, new_values: List[int]) -> None:
+        """Set new values for the register, ensuring the length matches."""
         if len(new_values) == len(self._values):
             # Copy each value to avoid reference issues
             for i in range(len(self._values)):
@@ -168,11 +194,13 @@ class Em540Frame:
         dynamic_reg_map (dict): A dictionary mapping dynamic register addresses to their definitions.
         remapped_reg_map (dict): A dictionary mapping remapped register addresses to their definitions.
     """
+
     def __init__(self, is_em530=False):
         self.is_em530 = is_em530
 
         # Define the registers that are static and only read once on startup.
-        # Some of these may however be updated later via a modbus write command.
+        # Some of these may however be updated later via a modbus write command, but this bridge would be unware of that.
+        # A service restart would be needed to re-read them.
         self.static_reg_map = {
             0x0302: RegisterDefinition("Firmware Version and revision code", [0] * 1),
             0x000B: RegisterDefinition("Device Type", [0] * 1),
@@ -202,18 +230,24 @@ class Em540Frame:
 
         # Define our dynamic registers that are read often
         self.dynamic_reg_map = {
+            # Reads the registers from 0x0000 to 0x005D (90 registers), section 4.1, up to 'kVAh PARTIAL'
             0x0000: RegisterDefinition("Meter Data1", [0] * 0x5A),
+            # Reads Other Instantaneous variables and meters (read only), section 4.2
             0x0500: RegisterDefinition("Meter Data3", [0] * (0x053E - 0x0500 + 2), skip_n_read=4),
         }
 
-        # Define registers that are re-mapped in different ranges, these will be populated manually
-        # by copying the values from the dynamic registers above
+        # Define registers that are re-mapped in different ranges, there are duplicated registeres in the EM540
+        # See comments at the top of this file for more details
         self.remapped_reg_map = {}
         for item in register_remap:
             target_addr = item[1]
             self.remapped_reg_map[target_addr] = RegisterDefinition(f"Reserved {hex(target_addr)}", [0])
 
     def remap_registers(self):
+        """Remap registers from dynamic_reg_map to remapped_reg_map based on register_remap.
+
+        This function copies values from the dynamic registers to the remapped registers, after new data is read
+        from the device."""
         for item in register_remap:
             source_addr = item[0]
             target_addr = item[1]
@@ -241,4 +275,3 @@ class Em540Frame:
 
             else:
                 raise IndexError(f"Target address {hex(target_addr)} is not in remapped_reg_map")
-

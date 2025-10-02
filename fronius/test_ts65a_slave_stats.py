@@ -1,8 +1,7 @@
 import unittest
-from unittest.mock import Mock
 
-from meter_data import MeterData
-from ts65a_slave_stats import Ts65aSlaveStats
+from carlo_gravazzi.meter_data import MeterData
+from fronius.ts65a_slave_stats import Ts65aSlaveStats
 
 
 class TestTs65aSlaveStats(unittest.TestCase):

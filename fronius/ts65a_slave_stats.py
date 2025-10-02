@@ -1,7 +1,6 @@
-from datetime import datetime
 from typing import Callable
 
-from meter_data import MeterData
+from carlo_gravazzi.meter_data import MeterData
 
 
 class Ts65aSlaveStats:

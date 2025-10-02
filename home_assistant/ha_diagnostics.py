@@ -1,10 +1,10 @@
 import json
 import time
 
-from em540_slave_stats import EM540SlaveStats
-from meter_data import MeterData
-from ha_sensors import Sensor
-from ts65a_slave_stats import Ts65aSlaveStats
+from carlo_gravazzi.em540_slave_stats import EM540SlaveStats
+from carlo_gravazzi.meter_data import MeterData
+from home_assistant.ha_sensors import Sensor
+from fronius.ts65a_slave_stats import Ts65aSlaveStats
 
 diag_interval = 5  # seconds
 

@@ -7,12 +7,12 @@ import time
 
 from paho.mqtt.enums import CallbackAPIVersion
 
-from em540_master import MeterDataListener
-from em540_slave_stats import EM540SlaveStats
-from ha_diagnostics import HADiagnostics
-from ha_sensors import EnergyMeterSensor
-from meter_data import MeterData
-from ts65a_slave_stats import Ts65aSlaveStats
+from carlo_gravazzi.em540_master import MeterDataListener
+from carlo_gravazzi.em540_slave_stats import EM540SlaveStats
+from home_assistant.ha_diagnostics import HADiagnostics
+from home_assistant.ha_sensors import EnergyMeterSensor
+from carlo_gravazzi.meter_data import MeterData
+from fronius.ts65a_slave_stats import Ts65aSlaveStats
 
 FIRST_RECONNECT_DELAY = 1
 RECONNECT_RATE = 2

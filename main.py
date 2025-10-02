@@ -7,12 +7,12 @@ from pyconfigparser import configparser
 from pymodbus import pymodbus_apply_logging_config
 
 from config import load_config
-from em540_master import Em540Master
+from carlo_gravazzi.em540_master import Em540Master
 import logging
 
-from em540_slave_bridge import Em540Slave
-from ha_bridge import HABridge
-from ts65a_slave_bridge import Ts65aSlaveBridge
+from carlo_gravazzi.em540_slave_bridge import Em540Slave
+from home_assistant.ha_bridge import HABridge
+from fronius.ts65a_slave_bridge import Ts65aSlaveBridge
 
 logger = logging.getLogger()
 
@@ -42,6 +42,7 @@ async def process_loop():
     em540_master.add_listener(em540_slave)
     em540_master.add_listener(ts65a_slave)
 
+    # Run MQTT bridge if enabled
     if conf.mqtt.enabled:
         mqtt_bridge = HABridge(conf.mqtt)
 
@@ -54,7 +55,6 @@ async def process_loop():
 
         mqtt_bridge.connect()
 
-
     # Start all
     await em540_slave.start()
     await ts65a_slave.start()
@@ -62,17 +62,18 @@ async def process_loop():
     from datetime import datetime
     timeline = datetime.now().timestamp()
     read_interval = conf.em540_master.update_interval
+
+    # This our main loop, we try to read data at a fixed interval
     while True:
         # Ensure em540 client is connected
         if not em540_master.connected:
             await em540_master.connect()
 
-        # Now we can read data
-        await em540_master.read_data()
+        # Acquire data from the EM540
+        await em540_master.acquire_data()
 
         timeline += read_interval
         delta = timeline - datetime.now().timestamp()
-        # print(delta)
         if delta < - 0.2:
             logger.warning(f"Falling behind schedule by {delta:.2f} seconds")
         if delta > 0:

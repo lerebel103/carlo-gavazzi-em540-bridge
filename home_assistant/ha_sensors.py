@@ -1,6 +1,6 @@
 import json
 
-from meter_data import MeterData
+from carlo_gravazzi.meter_data import MeterData
 
 
 class Sensor:

@@ -1,7 +1,7 @@
 import unittest
 from unittest.mock import MagicMock
 
-from ts65a_data import RunningAverage, Ts65aMeterData
+from fronius.ts65a_data import RunningAverage, Ts65aMeterData
 
 
 class TestRunningAverage(unittest.TestCase):
@@ -77,8 +77,8 @@ class TestTs65aMeterData(unittest.TestCase):
         self.meter = Ts65aMeterData(3, -1000, self.logger, self.stats)
 
     def test_initial_values(self):
-        self.assertEqual(self.meter.kwh_neg_total, 0)
-        self.assertEqual(self.meter.kwh_plus_total, 0)
+        self.assertEqual(self.meter.wh_neg_total, 0)
+        self.assertEqual(self.meter.wh_plus_total, 0)
         self.assertEqual(self.meter.current_an, 0.0)
         self.assertEqual(self.meter.voltage_ln, 0.0)
 
@@ -88,11 +88,16 @@ class TestTs65aMeterData(unittest.TestCase):
         self.assertEqual(self.meter.voltage_ln, 20.0)
         self.assertEqual(self.meter.frequency, 50.0)
         self.assertEqual(self.meter.power, 100.0)
-        self.assertEqual(self.meter.kwh_neg_total, 1)
-        self.assertEqual(self.meter.kwh_plus_total, 2)
-        self.assertEqual(self.meter.kwh_plus_l1, 3)
-        self.assertEqual(self.meter.kwh_plus_l2, 4)
-        self.assertEqual(self.meter.kwh_plus_l3, 5)
+        self.assertEqual(self.meter.wh_neg_total, 1000)
+        self.assertEqual(self.meter.wh_plus_total, 2000)
+        self.assertEqual(self.meter.wh_plus_l1, 3000)
+        self.assertEqual(self.meter.wh_plus_l2, 4000)
+        self.assertEqual(self.meter.wh_plus_l3, 5000)
+        self.assertEqual(self.meter.voltage_ll, 30.0)
+        self.assertEqual(self.meter.power_a, 4.0)
+        self.assertEqual(self.meter.apparent_power, 110.0)
+        self.assertEqual(self.meter.reactive_power, 120.0)
+        self.assertEqual(self.meter.power_factor, 0.95)
 
     def test_reset_means_called_on_limit(self):
         self.stats.check_power_over_feed_in_limit.return_value = False

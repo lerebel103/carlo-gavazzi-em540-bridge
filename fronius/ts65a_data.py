@@ -1,6 +1,6 @@
 import collections
 
-from ts65a_slave_stats import Ts65aSlaveStats
+from fronius.ts65a_slave_stats import Ts65aSlaveStats
 
 
 class RunningAverage:

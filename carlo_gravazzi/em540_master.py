@@ -9,8 +9,7 @@ from pymodbus.client import AsyncModbusTcpClient
 from pymodbus import ModbusException
 from pymodbus.exceptions import ModbusIOException
 
-from em540_data import RegisterDefinition
-from meter_data import MeterData
+from carlo_gravazzi.meter_data import MeterData
 
 logger = logging.getLogger('Em540Master')
 
@@ -24,28 +23,39 @@ class MeterDataListener:
 
 
 class Em540Master:
-    def __init__(self, config):
-        self.host = config.host
-        self.port = config.port
-        self._data = MeterData()
-        self.slave_id = config.slave_id
-        self._dyn_reg_read_counter = 0
+    """ Represents a Modbus master that reads data from an EM540 device.
+
+    This class will do its best to read data up to a 10Hz rate which the EM540 is able to provide. However, this can only
+    be achieved if only a subset of the available registers are read. The more registers are read, the slower the update
+    rate will be. The read rate of non-critical data can be configured by setting the 'skip_n_read' parameter in the
+    register definitions in em540_data.py.
+
+    Additionally, a high baud rate of 115200bps should be used on the EM540 to achieve the best performance.
+
+    Asyncio is used to avoid blocking the main thread while waiting for Modbus responses, listeners are notified
+    in a separate thread.
+    """
+    def __init__(self, config) -> None:
+        self.host: str = config.host
+        self.port: int = config.port
+        self._data: MeterData = MeterData()
+        self.slave_id: int = config.slave_id
+        self._dyn_reg_read_counter: int = 0
         self._listeners: list[MeterDataListener] = []
         logger.setLevel(config.log_level)
 
         # Create Modbus client
-        self._client = AsyncModbusTcpClient(
+        self._client: AsyncModbusTcpClient = AsyncModbusTcpClient(
             host=self.host, port=self.port, framer=FramerType.RTU,
             timeout=config.timeout, retries=config.retries)
 
         # create notify mutex
-        self._condition = threading.Condition()
+        self._condition: threading.Condition = threading.Condition()
 
-        self._notify_thread = Thread(target=self._notify_loop, daemon=True)
+        self._notify_thread: Thread = Thread(target=self._notify_loop, daemon=True)
         self._notify_thread.start()
 
-
-    async def connect(self):
+    async def connect(self) -> None:
         # Simulate connecting to the EM540 device
         logger.info(f"Connecting to EM540 at {self.host}:{self.port}...")
 
@@ -61,10 +71,14 @@ class Em540Master:
         else:
             logger.info("Failed to connect to EM540.")
 
-    def _notify_loop(self):
+    def _notify_loop(self) -> None:
         while True:
             with self._condition:
                 self._condition.wait()
+
+                # note the potential for a race condition on data read/updates. That is the data may be updated
+                # while a listener is processing it. Bad threading design... should be fixed when I have time at
+                # some stage.
 
                 # Now update the MeterData from the frame we have just received
                 self._data.update_from_frame()
@@ -76,24 +90,24 @@ class Em540Master:
     def data(self) -> MeterData:
         return self._data
 
-    async def disconnect(self):
+    async def disconnect(self) -> None:
         # Simulate disconnecting from the EM540 device
         if self._client.connected:
             logger.info("Disconnecting from EM540...")
         else:
             logger.info("Already disconnected.")
 
-    def add_listener(self, listener: MeterDataListener):
+    def add_listener(self, listener: MeterDataListener) -> None:
         self._listeners.append(listener)
 
-    def remove_listener(self, listener: MeterDataListener):
+    def remove_listener(self, listener: MeterDataListener) -> None:
         self._listeners.remove(listener)
 
     @property
-    def connected(self):
+    def connected(self) -> bool:
         return self._client.connected
 
-    async def read_data(self) -> bool:
+    async def acquire_data(self) -> bool:
         # No point reading if we are not connected
         if not self._client.connected:
             for listener in self._listeners:
@@ -105,7 +119,7 @@ class Em540Master:
 
         # Read our dynamic registers
         self._dyn_reg_read_counter += 1
-        is_ok = await self._read_registers(frame.dynamic_reg_map, dyn_reg=True)
+        is_ok: bool = await self._read_registers(frame.dynamic_reg_map, dyn_reg=True)
         if is_ok:
             # Now notify listeners
             with self._condition:
@@ -117,14 +131,14 @@ class Em540Master:
 
         return is_ok
 
-    async def _read_registers(self, reg_map: {str, RegisterDefinition}, dyn_reg = False) -> bool:
+    async def _read_registers(self, reg_map: dict, dyn_reg: bool = False) -> bool:
         try:
             # Read dynamic registers
             # Only read the primary register every cycle, the rest are read less often
             # This is because we can't keep up a 10Hz read rate if we read all registers.
             for reg_addr in reg_map:
                 reg_desc = reg_map[reg_addr]
-                skip_n_read = reg_desc.skip_n_read
+                skip_n_read: int = reg_desc.skip_n_read
 
                 # Always perform the first read on all registers
                 # Then skip reads as configured
@@ -133,7 +147,7 @@ class Em540Master:
                         logger.debug(f">>>> Skipping read of '{reg_desc.description}' register at {hex(reg_addr)}, read counter={self._dyn_reg_read_counter}, skip_n_read={skip_n_read}")
                         continue
 
-                num_registers = len(reg_desc.values)
+                num_registers: int = len(reg_desc.values)
                 logger.debug(
                     f"Reading '{reg_desc.description}' from start register address {hex(reg_addr)}, count={num_registers}")
                 result = await self._client.read_holding_registers(reg_addr, count=num_registers,
