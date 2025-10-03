@@ -131,6 +131,73 @@ class TestTs65aMeterData(unittest.TestCase):
         self.assertEqual(len(self.meter._power.values), 1)
         self.assertEqual(self.meter._power.values[0], -1001)
 
+    # Add a unit test to ensure that power is negative when the system power factor is negative
+    def test_power_factor_sign_matches_system_power_mean(self):
+        # Feed several negative values
+        for _ in range(5):
+            self.data.system.power = -500
+            self.data.system.power_factor = -0.8
+            self.meter.update(self.data)
+        self.assertLess(self.meter.power, 0)
+        self.assertLess(self.meter.power_factor, 0)
+
+        # Feed several positive values
+        for _ in range(5):
+            self.data.system.power = 500
+            self.data.system.power_factor = 0.8
+            self.meter.update(self.data)
+        self.assertGreater(self.meter.power, 0)
+        self.assertGreater(self.meter.power_factor, 0)
+
+    # Do the same for a, b, and c phases
+    def test_phase_power_factor_sign_matches_phase_power_mean(self):
+        # Feed several negative values for phase A
+        for _ in range(5):
+            self.data.phases[0].power = -200
+            self.data.phases[0].power_factor = -0.9
+            self.meter.update(self.data)
+        self.assertLess(self.meter.power_a, 0)
+        self.assertLess(self.meter.power_factor_a, 0)
+
+        # Feed several positive values for phase A
+        for _ in range(5):
+            self.data.phases[0].power = 200
+            self.data.phases[0].power_factor = 0.9
+            self.meter.update(self.data)
+        self.assertGreater(self.meter.power_a, 0)
+        self.assertGreater(self.meter.power_factor_a, 0)
+
+        # Repeat for phase B
+        for _ in range(5):
+            self.data.phases[1].power = -300
+            self.data.phases[1].power_factor = -0.85
+            self.meter.update(self.data)
+        self.assertLess(self.meter.power_b, 0)
+        self.assertLess(self.meter.power_factor_b, 0)
+
+        for _ in range(5):
+            self.data.phases[1].power = 300
+            self.data.phases[1].power_factor = 0.85
+            self.meter.update(self.data)
+        self.assertGreater(self.meter.power_b, 0)
+        self.assertGreater(self.meter.power_factor_b, 0)
+
+        # Repeat for phase C
+        for _ in range(5):
+            self.data.phases[2].power = -400
+            self.data.phases[2].power_factor = -0.75
+            self.meter.update(self.data)
+        self.assertLess(self.meter.power_c, 0)
+        self.assertLess(self.meter.power_factor_c, 0)
+
+        for _ in range(5):
+            self.data.phases[2].power = 400
+            self.data.phases[2].power_factor = 0.75
+            self.meter.update(self.data)
+        self.assertGreater(self.meter.power_c, 0)
+        self.assertGreater(self.meter.power_factor_c, 0)
+
+
 
 if __name__ == "__main__":
     unittest.main()

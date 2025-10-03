@@ -25,7 +25,7 @@ class Ts65aSlaveStats:
     def add_listener(self, listener: Callable[["Ts65aSlaveStats"], None]):
         self._listeners.append(listener)
 
-    def _over_feed_in_limit(self, timestamp: float) -> bool:
+    def _over_feed_in_limit(self, timestamp: float):
         """Record when we go over the feed-in limit"""
         if self._over_limit_start_time is None:
             # Record the first time we go over the limit as an event
