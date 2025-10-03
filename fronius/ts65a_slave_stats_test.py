@@ -13,8 +13,10 @@ class TestTs65aSlaveStats(unittest.TestCase):
 
     def test_add_listener_and_changed(self):
         called = []
+
         def listener(stats):
             called.append(stats)
+
         self.stats.add_listener(listener)
         self.stats.changed()
         self.assertEqual(len(called), 1)
@@ -45,6 +47,7 @@ class TestTs65aSlaveStats(unittest.TestCase):
         self.data.system.power = 1
         result = self.stats.check_power_over_feed_in_limit(self.data)
         self.assertFalse(result)
+
 
 if __name__ == "__main__":
     unittest.main()

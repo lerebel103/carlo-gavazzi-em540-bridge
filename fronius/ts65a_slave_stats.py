@@ -16,17 +16,17 @@ class Ts65aSlaveStats:
         self.power_over_feed_in_limit_count: int = 0
         self.power_over_feed_limit_max_duration_sec: float = 0.0
 
-        self._listeners: list[Callable[['Ts65aSlaveStats'], None]] = []
+        self._listeners: list[Callable[["Ts65aSlaveStats"], None]] = []
 
     def changed(self):
         for listener in self._listeners:
             listener(self)
 
-    def add_listener(self, listener: Callable[['Ts65aSlaveStats'], None]):
+    def add_listener(self, listener: Callable[["Ts65aSlaveStats"], None]):
         self._listeners.append(listener)
 
     def _over_feed_in_limit(self, timestamp: float) -> bool:
-        """ Record when we go over the feed-in limit """
+        """Record when we go over the feed-in limit"""
         if self._over_limit_start_time is None:
             # Record the first time we go over the limit as an event
             self.power_over_feed_in_limit_count += 1
@@ -34,19 +34,19 @@ class Ts65aSlaveStats:
             self.changed()
 
     def _reset_over_limit_timer(self, timestamp: float):
-        """ Reset the over limit timer, and return True if we were previously over the limit """
+        """Reset the over limit timer, and return True if we were previously over the limit"""
         if self._over_limit_start_time is not None:
             # We were already over the limit, so accumulate the duration
             duration = timestamp - self._over_limit_start_time
-            self.power_over_feed_limit_max_duration_sec = max(duration,
-                                                              self.power_over_feed_limit_max_duration_sec)
+            self.power_over_feed_limit_max_duration_sec = max(
+                duration, self.power_over_feed_limit_max_duration_sec
+            )
             # Reset the timer
             self._over_limit_start_time = None
             self.changed()
 
-
     def check_power_over_feed_in_limit(self, data: MeterData) -> bool:
-        """ Check if the given power is over the feed-in limit, and update stats accordingly.
+        """Check if the given power is over the feed-in limit, and update stats accordingly.
         Return True if we are currently over the limit."""
         is_over_limit = False
 
@@ -58,5 +58,3 @@ class Ts65aSlaveStats:
             self._reset_over_limit_timer(data.timestamp)
 
         return is_over_limit
-
-

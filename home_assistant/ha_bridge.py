@@ -1,36 +1,38 @@
 import logging
-import sys
-
-from paho.mqtt import client as mqtt_client
 import random
+import sys
 import time
 
+from paho.mqtt import client as mqtt_client
 from paho.mqtt.enums import CallbackAPIVersion
 
 from carlo_gavazzi.em540_master import MeterDataListener
 from carlo_gavazzi.em540_slave_stats import EM540SlaveStats
-from home_assistant.ha_diagnostics import HADiagnostics
-from home_assistant.ha_sensors import EnergyMeterSensor
 from carlo_gavazzi.meter_data import MeterData
 from fronius.ts65a_slave_stats import Ts65aSlaveStats
+from home_assistant.ha_diagnostics import HADiagnostics
+from home_assistant.ha_sensors import EnergyMeterSensor
 
 FIRST_RECONNECT_DELAY = 1
 RECONNECT_RATE = 2
 MAX_RECONNECT_COUNT = sys.maxsize
 MAX_RECONNECT_DELAY = 60
 
-logger = logging.getLogger('ha-bridge')
+logger = logging.getLogger("ha-bridge")
 
 
 class HABridge(MeterDataListener):
-    """ Represents a MQTT bridge to Home Assistant
+    """Represents a MQTT bridge to Home Assistant
     Sensors are defined in ha_sensors.py
     """
+
     def __init__(self, conf):
-        client_id = f'publish-{random.randint(0, 1000)}'
+        client_id = f"publish-{random.randint(0, 1000)}"
         self.host = conf.host
         self.port = conf.port
-        self.client = mqtt_client.Client(CallbackAPIVersion.VERSION2, client_id, userdata=self)
+        self.client = mqtt_client.Client(
+            CallbackAPIVersion.VERSION2, client_id, userdata=self
+        )
         self.client.username_pw_set(conf.username, conf.password)
         self.client.on_connect = HABridge.on_connect
         self.client.on_disconnect = HABridge.on_disconnect
@@ -41,7 +43,6 @@ class HABridge(MeterDataListener):
         self._diagnostics = HADiagnostics()
 
         logger.setLevel(conf.log_level)
-
 
     def connect(self):
         if len(self.host):
@@ -96,16 +97,18 @@ class HABridge(MeterDataListener):
             # Now publish all sensor data
             topic, payload = self.sensors.mqtt_data()
             try:
-               self.publish(topic, payload)
+                self.publish(topic, payload)
             except Exception as err:
                 logger.error(f"Failed to publish sensor data on topic {topic}: {err}")
 
             # Do the same with diagnostics
             topic, payload = self._diagnostics.mqtt_data()
             try:
-               self.publish(topic, payload)
+                self.publish(topic, payload)
             except Exception as err:
-                logger.error(f"Failed to publish diagnostics data on topic {topic}: {err}")
+                logger.error(
+                    f"Failed to publish diagnostics data on topic {topic}: {err}"
+                )
 
     async def read_failed(self):
         self._diagnostics.read_failed()
@@ -123,7 +126,6 @@ class HABridge(MeterDataListener):
                 self.publish(topic, msg, retain=True)
             except Exception as err:
                 logger.error(f"Failed to advertise sensor on topic {topic}: {err}")
-
 
     def on_ts65a_slave_stats(self, stats: Ts65aSlaveStats):
         self._diagnostics.set_ts_65a_slave_stats(stats)

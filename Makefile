@@ -9,8 +9,11 @@ run:
 run-service:
 	docker compose up -d --build
 
+test:
+	python -m unittest discover -p '*_test.py'
+
 # Linting
 lint:
-	flake8 .
-	black --check .
-	isort --check-only .
+	black .
+	isort .
+	flake8 --config .flake8 .

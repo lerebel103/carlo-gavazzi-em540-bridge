@@ -2,29 +2,29 @@
 # -*- coding: utf-8 -*-
 import argparse
 import asyncio
+import logging
 
 from pyconfigparser import configparser
 from pymodbus import pymodbus_apply_logging_config
 
-from config import load_config
 from carlo_gavazzi.em540_master import Em540Master
-import logging
-
 from carlo_gavazzi.em540_slave_bridge import Em540Slave
-from home_assistant.ha_bridge import HABridge
+from config import load_config
 from fronius.ts65a_slave_bridge import Ts65aSlaveBridge
+from home_assistant.ha_bridge import HABridge
 
 logger = logging.getLogger()
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description='EM540 Modbus bridge')
+    parser = argparse.ArgumentParser(description="EM540 Modbus bridge")
 
     parser.add_argument(
-        '--config',
+        "--config",
         type=str,
-        default='config/config.yaml',
-        help='Path to configuration file')
+        default="config/config.yaml",
+        help="Path to configuration file",
+    )
 
     return parser.parse_args()
 
@@ -60,6 +60,7 @@ async def process_loop():
     await ts65a_slave.start()
 
     from datetime import datetime
+
     timeline = datetime.now().timestamp()
     read_interval = conf.em540_master.update_interval
 
@@ -74,7 +75,7 @@ async def process_loop():
 
         timeline += read_interval
         delta = timeline - datetime.now().timestamp()
-        if delta < - 0.2:
+        if delta < -0.2:
             logger.warning(f"Falling behind schedule by {delta:.2f} seconds")
         if delta > 0:
             await asyncio.sleep(delta)
@@ -87,7 +88,7 @@ async def main():
     await process_loop()
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     args = parse_args()
     load_config(args.config)
 

@@ -1,12 +1,11 @@
 import logging
 from datetime import datetime
+from typing import Optional
 
 from pymodbus import ExceptionResponse
 from pymodbus.constants import ExcCodes
 from pymodbus.pdu import ModbusPDU
 
-
-from typing import Optional
 
 class PduHelper:
     def __init__(self, logger: logging.Logger, bridge_timeout: float) -> None:
@@ -19,8 +18,13 @@ class PduHelper:
         # Here we deliberately drop requests if we have not received any data from the master
         # within the bridge timeout period.
         now: float = datetime.now().timestamp()
-        if self._last_rx_timestamp is None or (now - self._last_rx_timestamp)  > self.bridge_timeout:
-            self.logger.warning("Dropping request since no data received from master within timeout period")
+        if (
+            self._last_rx_timestamp is None
+            or (now - self._last_rx_timestamp) > self.bridge_timeout
+        ):
+            self.logger.warning(
+                "Dropping request since no data received from master within timeout period"
+            )
 
             if flag:
                 # Only modify responses to say we are busy
@@ -29,7 +33,7 @@ class PduHelper:
                     pdu.function_code,
                     exception_code=ExcCodes.DEVICE_BUSY,
                     device_id=pdu.dev_id,
-                    transaction=pdu.transaction_id
+                    transaction=pdu.transaction_id,
                 )
 
         # Log some exceptions so we can debug any issues with register access not accounted for...

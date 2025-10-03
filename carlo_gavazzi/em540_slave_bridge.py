@@ -2,11 +2,8 @@ import logging
 from typing import Callable
 
 from pymodbus import FramerType
-from pymodbus.datastore import (
-    ModbusDeviceContext,
-    ModbusServerContext,
-    ModbusSparseDataBlock,
-)
+from pymodbus.datastore import (ModbusDeviceContext, ModbusServerContext,
+                                ModbusSparseDataBlock)
 from pymodbus.server import ModbusTcpServer
 
 from carlo_gavazzi.em540_data import Em540Frame
@@ -17,12 +14,12 @@ from utils.pdu_helper import PduHelper
 
 REG_OFFSET = 1  # Modbus addresses are 1-based, pymodbus uses 0-based
 
-logger = logging.getLogger('em540-slave')
+logger = logging.getLogger("em540-slave")
 
 
 class Em540Slave(MeterDataListener):
-    """ Represents a Modbus slave that serves data read from an EM540 master.
-    """
+    """Represents a Modbus slave that serves data read from an EM540 master."""
+
     def __init__(self, config, frame: Em540Frame) -> None:
         self.host: str = config.host
         self.rtu_port: int = config.rtu_port
@@ -35,7 +32,7 @@ class Em540Slave(MeterDataListener):
 
         # Build a sparse datablock with the size of the frame registers
         values: dict[int, list[int]] = {}
-        logger.info('Building Modbus sparse datablock...')
+        logger.info("Building Modbus sparse datablock...")
 
         for addr in frame.static_reg_map:
             logger.debug("Adding static reg " + hex(addr))
@@ -57,23 +54,25 @@ class Em540Slave(MeterDataListener):
             hr=self.datablock,
             ir=self.datablock,
         )
-        context: ModbusServerContext = ModbusServerContext(devices={self._slave_id: self._context}, single=False)
+        context: ModbusServerContext = ModbusServerContext(
+            devices={self._slave_id: self._context}, single=False
+        )
 
         # Modbus RTU over socket server
         self._rtu_server: ModbusTcpServer = ModbusTcpServer(
             framer=FramerType.RTU,
-                                       context=context,
-                                       address=(self.host, self.rtu_port),
-            trace_connect=self._rtu_trace_connect
+            context=context,
+            address=(self.host, self.rtu_port),
+            trace_connect=self._rtu_trace_connect,
         )
 
         # Modbus TCP server
         self._tcp_server: ModbusTcpServer = ModbusTcpServer(
             framer=FramerType.SOCKET,
-                                       context=context,
-                                       address=(self.host, self.tcp_port),
-                                       trace_pdu=self._pdu_helper.on_pdu,
-            trace_connect=self._tcp_trace_connect
+            context=context,
+            address=(self.host, self.tcp_port),
+            trace_pdu=self._pdu_helper.on_pdu,
+            trace_connect=self._tcp_trace_connect,
         )
 
     def _rtu_trace_connect(self, connect: bool) -> None:
@@ -112,15 +111,21 @@ class Em540Slave(MeterDataListener):
 
         # Update dynamic registers in the datablock
         for addr in frame.dynamic_reg_map:
-            self.datablock.setValues(addr + REG_OFFSET, frame.dynamic_reg_map[addr].values)
+            self.datablock.setValues(
+                addr + REG_OFFSET, frame.dynamic_reg_map[addr].values
+            )
 
         # Update static registers in the datablock (in case they changed)
         for addr in frame.static_reg_map:
-            self.datablock.setValues(addr + REG_OFFSET, frame.static_reg_map[addr].values)
+            self.datablock.setValues(
+                addr + REG_OFFSET, frame.static_reg_map[addr].values
+            )
 
         # Update remapped values
         for addr in frame.remapped_reg_map:
-            self.datablock.setValues(addr + REG_OFFSET, frame.remapped_reg_map[addr].values)
+            self.datablock.setValues(
+                addr + REG_OFFSET, frame.remapped_reg_map[addr].values
+            )
 
         # Now update our PDU helper with the timestamp of this data
         self._pdu_helper.data_received(data.timestamp)

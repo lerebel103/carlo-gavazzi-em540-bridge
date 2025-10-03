@@ -4,14 +4,13 @@ import sys
 import threading
 from threading import Thread
 
-from pymodbus import FramerType
+from pymodbus import FramerType, ModbusException
 from pymodbus.client import AsyncModbusTcpClient
-from pymodbus import ModbusException
 from pymodbus.exceptions import ModbusIOException
 
 from carlo_gavazzi.meter_data import MeterData
 
-logger = logging.getLogger('Em540Master')
+logger = logging.getLogger("Em540Master")
 
 
 class MeterDataListener:
@@ -23,12 +22,12 @@ class MeterDataListener:
 
 
 class Em540Master:
-    """ Represents a Modbus master that reads data from an EM540 device.
+    """Represents a Modbus master that reads data from an EM540 device.
 
-    This class will do its best to read data up to a 10Hz rate which the EM540 is able to provide. However, this can only
-    be achieved if only a subset of the available registers are read. The more registers are read, the slower the update
-    rate will be. The read rate of non-critical data can be configured by setting the 'skip_n_read' parameter in the
-    register definitions in em540_data.py.
+    This class will do its best to read data up to a 10Hz rate which the EM540 is able to provide. However, this can
+    only be achieved if only a subset of the available registers are read. The more registers are read, the slower the
+    update rate will be. The read rate of non-critical data can be configured by setting the 'skip_n_read' parameter in
+    the register definitions in em540_data.py.
 
     Additionally, a high baud rate of 115200bps should be used on the EM540 to achieve the best performance.
 
@@ -47,8 +46,12 @@ class Em540Master:
 
         # Create Modbus client
         self._client: AsyncModbusTcpClient = AsyncModbusTcpClient(
-            host=self.host, port=self.port, framer=FramerType.RTU,
-            timeout=config.timeout, retries=config.retries)
+            host=self.host,
+            port=self.port,
+            framer=FramerType.RTU,
+            timeout=config.timeout,
+            retries=config.retries,
+        )
 
         # create notify mutex
         self._condition: threading.Condition = threading.Condition()
@@ -58,7 +61,9 @@ class Em540Master:
 
     async def connect(self) -> None:
         # Simulate connecting to the EM540 device
-        logger.info(f"Connecting to EM540 at {self.host}:{self.port}...")
+        logger.info(
+            "Connecting to EM540 at " + self.host + ":" + str(self.port) + "..."
+        )
 
         await self._client.connect()
         if self._client.connected:
@@ -147,27 +152,33 @@ class Em540Master:
                     if (self._dyn_reg_read_counter % (skip_n_read + 1)) != 0:
                         logger.debug(
                             f">>>> Skipping read of '{reg_desc.description}' register "
-                            f"at {hex(reg_addr)}, read counter={self._dyn_reg_read_counter}, skip_n_read={skip_n_read}")
+                            f"at {hex(reg_addr)}, read counter={self._dyn_reg_read_counter}, skip_n_read={skip_n_read}"
+                        )
                         continue
 
                 num_registers: int = len(reg_desc.values)
                 logger.debug(
                     f"Reading '{reg_desc.description}' from start register address {hex(reg_addr)}, "
-                    f"count={num_registers}")
-                result = await self._client.read_holding_registers(reg_addr, count=num_registers,
-                                                                   device_id=self.slave_id)
+                    f"count={num_registers}"
+                )
+                result = await self._client.read_holding_registers(
+                    reg_addr, count=num_registers, device_id=self.slave_id
+                )
 
                 if result.isError():
-                    logger.error(f"Error reading register {hex(reg_addr)}, count={num_registers}")
+                    logger.error(
+                        f"Error reading register {hex(reg_addr)}, count={num_registers}"
+                    )
                     return False
 
                 # Check if we received the expected number of registers
-                # Force quit to be safe, as it seems at that stage the client is in a bad state and further reads will fail
-                # with out-of-order responses. Resetting the client could be better, but for now just exit.
+                # Force quit to be safe, as it seems at that stage the client is in a bad state and further reads will
+                # fail with out-of-order responses. Resetting the client could be better, but for now just exit.
                 if len(result.registers) != num_registers:
                     logger.fatal(
                         f"Expected {num_registers} registers but got {len(result.registers)} "
-                        f"for address {hex(reg_addr)}")
+                        f"for address {hex(reg_addr)}"
+                    )
                     sys.exit(1)
 
                 self._bad_read_count = 0

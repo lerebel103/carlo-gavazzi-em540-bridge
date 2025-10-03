@@ -11,7 +11,9 @@ in different ranges:
 which is a remapping of the same values, but grouped by phases.
 
 We only read the first block (1) above, and then remap the values to the second block (2) below, so that clients can
-read the values in the more convenient grouping by phase. This optimizes read performance, since we can't read all registers fast enough to keep up with a 10Hz read rate. Even then, not all registers are read, only the most relevant ones.
+read the values in the more convenient grouping by phase. This optimizes read performance, since we can't read all
+registers fast enough to keep up with a 10Hz read rate. Even then, not all registers are read, only the most relevant
+ones.
 """
 
 import logging
@@ -24,116 +26,153 @@ ZERO_FILL = -1
 # Remaps registers from block 0x0000-xxxxx to block 0x0F6h-xxxx, per comments above
 register_remap = [
     # V L1 - N - Value weight: Volt*10
-    (0x0, 0x0120), (0x1, 0x0121),
+    (0x0, 0x0120),
+    (0x1, 0x0121),
     # V L2 - N - Value weight: Volt*10
-    (0x2, 0x012E), (0x3, 0x012F),
+    (0x2, 0x012E),
+    (0x3, 0x012F),
     # V L3 - N - Value weight: Volt*10
-    (0x4, 0x013C), (0x5, 0x013D),
-
+    (0x4, 0x013C),
+    (0x5, 0x013D),
     # V L1 - L2 - Value weight: Volt*10
-    (0x6, 0x011E), (0x7, 0x011F),
+    (0x6, 0x011E),
+    (0x7, 0x011F),
     # V L2 - L3 - Value weight: Volt*10
-    (0x8, 0x012C), (0x9, 0x012D),
+    (0x8, 0x012C),
+    (0x9, 0x012D),
     # V L3 - L1 - Value weight: Volt*10
-    (0x0A, 0x013A), (0x0B, 0x013B),
-
+    (0x0A, 0x013A),
+    (0x0B, 0x013B),
     # A L1 - Value weight: Ampere*1000
-    (0x0C, 0x0122), (0x0D, 0x0123),
+    (0x0C, 0x0122),
+    (0x0D, 0x0123),
     # A L2 - Value weight: Ampere*1000
-    (0x0E, 0x0130), (0x0F, 0x0131),
+    (0x0E, 0x0130),
+    (0x0F, 0x0131),
     # A L3 - Value weight: Ampere*1000
-    (0x10, 0x013E), (0x11, 0x013F),
-
+    (0x10, 0x013E),
+    (0x11, 0x013F),
     # W L1 - Value weight: Watt*10
-    (0x12, 0x0124), (0x13, 0x0125),
+    (0x12, 0x0124),
+    (0x13, 0x0125),
     # W L2 - Value weight: Watt*10
-    (0x14, 0x0132), (0x15, 0x0133),
+    (0x14, 0x0132),
+    (0x15, 0x0133),
     # W L3 - Value weight: Watt*10
-    (0x16, 0x0140), (0x17, 0x0141),
-
+    (0x16, 0x0140),
+    (0x17, 0x0141),
     # VA L1 - Value weight: VA*10
-    (0x18, 0x0126), (0x19, 0x0127),
+    (0x18, 0x0126),
+    (0x19, 0x0127),
     # VA L2 - Value weight: VA*10
-    (0x1A, 0x0134), (0x1B, 0x0135),
+    (0x1A, 0x0134),
+    (0x1B, 0x0135),
     # VA L3 - Value weight: VA*10
-    (0x1C, 0x0142), (0x1D, 0x0143),
-
+    (0x1C, 0x0142),
+    (0x1D, 0x0143),
     # var L1 - Value weight: var*10
-    (0x1E, 0x0128), (0x1F, 0x0129),
+    (0x1E, 0x0128),
+    (0x1F, 0x0129),
     # var L2 - Value weight: var*10
-    (0x20, 0x0136), (0x21, 0x0137),
+    (0x20, 0x0136),
+    (0x21, 0x0137),
     # var L3 - Value weight: var*10
-    (0x22, 0x0144), (0x23, 0x0145),
-
+    (0x22, 0x0144),
+    (0x23, 0x0145),
     # V L-N sys - Value weight: Volt*10
-    (0x24, 0x0102), (0x25, 0x0103),
+    (0x24, 0x0102),
+    (0x25, 0x0103),
     # V L-L sys - Value weight: Volt*10
-    (0x26, 0x0104), (0x27, 0x0105),
+    (0x26, 0x0104),
+    (0x27, 0x0105),
     # W sys - Value weight: Watt*10
-    (0x28, 0x0106), (0x29, 0x0107),
+    (0x28, 0x0106),
+    (0x29, 0x0107),
     # VA sys - Value weight: VA*10
-    (0x2A, 0x0108), (0x2B, 0x0109),
+    (0x2A, 0x0108),
+    (0x2B, 0x0109),
     # var sys - Value weight: var*10
-    (0x2C, 0x010A), (0x2D, 0x010B),
+    (0x2C, 0x010A),
+    (0x2D, 0x010B),
     # PF L1 - Value weight: PF*1000
-    (ZERO_FILL, 0x012A), (0x2E, 0x012B),
+    (ZERO_FILL, 0x012A),
+    (0x2E, 0x012B),
     # PF L2 - Value weight: PF*1000
-    (ZERO_FILL, 0x0138), (0x2F, 0x0139),
+    (ZERO_FILL, 0x0138),
+    (0x2F, 0x0139),
     # PF L3 - Value weight: PF*1000
-    (ZERO_FILL, 0x0146), (0x30, 0x0147),
+    (ZERO_FILL, 0x0146),
+    (0x30, 0x0147),
     # PF sys - Value weight: PF*1000
-    (ZERO_FILL, 0x010C), (0x31, 0x010D),
+    (ZERO_FILL, 0x010C),
+    (0x31, 0x010D),
     # Phase sequence
-    (ZERO_FILL, 0x010E), (0x32, 0x010F),
+    (ZERO_FILL, 0x010E),
+    (0x32, 0x010F),
     # Frequency - Value weight: Hz*100
-    (ZERO_FILL, 0x0110), (0x33, 0x0111),
-
+    (ZERO_FILL, 0x0110),
+    (0x33, 0x0111),
     # Kw+ Total - Value weight: kWh*10
-    (0x34, 0x0112), (0x35, 0x00113),
+    (0x34, 0x0112),
+    (0x35, 0x00113),
     # Kvar+ Total - Value weight: kvarh*10
-    (0x36, 0x0114), (0x37, 0x0115),
+    (0x36, 0x0114),
+    (0x37, 0x0115),
     # W sys DMD - Value weight: Watt*10
-    (0x38, 0x011A), (0x39, 0x011B),
+    (0x38, 0x011A),
+    (0x39, 0x011B),
     # W sys DMD Max - Value weight: Watt*10
-    (0x3A, 0x011C), (0x3B, 0x011D),
-
+    (0x3A, 0x011C),
+    (0x3B, 0x011D),
     # Kwh (+) PARTIAL - Value weight: kWh*10
-    (0x3C, 0x0148), (0x3D, 0x0149),
+    (0x3C, 0x0148),
+    (0x3D, 0x0149),
     # Kvarh (+) PARTIAL - Value weight: kvarh*10
-    (0x3E, 0x014A), (0x3F, 0x014B),
+    (0x3E, 0x014A),
+    (0x3F, 0x014B),
     # Kwh (+) L1 - Value weight: kWh*10
-    (0x40, 0x014C), (0x41, 0x014D),
+    (0x40, 0x014C),
+    (0x41, 0x014D),
     # Kwh (+) L2 - Value weight: kWh*10
-    (0x42, 0x014E), (0x43, 0x014F),
+    (0x42, 0x014E),
+    (0x43, 0x014F),
     # Kwh (+) L3 - Value weight: kWh*10
-    (0x44, 0x0150), (0x45, 0x0151),
+    (0x44, 0x0150),
+    (0x45, 0x0151),
     # Kwh (+) t1 - Value weight: kWh*10
-    (0x46, 0x0152), (0x47, 0x0153),
+    (0x46, 0x0152),
+    (0x47, 0x0153),
     # Kwh (+) t2 - Value weight: kWh*10
-    (0x48, 0x0154), (0x49, 0x0155),
+    (0x48, 0x0154),
+    (0x49, 0x0155),
     # n.a.
-    (0x4A, ZERO_FILL), (0x4B, ZERO_FILL),
+    (0x4A, ZERO_FILL),
+    (0x4B, ZERO_FILL),
     # n.a.
-    (0x4C, ZERO_FILL), (0x4D, ZERO_FILL),
-
+    (0x4C, ZERO_FILL),
+    (0x4D, ZERO_FILL),
     # Kwh (-) Total - Value weight: kWh*10
-    (0x4E, 0x0116), (0x4F, 0x0117),
+    (0x4E, 0x0116),
+    (0x4F, 0x0117),
     # Kvarh (-) Total - Value weight: kvarh*10
-    (0x50, 0x0118), (0x51, 0x0119),
+    (0x50, 0x0118),
+    (0x51, 0x0119),
     # Kwh (-) PARTIAL - Value weight: kWh*10
-    (0x52, 0x015A), (0x53, 0x015B),
+    (0x52, 0x015A),
+    (0x53, 0x015B),
     # Kvarh (-) PARTIAL - Value weight: kvarh*10
-    (0x54, 0x015C), (0x55, 0x015D),
+    (0x54, 0x015C),
+    (0x55, 0x015D),
     # KVah Total - Value weight: kVAh*10
-    (0x56, 0x015E), (0x57, 0x015F),
+    (0x56, 0x015E),
+    (0x57, 0x015F),
     # KVAh partial - Value weight: kVAh*10
-    (0x58, 0x0160), (0x59, 0x0161),
-
+    (0x58, 0x0160),
+    (0x59, 0x0161),
     # Run hour meter, Value weight: hours*100
     # (0x5C, 0x00FE), (0x5D, 0x00FF),
     # Run hour meter KWh (-), Value weight: hours*100
     # (0x5A, 0x00F6), (0x5B, 0x00F7),
-
     # n.a.
     # (0x5E, ZERO_FILL), (0x5F, ZERO_FILL),
     # n.a.
@@ -150,10 +189,10 @@ register_remap = [
     # (0x6A, ZERO_FILL), (0x6B, ZERO_FILL),
     # n.a.
     # (0x6C, ZERO_FILL), (0x6D, ZERO_FILL),
-
     # Run hour meter partial
     # (0x6E, 0x00F8), (0x6F, 0x00F9),
 ]
+
 
 class RegisterDefinition:
     """Class representing a Modbus register definition.
@@ -162,13 +201,18 @@ class RegisterDefinition:
         values (List[int]): List of integer values representing the register data.
         skip_n_read (int): Number of reads to skip before updating values (default is 0).
         This is used to optimize read performance for non-critical values.
-        """
-    def __init__(self, description: str, values: List[int], skip_n_read: int = 0) -> None:
+    """
+
+    def __init__(
+        self, description: str, values: List[int], skip_n_read: int = 0
+    ) -> None:
         self.description: str = description
         self._values: List[int] = values
 
         # Where set, only reads every n-th cycle to give better latency and read rates overall for non critical values
-        self.skip_n_read: int = skip_n_read  # Number of reads to skip before updating values
+        self.skip_n_read: int = (
+            skip_n_read  # Number of reads to skip before updating values
+        )
 
     @property
     def values(self) -> List[int]:
@@ -180,7 +224,9 @@ class RegisterDefinition:
         if len(new_values) == len(self._values):
             self._values = new_values
         else:
-            raise ValueError(f"Expected length of {len(self._values)} values, got {len(new_values)}")
+            raise ValueError(
+                f"Expected length of {len(self._values)} values, got {len(new_values)}"
+            )
 
 
 class Em540Frame:
@@ -197,41 +243,51 @@ class Em540Frame:
         self.is_em530 = is_em530
 
         # Define the registers that are static and only read once on startup.
-        # Some of these may however be updated later via a modbus write command, but this bridge would be unware of that.
+        # Some of these may however be updated later via a modbus write command, but this bridge would be unaware of
+        # that.
         # A service restart would be needed to re-read them.
         self.static_reg_map = {
             0x0302: RegisterDefinition("Firmware Version and revision code", [0] * 1),
             0x000B: RegisterDefinition("Device Type", [0] * 1),
             0x1002: RegisterDefinition("Measuring System", [0] * 1),
             0x1010: RegisterDefinition("DMD Integration Time", [0] * 2),
-            0x1012: RegisterDefinition("Output Alarm and Pulse Output Config", [0] * 16),
+            0x1012: RegisterDefinition(
+                "Output Alarm and Pulse Output Config", [0] * 16
+            ),
             0x1101: RegisterDefinition("Tariff Enabling", [0] * 1),
             0x1103: RegisterDefinition("Measurement Mode", [0] * 1),
             0x1104: RegisterDefinition("Wrong connection", [0] * 2),
             0x110B: RegisterDefinition("Hour Counter Configuration", [0] * 1),
             0x1150: RegisterDefinition("Terminal Block Configuration", [0] * 9),
-            0x1200: RegisterDefinition("Digital Input and Active Tariff Selection", [0] * 2),
-            0x1600: RegisterDefinition("Pages filter, Screen Saver and Home Page", [0] * (0x2A + 1)),
+            0x1200: RegisterDefinition(
+                "Digital Input and Active Tariff Selection", [0] * 2
+            ),
+            0x1600: RegisterDefinition(
+                "Pages filter, Screen Saver and Home Page", [0] * (0x2A + 1)
+            ),
             # Serial port config and reset command omitted
             0x4100: RegisterDefinition("Offset1", [0] * (0x4 + 1)),
             0x4200: RegisterDefinition("Offset2", [0] * (0x10 + 4)),
             0x5000: RegisterDefinition("Serial Number", [0] * 8),
             0x5008: RegisterDefinition("Name", [0] * 8),
             0x5012: RegisterDefinition("Device State", [0] * (0x30 - 0x12 + 2)),
-
         }
 
         if self.is_em530:
-            self.static_reg_map.update({
-                0x1003: RegisterDefinition("CT ratio", [0] * 2),  # only for EM530
-            })
+            self.static_reg_map.update(
+                {
+                    0x1003: RegisterDefinition("CT ratio", [0] * 2),  # only for EM530
+                }
+            )
 
         # Define our dynamic registers that are read often
         self.dynamic_reg_map = {
             # Reads the registers from 0x0000 to 0x005D (90 registers), section 4.1, up to 'kVAh PARTIAL'
             0x0000: RegisterDefinition("Meter Data1", [0] * 0x5A),
             # Reads Other Instantaneous variables and meters (read only), section 4.2
-            0x0500: RegisterDefinition("Meter Data3", [0] * (0x053E - 0x0500 + 2), skip_n_read=4),
+            0x0500: RegisterDefinition(
+                "Meter Data3", [0] * (0x053E - 0x0500 + 2), skip_n_read=4
+            ),
         }
 
         # Define registers that are re-mapped in different ranges, there are duplicated registeres in the EM540
@@ -239,7 +295,9 @@ class Em540Frame:
         self.remapped_reg_map = {}
         for item in register_remap:
             target_addr = item[1]
-            self.remapped_reg_map[target_addr] = RegisterDefinition(f"Reserved {hex(target_addr)}", [0])
+            self.remapped_reg_map[target_addr] = RegisterDefinition(
+                f"Reserved {hex(target_addr)}", [0]
+            )
 
     def remap_registers(self):
         """Remap registers from dynamic_reg_map to remapped_reg_map based on register_remap.
@@ -264,12 +322,23 @@ class Em540Frame:
                     elif source_addr >= 0x006E:
                         source_key = 0x006E
                     else:
-                        raise IndexError(f"Source address {hex(source_addr)} is not in dynamic_reg_map")
+                        raise IndexError(
+                            f"Source address {hex(source_addr)} is not in dynamic_reg_map"
+                        )
 
                     source_reg_def = self.dynamic_reg_map[source_key]
                     offset = source_addr - source_key
-                    logger.debug("Mapping " + hex(source_addr) + " to " + hex(target_addr) + " offset " + str(offset))
+                    logger.debug(
+                        "Mapping "
+                        + hex(source_addr)
+                        + " to "
+                        + hex(target_addr)
+                        + " offset "
+                        + str(offset)
+                    )
                     target_reg_def.values[0] = source_reg_def.values[offset]
 
             else:
-                raise IndexError(f"Target address {hex(target_addr)} is not in remapped_reg_map")
+                raise IndexError(
+                    f"Target address {hex(target_addr)} is not in remapped_reg_map"
+                )

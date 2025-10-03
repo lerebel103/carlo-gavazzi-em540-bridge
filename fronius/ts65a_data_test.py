@@ -33,8 +33,18 @@ class TestRunningAverage(unittest.TestCase):
         self.assertEqual(avg.mean, 0.0)
         self.assertEqual(len(avg.values), 0)
 
+
 class MockPhase:
-    def __init__(self, current=1, line_neutral_voltage=2, line_line_voltage=3, power=4, apparent_power=5, reactive_power=6, power_factor=0.7):
+    def __init__(
+        self,
+        current=1,
+        line_neutral_voltage=2,
+        line_line_voltage=3,
+        power=4,
+        apparent_power=5,
+        reactive_power=6,
+        power_factor=0.7,
+    ):
         self.current = current
         self.line_neutral_voltage = line_neutral_voltage
         self.line_line_voltage = line_line_voltage
@@ -42,6 +52,7 @@ class MockPhase:
         self.apparent_power = apparent_power
         self.reactive_power = reactive_power
         self.power_factor = power_factor
+
 
 class MockSystem:
     def __init__(self):
@@ -54,6 +65,7 @@ class MockSystem:
         self.reactive_power = 120
         self.power_factor = 0.95
 
+
 class MockOtherEnergies:
     def __init__(self):
         self.kwh_neg_total = 1
@@ -62,11 +74,13 @@ class MockOtherEnergies:
         self.kwh_plus_l2 = 4
         self.kwh_plus_l3 = 5
 
+
 class MockData:
     def __init__(self):
         self.system = MockSystem()
         self.phases = [MockPhase(), MockPhase(), MockPhase()]
         self.other_energies = MockOtherEnergies()
+
 
 class TestTs65aMeterData(unittest.TestCase):
     def setUp(self):
