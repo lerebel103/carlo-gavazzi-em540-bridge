@@ -82,13 +82,11 @@ class Em540Master:
             with self._condition:
                 self._condition.wait()
 
-                # note the potential for a race condition on data read/updates. That is the data may be updated
-                # while a listener is processing it. Bad threading design... should be fixed when I have time at
-                # some stage.
+                # Now update the MeterData from the frame we have just received.
+                # Then notify listeners, noting a performance impact as we are holding a lock.
+                # However, this will prevent a new data acquire while we are notifying listeners.
 
-                # Now update the MeterData from the frame we have just received
                 self._data.update_from_frame()
-
                 for listener in self._listeners:
                     asyncio.run(listener.new_data(self._data))
 
