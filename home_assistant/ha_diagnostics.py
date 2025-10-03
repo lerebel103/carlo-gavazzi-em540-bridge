@@ -6,7 +6,7 @@ from carlo_gavazzi.meter_data import MeterData
 from fronius.ts65a_slave_stats import Ts65aSlaveStats
 from home_assistant.ha_sensors import Sensor
 
-diag_interval = 5  # seconds
+DIAGNOSTICS_INTERVAL: float = 5  # seconds
 
 
 class HADiagnostics:
@@ -172,7 +172,7 @@ class HADiagnostics:
         )
 
         # Calculate update rate
-        if data.timestamp - self._last_update_timestamp > diag_interval:
+        if data.timestamp - self._last_update_timestamp > DIAGNOSTICS_INTERVAL:
             update_rate = (self._data_counter - self._last_data_counter) / (
                 data.timestamp - self._last_update_timestamp
             )

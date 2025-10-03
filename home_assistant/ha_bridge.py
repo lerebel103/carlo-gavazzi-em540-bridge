@@ -1,7 +1,9 @@
 import logging
 import random
 import sys
+import threading
 import time
+from datetime import datetime
 
 from paho.mqtt import client as mqtt_client
 from paho.mqtt.enums import CallbackAPIVersion
@@ -10,7 +12,7 @@ from carlo_gavazzi.em540_master import MeterDataListener
 from carlo_gavazzi.em540_slave_stats import EM540SlaveStats
 from carlo_gavazzi.meter_data import MeterData
 from fronius.ts65a_slave_stats import Ts65aSlaveStats
-from home_assistant.ha_diagnostics import HADiagnostics
+from home_assistant.ha_diagnostics import DIAGNOSTICS_INTERVAL, HADiagnostics
 from home_assistant.ha_sensors import EnergyMeterSensor
 
 FIRST_RECONNECT_DELAY = 1
@@ -41,6 +43,14 @@ class HABridge(MeterDataListener):
         self._last_update = 0
         self.sensors = EnergyMeterSensor()
         self._diagnostics = HADiagnostics()
+        self._last_stats_update: float = 0
+
+        # Background thread to handle updates outside of asyncio loop
+        self._condition: threading.Condition = threading.Condition()
+        self._notify_thread: threading.Thread = threading.Thread(
+            target=self._notify_loop, daemon=True
+        )
+        self._notify_thread.start()
 
         logger.setLevel(conf.log_level)
 
@@ -91,24 +101,9 @@ class HABridge(MeterDataListener):
         # Update sensor if enough time has passed
         if data.timestamp - self._last_update > self._update_interval:
             self._last_update = data.timestamp
-
             self.sensors.update(data)
-
-            # Now publish all sensor data
-            topic, payload = self.sensors.mqtt_data()
-            try:
-                self.publish(topic, payload)
-            except Exception as err:
-                logger.error(f"Failed to publish sensor data on topic {topic}: {err}")
-
-            # Do the same with diagnostics
-            topic, payload = self._diagnostics.mqtt_data()
-            try:
-                self.publish(topic, payload)
-            except Exception as err:
-                logger.error(
-                    f"Failed to publish diagnostics data on topic {topic}: {err}"
-                )
+            with self._condition:
+                self._condition.notify_all()
 
     async def read_failed(self):
         self._diagnostics.read_failed()
@@ -132,3 +127,33 @@ class HABridge(MeterDataListener):
 
     def on_em540_slave_stats(self, stats: EM540SlaveStats):
         self._diagnostics.set_em540_slave_stats(stats)
+
+    def _notify_loop(self) -> None:
+        """Background thread to publish sensor data when notified of new data"""
+        while True:
+            with self._condition:
+                self._condition.wait()
+
+                # Now publish all sensor data
+                topic, payload = self.sensors.mqtt_data()
+                try:
+                    self.publish(topic, payload)
+                except Exception as err:
+                    logger.error(
+                        f"Failed to publish sensor data on topic {topic}: {err}"
+                    )
+
+                # Do the same with diagnostics, if we are ready for an update
+                now = datetime.now().timestamp()
+                if (
+                    self._last_stats_update == 0
+                    or (now - self._last_stats_update) > DIAGNOSTICS_INTERVAL
+                ):
+                    self._last_stats_update = now
+                    topic, payload = self._diagnostics.mqtt_data()
+                    try:
+                        self.publish(topic, payload)
+                    except Exception as err:
+                        logger.error(
+                            f"Failed to publish diagnostics data on topic {topic}: {err}"
+                        )

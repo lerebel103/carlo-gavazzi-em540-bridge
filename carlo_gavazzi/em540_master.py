@@ -53,9 +53,8 @@ class Em540Master:
             retries=config.retries,
         )
 
-        # create notify mutex
+        # create notify mutex and thread for async notification of listeners
         self._condition: threading.Condition = threading.Condition()
-
         self._notify_thread: Thread = Thread(target=self._notify_loop, daemon=True)
         self._notify_thread.start()
 
