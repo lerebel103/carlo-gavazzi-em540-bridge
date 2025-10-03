@@ -78,6 +78,8 @@ class SystemData:
             f"reactive_power: {self.reactive_power}, "
             f"pf: {self.power_factor}, "
             f"frequency: {self.frequency}, "
+            f"run_hour_meter: {self.run_hour_meter}, "
+            f"run_hour_meter_neg: {self.run_hour_meter_neg}"
         )
 
 
