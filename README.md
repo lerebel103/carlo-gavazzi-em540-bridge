@@ -1,25 +1,25 @@
-# EM540 MODBUS Bridge
+# Carlo Gavazzi EM540 Energy Meter MODBUS IP Bridge
 
 ## Overview
 
-This bridge application allows multiple clients to independently access real-time data from a single Carlo Gavazzi EM540 Energy Meter.
+Allows multiple IP clients to independently access real-time data from a single Carlo Gavazzi EM540/EM530 Energy Meter.
 
- This bridge is ideal for integrating the EM540 meter into home automation systems, 
-Victron GX devices, Fronius inverters, and other energy management solutions—eliminating the need for each system to 
-have its own dedicated meter.
+To do so, a physical RS485 MODBUS/RTU to IP converter is first required so the meter data can be read over IP by this 
+bridge application, acting as a MODBUS master to the meter. This application then acts as a Modbus/TCP server, 
+to proxy the same data to multiple Modbus/TCP/RTU clients, emulating EM540 registers. Additionally, it can provide a
+Fronius TS-65-A emulation server, and MQTT publisher to Home Assistant.
 
-The bridge establishes a single high-speed connection to the EM540 meter, reads all relevant registers at a fast 
+The general idea is to read all dynamic registers from the EM540 meter at a high rate, close to the maximum
 polling interval (100ms), and efficiently re-serves this data to multiple consumers in various formats:
 
-- **Transparent Modbus/RTU over sockets:** Direct access to EM540 registers for compatible clients.
-- **Fronius TS-65-A emulation over Modbus/TCP:** EM540 data is mapped and presented as if it were a Fronius TS-65-A smart meter.
+- **Transparent Modbus/RTU over sockets:** Direct access to EM540 registers for compatible clients (like Victron Gx devices).
+- **Fronius TS-65-A emulation over Modbus/TCP:** EM540/EM530 data is mapped and presented as if it were a Fronius TS-65-A smart meter.
 - **MQTT sensors for Home Assistant:** Key measurements are published as MQTT sensors for easy integration and automation.
 
-All dynamic registers from the EM540 meter are read and cached for fast, concurrent access. Data is served directly 
-from the cache for EM540 clients, while Fronius emulation maps the relevant registers before serving. 
-The bridge operates in read-only mode and does not write back to the EM540 meter.
-
-Each component—EM540 Modbus/RTU client, Modbus/TCP server, Fronius TS-65-A server, and MQTT publisher—runs independently and can be configured individually via the main configuration file.
+In the case of the Fronius TS-65-A emulation, the EM540/EM530 data is mapped to the corresponding registers,
+enabling seamless integration without additional hardware or complex configurations. It is also possible to smooth
+the meter data over a specified time window so the emulated values represent a time period average, rather than 
+instantaneous readings, if this is desired (see config file).
 
 > **Note:** Most EM540 registers are read and cached, but some are intentionally excluded. The bridge is strictly a read-only proxy.
 
@@ -51,43 +51,70 @@ Each component—EM540 Modbus/RTU client, Modbus/TCP server, Fronius TS-65-A ser
 
 The following measurements are exposed in Home Assistant and refreshed at which ever interval you set in the configuration file:
 
-| Sensor Group      | Sensor Name           | Unit  | Device Class     | State Class        | Precision |
-|-------------------|----------------------|-------|------------------|--------------------|-----------|
-| Frequency         | Frequency             | Hz    | frequency        | measurement        | 2         |
-| Voltage           | Mean Voltage L-N      | V     | voltage          | measurement        | 1         |
-| Voltage           | Voltage L1-N          | V     | voltage          | measurement        | 1         |
-| Voltage           | Voltage L2-N          | V     | voltage          | measurement        | 1         |
-| Voltage           | Voltage L3-N          | V     | voltage          | measurement        | 1         |
-| Voltage           | Mean Voltage L-L      | V     | voltage          | measurement        | 1         |
-| Voltage           | Voltage L1-L2         | V     | voltage          | measurement        | 1         |
-| Voltage           | Voltage L2-L3         | V     | voltage          | measurement        | 1         |
-| Voltage           | Voltage L3-L1         | V     | voltage          | measurement        | 1         |
-| Current           | Current               | A     | current          | measurement        | 1         |
-| Current           | Current L1            | A     | current          | measurement        | 1         |
-| Current           | Current L2            | A     | current          | measurement        | 1         |
-| Current           | Current L3            | A     | current          | measurement        | 1         |
-| Power             | Power                 | W     | power            | measurement        | 1         |
-| Power             | Power L1              | W     | power            | measurement        | 1         |
-| Power             | Power L2              | W     | power            | measurement        | 1         |
-| Power             | Power L3              | W     | power            | measurement        | 1         |
-| Reactive Power    | Reactive Power        | var   | reactive_power   | measurement        | 1         |
-| Reactive Power    | Reactive Power L1     | var   | reactive_power   | measurement        | 1         |
-| Reactive Power    | Reactive Power L2     | var   | reactive_power   | measurement        | 1         |
-| Reactive Power    | Reactive Power L3     | var   | reactive_power   | measurement        | 1         |
-| Apparent Power    | Apparent Power        | VA    | apparent_power   | measurement        | 1         |
-| Apparent Power    | Apparent Power L1     | VA    | apparent_power   | measurement        | 1         |
-| Apparent Power    | Apparent Power L2     | VA    | apparent_power   | measurement        | 1         |
-| Apparent Power    | Apparent Power L3     | VA    | apparent_power   | measurement        | 1         |
-| Power Factor      | Mean Power Factor     |       | power_factor     | measurement        | 2         |
-| Power Factor      | Power Factor L1       |       | power_factor     | measurement        | 2         |
-| Power Factor      | Power Factor L2       |       | power_factor     | measurement        | 2         |
-| Power Factor      | Power Factor L3       |       | power_factor     | measurement        | 2         |
-| Energy            | Energy Import         | kWh   | energy           | total_increasing   | 2         |
-| Energy            | Energy Export         | kWh   | energy           | total_increasing   | 2         |
+| Sensor Name                | Unit   | Device Class      | State Class        | Precision |
+|----------------------------|--------|-------------------|--------------------|-----------|
+| Frequency                  | Hz     | frequency         | measurement        | 2         |
+| Mean Voltage L-N           | V      | voltage           | measurement        | 1         |
+| Voltage L1-N               | V      | voltage           | measurement        | 1         |
+| Voltage L2-N               | V      | voltage           | measurement        | 1         |
+| Voltage L3-N               | V      | voltage           | measurement        | 1         |
+| Mean Voltage L-L           | V      | voltage           | measurement        | 1         |
+| Voltage L1-L2              | V      | voltage           | measurement        | 1         |
+| Voltage L2-L3              | V      | voltage           | measurement        | 1         |
+| Voltage L3-L1              | V      | voltage           | measurement        | 1         |
+| Current                    | A      | current           | measurement        | 1         |
+| Current L1                 | A      | current           | measurement        | 1         |
+| Current L2                 | A      | current           | measurement        | 1         |
+| Current L3                 | A      | current           | measurement        | 1         |
+| Power                      | W      | power             | measurement        | 0         |
+| Power L1                   | W      | power             | measurement        | 0         |
+| Power L2                   | W      | power             | measurement        | 0         |
+| Power L3                   | W      | power             | measurement        | 0         |
+| Reactive Power             | var    | reactive_power    | measurement        | 0         |
+| Reactive Power L1          | var    | reactive_power    | measurement        | 0         |
+| Reactive Power L2          | var    | reactive_power    | measurement        | 0         |
+| Reactive Power L3          | var    | reactive_power    | measurement        | 0         |
+| Apparent Power             | VA     | apparent_power    | measurement        | 0         |
+| Apparent Power L1          | VA     | apparent_power    | measurement        | 0         |
+| Apparent Power L2          | VA     | apparent_power    | measurement        | 0         |
+| Apparent Power L3          | VA     | apparent_power    | measurement        | 0         |
+| Mean Power Factor          |        | power_factor      | measurement        | 2         |
+| Power Factor L1            |        | power_factor      | measurement        | 2         |
+| Power Factor L2            |        | power_factor      | measurement        | 2         |
+| Power Factor L3            |        | power_factor      | measurement        | 2         |
+| Energy Import              | kWh    | energy            | total_increasing   | 2         |
+| Energy Export              | kWh    | energy            | total_increasing   | 2         |
+| Reactive Energy Export     | kvarh  | reactive_energy   | total_increasing   | 2         |
+| Reactive Energy Import     | kvarh  | reactive_energy   | total_increasing   | 2         |
+| Apparent Energy kvah       | kWh    | energy            | total_increasing   | 2         |
+| Run Hours                  | h      | duration          | total_increasing   | 1         |
+
+The following Diagnostic sensors are also available in Home Assistant:
+
+| Sensor Name                          | Unit | Device Class | State Class | Topic                                            | Precision | Entity Category |
+|---------------------------------------|------|--------------|-------------|--------------------------------------------------|-----------|----------------|
+| Sys Uptime                           | s    | duration     | measurement | lerebel/sensor/em540_energy_meter_bridge/state   | 0         | diagnostic     |
+| Bridge Uptime                        | s    | duration     | measurement | lerebel/sensor/em540_energy_meter_bridge/state   | 0         | diagnostic     |
+| RS485 Master Read Rate                | Hz   | frequency    | measurement | lerebel/sensor/em540_energy_meter_bridge/state   | 2         | diagnostic     |
+| RS485 Master Read Failures            |      |              | measurement | lerebel/sensor/em540_energy_meter_bridge/state   | 0         | diagnostic     |
+| Min Power W                          | W    | power        | measurement | lerebel/sensor/em540_energy_meter_bridge/state   | 1         | diagnostic     |
+| Max Power W                          | W    | power        | measurement | lerebel/sensor/em540_energy_meter_bridge/state   | 1         | diagnostic     |
+| TS65A TCP Client Count               |      |              | measurement | lerebel/sensor/em540_energy_meter_bridge/state   | 0         | diagnostic     |
+| TS65A TCP Client Disconnect Count    |      |              | measurement | lerebel/sensor/em540_energy_meter_bridge/state   | 0         | diagnostic     |
+| Overfeed Limit Count                 |      |              | measurement | lerebel/sensor/em540_energy_meter_bridge/state   | 0         | diagnostic     |
+| Overfeed Limit Max Duration          | ms   | duration     | measurement | lerebel/sensor/em540_energy_meter_bridge/state   | 2         | diagnostic     |
+| EM540 RTU Client Count               |      |              | measurement | lerebel/sensor/em540_energy_meter_bridge/state   | 0         | diagnostic     |
+| EM540 RTU Client Disconnect Count    |      |              | measurement | lerebel/sensor/em540_energy_meter_bridge/state   | 0         | diagnostic     |
+| EM540 TCP Client Count               |      |              | measurement | lerebel/sensor/em540_energy_meter_bridge/state   | 0         | diagnostic     |
+| EM540 TCP Client Disconnect Count    |      |              | measurement | lerebel/sensor/em540_energy_meter_bridge/state   | 0         | diagnostic     |
+
 
 ## Documentation
 
 For installation, configuration, and advanced usage details, refer to the documentation and example configuration files included in the repository.
+
+## References
+- [Carlo Gavazzi EM540/EM530 Modbus Register Map](https://www.gavazziautomation.com/fileadmin/images/PIM/OTHERSTUFF/COMPRO/EM500_CPP_Mod_V1.3_13022024.pdf)
 
 ---
 
