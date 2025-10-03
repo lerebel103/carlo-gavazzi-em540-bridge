@@ -198,6 +198,5 @@ class TestTs65aMeterData(unittest.TestCase):
         self.assertGreater(self.meter.power_factor_c, 0)
 
 
-
 if __name__ == "__main__":
     unittest.main()

@@ -73,6 +73,5 @@ class TestTs65aSlaveStats(unittest.TestCase):
         self.assertEqual(self.stats.power_over_feed_limit_max_duration_sec, 6.0)
 
 
-
 if __name__ == "__main__":
     unittest.main()
