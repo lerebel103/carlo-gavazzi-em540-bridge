@@ -14,8 +14,8 @@ services:
       - 5002:5002
       - 5003:5003
       - 5004:5004
-    devices:
-        # Adjust according to your setup
-        - /dev/ttyUSB0:/dev/ttyUSB0
+    #devices:
+        # Adjust according to your setup, if using a USB to RS485 adapter
+        #- /dev/ttyUSB0:/dev/ttyUSB0
 
 
