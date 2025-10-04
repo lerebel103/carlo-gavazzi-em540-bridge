@@ -37,8 +37,7 @@ class Em540Master:
     """
 
     def __init__(self, config) -> None:
-        self.host: str = config.host
-        self.port: int = config.port
+        self._config = config
         self._data: MeterData = MeterData()
         self.slave_id: int = config.slave_id
         self._dyn_reg_read_counter: int = 0
@@ -60,8 +59,8 @@ class Em540Master:
         elif config.mode == "tcp":
             # Create Modbus TCP client
             self._client = AsyncModbusTcpClient(
-                host=self.host,
-                port=self.port,
+                host=self._config.host,
+                port=self._config.port,
                 framer=FramerType.RTU,
                 timeout=config.timeout,
                 retries=config.retries,
@@ -78,9 +77,20 @@ class Em540Master:
 
     async def connect(self) -> None:
         # Simulate connecting to the EM540 device
-        logger.info(
-            "Connecting to EM540 at " + self.host + ":" + str(self.port) + "..."
-        )
+        if self._config.mode == "serial":
+            logger.info(
+                "Connecting to EM540 via serial port "
+                + self._config.serial_port
+                + "..."
+            )
+        else:
+            logger.info(
+                "Connecting to EM540 at "
+                + self._config.host
+                + ":"
+                + str(self._config.port)
+                + "..."
+            )
 
         await self._client.connect()
         if self._client.connected:
