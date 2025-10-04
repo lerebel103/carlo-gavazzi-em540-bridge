@@ -13,6 +13,7 @@ class Sensor:
         state_topic,
         precision=1,
         entity_category: str | None = None,
+        enabled_by_default: bool = True,
     ):
         self.value: float = 0
         self.name = name
@@ -22,6 +23,7 @@ class Sensor:
         self.value_template = "{{ value_json." + self.safe_name + " }}"
         self.unit_of_measurement = unit
         self.suggested_display_precision = precision
+        self.enabled_by_default = enabled_by_default
         self.unique_id = f"em540_bridge_{self.safe_name}"
         self.advertisement_topic = (
             f"homeassistant/sensor/em540_bridge_{self.safe_name}/config"
@@ -62,6 +64,7 @@ class Sensor:
             "unique_id": self.unique_id,
             "device": self.device,
             "entity_category": self.entity_category,
+            "enabled_by_default": self.enabled_by_default,
         }
         # Remove device_class, state_class, unit_of_measurement if None
         if self.device_class is None:
@@ -86,11 +89,25 @@ class EnergyMeterSensor:
         )
 
         self.voltage_sensors = [
-            Sensor("Mean Voltage L-N", "V", "voltage", "measurement", self.state_topic),
+            Sensor(
+                "Mean Voltage L-N",
+                "V",
+                "voltage",
+                "measurement",
+                self.state_topic,
+                enabled_by_default=False,
+            ),
             Sensor("Voltage L1-N", "V", "voltage", "measurement", self.state_topic),
             Sensor("Voltage L2-N", "V", "voltage", "measurement", self.state_topic),
             Sensor("Voltage L3-N", "V", "voltage", "measurement", self.state_topic),
-            Sensor("Mean Voltage L-L", "V", "voltage", "measurement", self.state_topic),
+            Sensor(
+                "Mean Voltage L-L",
+                "V",
+                "voltage",
+                "measurement",
+                self.state_topic,
+                enabled_by_default=False,
+            ),
             Sensor("Voltage L1-L2", "V", "voltage", "measurement", self.state_topic),
             Sensor("Voltage L2-L3", "V", "voltage", "measurement", self.state_topic),
             Sensor("Voltage L3-L1", "V", "voltage", "measurement", self.state_topic),
@@ -244,6 +261,7 @@ class EnergyMeterSensor:
             "total_increasing",
             self.state_topic,
             precision=2,
+            enabled_by_default=False,
         )
         self.kvarh_plus_total = Sensor(
             "Reactive Energy Import",
@@ -252,6 +270,7 @@ class EnergyMeterSensor:
             "total_increasing",
             self.state_topic,
             precision=2,
+            enabled_by_default=False,
         )
         self.kvah_total = Sensor(
             "Apparent Energy kvah",
@@ -260,6 +279,7 @@ class EnergyMeterSensor:
             "total_increasing",
             self.state_topic,
             precision=2,
+            enabled_by_default=False,
         )
 
         self.run_hour_meter = Sensor(
@@ -269,6 +289,7 @@ class EnergyMeterSensor:
             "total_increasing",
             self.state_topic,
             precision=1,
+            enabled_by_default=False,
         )
 
     def update(self, data: MeterData):

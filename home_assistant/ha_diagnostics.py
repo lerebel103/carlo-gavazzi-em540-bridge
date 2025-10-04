@@ -29,6 +29,7 @@ class HADiagnostics:
             self.state_topic,
             precision=0,
             entity_category="diagnostic",
+            enabled_by_default=False
         )
         self._bridge_uptime = Sensor(
             "Bridge Uptime",

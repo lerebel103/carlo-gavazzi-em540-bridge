@@ -29,6 +29,7 @@ def parse_args():
 
     return parser.parse_args()
 
+
 async def process_loop():
     conf = configparser.get_config()
     pymodbus_apply_logging_config(conf.pymodbus.log_level)
@@ -77,8 +78,12 @@ async def process_loop():
             await em540_master.acquire_data()
 
             # Add a small sleep to avoid busy-waiting for very short intervals
-        if next_call_time - current_time > 0.001: # Example: sleep if more than 1ms till next call
-             time.sleep(max(0, next_call_time - current_time - 0.0001)) # Subtract a small buffer
+        if (
+            next_call_time - current_time > 0.001
+        ):  # Example: sleep if more than 1ms till next call
+            time.sleep(
+                max(0, next_call_time - current_time - 0.0001)
+            )  # Subtract a small buffer
 
 
 async def main():

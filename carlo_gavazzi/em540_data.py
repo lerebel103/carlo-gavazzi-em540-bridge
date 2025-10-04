@@ -251,7 +251,12 @@ class Em540Frame:
         self.remapped_reg_map[0x0042] = RegisterDefinition("kWh (+) L2", [0] * 2)
         self.remapped_reg_map[0x014E] = RegisterDefinition("Kwh (+) L2", [0] * 2)
         self.remapped_reg_map[0x0044] = RegisterDefinition("kWh (+) L3", [0] * 2)
-        self.remapped_reg_map[0x0046] = RegisterDefinition("Dummy", [0] * 2) # Not used
+        self.remapped_reg_map[0x0046] = RegisterDefinition(
+            "kWh (+) t1. ", [0] * 2
+        )  # Not used
+        self.remapped_reg_map[0x0046] = RegisterDefinition(
+            "kWh (+) t2. ", [0] * 2
+        )  # Not used
         self.remapped_reg_map[0x0150] = RegisterDefinition("Kwh (+) L3", [0] * 2)
         self.remapped_reg_map[0x004E] = RegisterDefinition("KWh (-) TOT", [0] * 2)
         self.remapped_reg_map[0x0116] = RegisterDefinition("Kwh (-) TOT", [0] * 2)
