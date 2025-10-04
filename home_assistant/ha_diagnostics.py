@@ -193,7 +193,7 @@ class HADiagnostics:
             self.max_power_w,
             self.read_failed_count,
             self.em540_rtu_client_count,
-            self.em540_tcp_client_count,
+            self.em540_rtu_client_disconnect_count,
             self.ts65a_tcp_client_count,
             self.ts65a_tcp_client_disconnect_count,
             self.ts65a_power_over_feed_in_limit_count,
@@ -217,8 +217,14 @@ class HADiagnostics:
             self.em540_rtu_client_count.update_value(
                 self._em540_slave_stats.rtu_client_count
             )
+            self.em540_rtu_client_disconnect_count.update_value(
+                self._em540_slave_stats.rtu_client_disconnect_count
+            )
             self.em540_tcp_client_count.update_value(
                 self._em540_slave_stats.tcp_client_count
+            )
+            self.em540_tcp_client_disconnect_count.update_value(
+                self._em540_slave_stats.tcp_client_disconnect_count
             )
         if self._ts65a_slave_stats is not None:
             self.ts65a_tcp_client_count.update_value(
@@ -242,7 +248,7 @@ class HADiagnostics:
             self.update_rate,
             self.read_failed_count,
             self.em540_rtu_client_count,
-            self.em540_tcp_client_count,
+            self.em540_rtu_client_disconnect_count,
             self.ts65a_tcp_client_count,
             self.ts65a_tcp_client_disconnect_count,
             self.ts65a_power_over_feed_in_limit_count,

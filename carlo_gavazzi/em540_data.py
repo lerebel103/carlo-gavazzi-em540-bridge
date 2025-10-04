@@ -221,7 +221,7 @@ class Em540Frame:
         # Define our dynamic registers that are read often
         self.dynamic_reg_map = {
             # Reads the registers from 0x0000 to 0x0032 - up to "Phase sequence"
-            0x0000: RegisterDefinition("Meter Data1", [0] * 0x36),
+            0x0000: RegisterDefinition("Meter Data1", [0] * 0x34),
             # Reads Other Instantaneous variables and meters (read only), section 4.2
             0x0500: RegisterDefinition("Meter Data3", [0] * (0x053E - 0x0500 + 2)),
         }
