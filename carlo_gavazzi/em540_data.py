@@ -148,12 +148,24 @@ class RegisterDefinition:
                 f"Expected length of {len(self._values)} values, got {len(new_values)}"
             )
 
+
 def _conv_helper_64_32(values, weight):
     """Helper function to convert a list of registers to a single integer value."""
-    print("Converted to: ", ModbusTcpClient.convert_from_registers(values, ModbusTcpClient.DATATYPE.INT64, "little"))
+    print(
+        "Converted to: ",
+        ModbusTcpClient.convert_from_registers(
+            values, ModbusTcpClient.DATATYPE.INT64, "little"
+        ),
+    )
     return ModbusTcpClient.convert_to_registers(
-        ModbusTcpClient.convert_from_registers(values, ModbusTcpClient.DATATYPE.INT64, "little")[0] / weight,
-        ModbusTcpClient.DATATYPE.INT32, "little")
+        ModbusTcpClient.convert_from_registers(
+            values, ModbusTcpClient.DATATYPE.INT64, "little"
+        )[0]
+        / weight,
+        ModbusTcpClient.DATATYPE.INT32,
+        "little",
+    )
+
 
 class Em540Frame:
     """Class representing a data frame from the EM540 device, or raw registers.
@@ -225,41 +237,47 @@ class Em540Frame:
 
         # Other mappings requiring us to transform data from dynamic registers
         self.remapped_reg_map[0x0033] = RegisterDefinition("Frequency", [0] * 1)
-        self.remapped_reg_map[0x0110] = RegisterDefinition("Frequency", [0]* 2)
+        self.remapped_reg_map[0x0110] = RegisterDefinition("Frequency", [0] * 2)
         self.remapped_reg_map[0x0034] = RegisterDefinition("kWh (+) TOT", [0] * 2)
-        self.remapped_reg_map[0x0112] = RegisterDefinition("kWh (+) TOT", [0]*2)
+        self.remapped_reg_map[0x0112] = RegisterDefinition("kWh (+) TOT", [0] * 2)
         self.remapped_reg_map[0x0036] = RegisterDefinition("Kvarh (+) TOT", [0] * 2)
-        self.remapped_reg_map[0x0114] = RegisterDefinition("Kvarh (+) TOT", [0]*2)
+        self.remapped_reg_map[0x0114] = RegisterDefinition("Kvarh (+) TOT", [0] * 2)
         self.remapped_reg_map[0x003C] = RegisterDefinition("kWh (+) PARTIAL", [0] * 2)
-        self.remapped_reg_map[0x0148] = RegisterDefinition("Kwh (+) PARTIAL", [0]*2)
+        self.remapped_reg_map[0x0148] = RegisterDefinition("Kwh (+) PARTIAL", [0] * 2)
         self.remapped_reg_map[0x003E] = RegisterDefinition("Kvarh (+) PARTIAL", [0] * 2)
-        self.remapped_reg_map[0x014A] = RegisterDefinition("Kvarh (+) PARTIAL", [0]*2)
+        self.remapped_reg_map[0x014A] = RegisterDefinition("Kvarh (+) PARTIAL", [0] * 2)
         self.remapped_reg_map[0x0040] = RegisterDefinition("kWh (+) L1", [0] * 2)
-        self.remapped_reg_map[0x014C] = RegisterDefinition("Kwh (+) L1", [0]*2)
+        self.remapped_reg_map[0x014C] = RegisterDefinition("Kwh (+) L1", [0] * 2)
         self.remapped_reg_map[0x0042] = RegisterDefinition("kWh (+) L2", [0] * 2)
-        self.remapped_reg_map[0x014E] = RegisterDefinition("Kwh (+) L2", [0]*2)
+        self.remapped_reg_map[0x014E] = RegisterDefinition("Kwh (+) L2", [0] * 2)
         self.remapped_reg_map[0x0044] = RegisterDefinition("kWh (+) L3", [0] * 2)
-        self.remapped_reg_map[0x0150] = RegisterDefinition("Kwh (+) L3", [0]*2)
+        self.remapped_reg_map[0x0150] = RegisterDefinition("Kwh (+) L3", [0] * 2)
         self.remapped_reg_map[0x004E] = RegisterDefinition("KWh (-) TOT", [0] * 2)
-        self.remapped_reg_map[0x0116] = RegisterDefinition("Kwh (-) TOT", [0]*2)
+        self.remapped_reg_map[0x0116] = RegisterDefinition("Kwh (-) TOT", [0] * 2)
         self.remapped_reg_map[0x0052] = RegisterDefinition("KWh (-) PARTIAL", [0] * 2)
-        self.remapped_reg_map[0x015A] = RegisterDefinition("Kwh (-) PARTIAL", [0]*2)
+        self.remapped_reg_map[0x015A] = RegisterDefinition("Kwh (-) PARTIAL", [0] * 2)
         self.remapped_reg_map[0x0050] = RegisterDefinition("kvarh (-) TOT", [0] * 2)
-        self.remapped_reg_map[0x0118] = RegisterDefinition("Kvarh (-) TOT", [0]*2)
+        self.remapped_reg_map[0x0118] = RegisterDefinition("Kvarh (-) TOT", [0] * 2)
         self.remapped_reg_map[0x0054] = RegisterDefinition("kvarh (-) PARTIAL", [0] * 2)
-        self.remapped_reg_map[0x015C] = RegisterDefinition("Kvarh (-) PARTIAL", [0]*2)
+        self.remapped_reg_map[0x015C] = RegisterDefinition("Kvarh (-) PARTIAL", [0] * 2)
         self.remapped_reg_map[0x0056] = RegisterDefinition("KVAh TOT", [0] * 2)
-        self.remapped_reg_map[0x015E] = RegisterDefinition("KVAh TOT", [0]*2)
+        self.remapped_reg_map[0x015E] = RegisterDefinition("KVAh TOT", [0] * 2)
         self.remapped_reg_map[0x0058] = RegisterDefinition("KVAh PARTIAL", [0] * 2)
-        self.remapped_reg_map[0x0160] = RegisterDefinition("KVAh PARTIAL", [0]*2)
+        self.remapped_reg_map[0x0160] = RegisterDefinition("KVAh PARTIAL", [0] * 2)
         self.remapped_reg_map[0x005A] = RegisterDefinition("Run hour meter", [0] * 2)
-        self.remapped_reg_map[0x00FE] = RegisterDefinition("Run hour meter", [0]*2)
-        self.remapped_reg_map[0x005C] = RegisterDefinition("Run hour meter kWh (-)", [0] * 2)
-        self.remapped_reg_map[0x00F6] = RegisterDefinition("Run hour meter kWh (-)", [0]*2)
-        self.remapped_reg_map[0x006E] = RegisterDefinition("Run hour meter PARTIAL", [0] * 2)
-        self.remapped_reg_map[0x0070] = RegisterDefinition("Run hour meter kWh (-) PARTIAL", [0] * 2)
-
-
+        self.remapped_reg_map[0x00FE] = RegisterDefinition("Run hour meter", [0] * 2)
+        self.remapped_reg_map[0x005C] = RegisterDefinition(
+            "Run hour meter kWh (-)", [0] * 2
+        )
+        self.remapped_reg_map[0x00F6] = RegisterDefinition(
+            "Run hour meter kWh (-)", [0] * 2
+        )
+        self.remapped_reg_map[0x006E] = RegisterDefinition(
+            "Run hour meter PARTIAL", [0] * 2
+        )
+        self.remapped_reg_map[0x0070] = RegisterDefinition(
+            "Run hour meter kWh (-) PARTIAL", [0] * 2
+        )
 
     def remap_registers(self):
         """Remap registers from dynamic_reg_map to remapped_reg_map based on register_remap.
@@ -275,81 +293,128 @@ class Em540Frame:
         start_ix = 0x500 - offset
         end_ix = 0x500 + 13 * 4 - offset
         converted = ModbusTcpClient.convert_from_registers(
-            src_values[start_ix:end_ix], ModbusTcpClient.DATATYPE.INT64, "little")
+            src_values[start_ix:end_ix], ModbusTcpClient.DATATYPE.INT64, "little"
+        )
 
         idx = 0
         # 0500h	4	0034h	2	kWh (+) TOT	INT64	Value weight: Wh
-        self.remapped_reg_map[0x0034].values = ModbusTcpClient.convert_to_registers(int(converted[idx] / 100), ModbusTcpClient.DATATYPE.INT32, "little")
+        self.remapped_reg_map[0x0034].values = ModbusTcpClient.convert_to_registers(
+            int(converted[idx] / 100), ModbusTcpClient.DATATYPE.INT32, "little"
+        )
         self.remapped_reg_map[0x112].values = self.remapped_reg_map[0x0034].values
         idx += 1
         # 0504h	4	0036h	2	Kvarh (+) TOT	INT64	Value weight: VARh
-        self.remapped_reg_map[0x0036].values = ModbusTcpClient.convert_to_registers(int(converted[idx] / 100), ModbusTcpClient.DATATYPE.INT32, "little")
+        self.remapped_reg_map[0x0036].values = ModbusTcpClient.convert_to_registers(
+            int(converted[idx] / 100), ModbusTcpClient.DATATYPE.INT32, "little"
+        )
         self.remapped_reg_map[0x114].values = self.remapped_reg_map[0x0036].values
         idx += 1
         # 0508h	4	003Ch	2	kWh (+) PARTIAL	INT64	Value weight: Wh
-        self.remapped_reg_map[0x003C].values = ModbusTcpClient.convert_to_registers(int(converted[idx] / 100), ModbusTcpClient.DATATYPE.INT32, "little")
+        self.remapped_reg_map[0x003C].values = ModbusTcpClient.convert_to_registers(
+            int(converted[idx] / 100), ModbusTcpClient.DATATYPE.INT32, "little"
+        )
         self.remapped_reg_map[0x148].values = self.remapped_reg_map[0x003C].values
         idx += 1
         # 050Ch	4	003Eh	2	Kvarh (+) PARTIAL	INT64	Value weight: VARh
-        self.remapped_reg_map[0x003E].values = ModbusTcpClient.convert_to_registers(int(converted[idx] / 100), ModbusTcpClient.DATATYPE.INT32, "little")
+        self.remapped_reg_map[0x003E].values = ModbusTcpClient.convert_to_registers(
+            int(converted[idx] / 100), ModbusTcpClient.DATATYPE.INT32, "little"
+        )
         self.remapped_reg_map[0x14A].values = self.remapped_reg_map[0x003E].values
         idx += 1
         # 0510h	4	0040h	2	kWh (+) L1	INT64
-        self.remapped_reg_map[0x0040].values = ModbusTcpClient.convert_to_registers(int(converted[idx] / 100), ModbusTcpClient.DATATYPE.INT32, "little")
+        self.remapped_reg_map[0x0040].values = ModbusTcpClient.convert_to_registers(
+            int(converted[idx] / 100), ModbusTcpClient.DATATYPE.INT32, "little"
+        )
         self.remapped_reg_map[0x14C].values = self.remapped_reg_map[0x0040].values
         idx += 1
         # 0514h	4	0042h	2	kWh (+) L2	INT64	Value weight: Wh
-        self.remapped_reg_map[0x0042].values = ModbusTcpClient.convert_to_registers(int(converted[idx] / 100), ModbusTcpClient.DATATYPE.INT32, "little")
+        self.remapped_reg_map[0x0042].values = ModbusTcpClient.convert_to_registers(
+            int(converted[idx] / 100), ModbusTcpClient.DATATYPE.INT32, "little"
+        )
         self.remapped_reg_map[0x14E].values = self.remapped_reg_map[0x0042].values
         idx += 1
         # 0518h	4	0044h	2	kWh (+) L3	INT64
-        self.remapped_reg_map[0x0044].values = ModbusTcpClient.convert_to_registers(int(converted[idx] / 100), ModbusTcpClient.DATATYPE.INT32, "little")
+        self.remapped_reg_map[0x0044].values = ModbusTcpClient.convert_to_registers(
+            int(converted[idx] / 100), ModbusTcpClient.DATATYPE.INT32, "little"
+        )
         self.remapped_reg_map[0x150].values = self.remapped_reg_map[0x0044].values
         idx += 1
         # 051Ch	4	004Eh	2	KWh (-) TOT	INT64	Value weight: Wh
-        self.remapped_reg_map[0x004E].values = ModbusTcpClient.convert_to_registers(int(converted[idx] / 100), ModbusTcpClient.DATATYPE.INT32, "little")
+        self.remapped_reg_map[0x004E].values = ModbusTcpClient.convert_to_registers(
+            int(converted[idx] / 100), ModbusTcpClient.DATATYPE.INT32, "little"
+        )
         self.remapped_reg_map[0x116].values = self.remapped_reg_map[0x004E].values
         idx += 1
         # 0520h	4	0052h	2	KWh (-) PARTIAL	INT64	Value weight: Wh
-        self.remapped_reg_map[0x0052].values = ModbusTcpClient.convert_to_registers(int(converted[idx] / 100), ModbusTcpClient.DATATYPE.INT32, "little")
+        self.remapped_reg_map[0x0052].values = ModbusTcpClient.convert_to_registers(
+            int(converted[idx] / 100), ModbusTcpClient.DATATYPE.INT32, "little"
+        )
         self.remapped_reg_map[0x15A].values = self.remapped_reg_map[0x0052].values
         idx += 1
         # 0524h	4	0050h	2	kvarh (-) TOT	INT64	Value weight: varh
-        self.remapped_reg_map[0x0050].values = ModbusTcpClient.convert_to_registers(int(converted[idx] / 100), ModbusTcpClient.DATATYPE.INT32, "little")
+        self.remapped_reg_map[0x0050].values = ModbusTcpClient.convert_to_registers(
+            int(converted[idx] / 100), ModbusTcpClient.DATATYPE.INT32, "little"
+        )
         self.remapped_reg_map[0x118].values = self.remapped_reg_map[0x0050].values
 
         idx += 1
         # 0528h	4	0054h	2	kvarh (-) Partial	INT64	Value weight: varh
-        self.remapped_reg_map[0x0054].values = ModbusTcpClient.convert_to_registers(int(converted[idx] / 100), ModbusTcpClient.DATATYPE.INT32, "little")
+        self.remapped_reg_map[0x0054].values = ModbusTcpClient.convert_to_registers(
+            int(converted[idx] / 100), ModbusTcpClient.DATATYPE.INT32, "little"
+        )
         self.remapped_reg_map[0x15C].values = self.remapped_reg_map[0x0054].values
         idx += 1
         # 052Ch	4	0056h	2	KVAh TOT	INT64	Value weight: VAh
-        self.remapped_reg_map[0x0056].values = ModbusTcpClient.convert_to_registers(int(converted[idx] / 100), ModbusTcpClient.DATATYPE.INT32, "little")
+        self.remapped_reg_map[0x0056].values = ModbusTcpClient.convert_to_registers(
+            int(converted[idx] / 100), ModbusTcpClient.DATATYPE.INT32, "little"
+        )
         self.remapped_reg_map[0x15E].values = self.remapped_reg_map[0x0056].values
         idx += 1
         # 0530h	4	0058h	2	KVAh PARTIAL	INT64	Value weight: VAh
-        self.remapped_reg_map[0x0058].values = ModbusTcpClient.convert_to_registers(int(converted[idx] / 100), ModbusTcpClient.DATATYPE.INT32, "little")
+        self.remapped_reg_map[0x0058].values = ModbusTcpClient.convert_to_registers(
+            int(converted[idx] / 100), ModbusTcpClient.DATATYPE.INT32, "little"
+        )
         self.remapped_reg_map[0x160].values = self.remapped_reg_map[0x0058].values
 
         # These are straight copies
         # 0534h	2	005Ah	2	Run hour meter	INT32	Value weight: hours*100
-        self.remapped_reg_map[0x005A].values = src_values[0x534-offset:0x536-offset]
+        self.remapped_reg_map[0x005A].values = src_values[
+            0x534 - offset : 0x536 - offset
+        ]
         self.remapped_reg_map[0x00FE].values = self.remapped_reg_map[0x005A].values
         # 0536h	2	005Ch	2	Run hour meter kWh (-)	INT32	Value weight: hours*100
-        self.remapped_reg_map[0x005C].values = src_values[0x536-offset:0x538-offset]
+        self.remapped_reg_map[0x005C].values = src_values[
+            0x536 - offset : 0x538 - offset
+        ]
         self.remapped_reg_map[0x00F6].values = self.remapped_reg_map[0x005C].values
 
         # 0538h	2	006Eh	2	Run hour meter PARTIAL	INT32	Value weight: hours*100
-        self.remapped_reg_map[0x006E].values = src_values[0x538-offset:0x53A-offset]
+        self.remapped_reg_map[0x006E].values = src_values[
+            0x538 - offset : 0x53A - offset
+        ]
         # 053Ah	2	0070h	2	"Run hour meter kWh (-) PARTIAL"	INT32	Value weight: hours*100
-        self.remapped_reg_map[0x0070].values = src_values[0x53A-offset:0x53C-offset]
+        self.remapped_reg_map[0x0070].values = src_values[
+            0x53A - offset : 0x53C - offset
+        ]
 
         # Frequency - stored as INT16, value weight Hz*100
         # 053Ch	2	0033h	1	Hz	INT32	Value weight: Hz*1000
         self.remapped_reg_map[0x0033].values = ModbusTcpClient.convert_to_registers(
-            int(ModbusTcpClient.convert_from_registers(src_values[0x53C-offset:0x53E-offset], ModbusTcpClient.DATATYPE.INT32, "little") / 100)
-            , ModbusTcpClient.DATATYPE.INT16, "little")
-        self.remapped_reg_map[0x0110].values = [0, self.remapped_reg_map[0x0033].values[0]]
+            int(
+                ModbusTcpClient.convert_from_registers(
+                    src_values[0x53C - offset : 0x53E - offset],
+                    ModbusTcpClient.DATATYPE.INT32,
+                    "little",
+                )
+                / 100
+            ),
+            ModbusTcpClient.DATATYPE.INT16,
+            "little",
+        )
+        self.remapped_reg_map[0x0110].values = [
+            0,
+            self.remapped_reg_map[0x0033].values[0],
+        ]
 
         # Now perform the remap as per register_remap
         for item in register_remap:
