@@ -285,9 +285,8 @@ class Em540Frame:
             # Reads the registers from 0x0000 to 0x005D (90 registers), section 4.1, up to 'kVAh PARTIAL'
             0x0000: RegisterDefinition("Meter Data1", [0] * 0x5A),
             # Reads Other Instantaneous variables and meters (read only), section 4.2
-            0x0500: RegisterDefinition(
-                "Meter Data3", [0] * (0x053E - 0x0500 + 2), skip_n_read=4
-            ),
+            # skip_n_read=4 is desirable here to optimize read performance on modbus tcp, for not so critical values
+            0x0500: RegisterDefinition("Meter Data3", [0] * (0x053E - 0x0500 + 2)),
         }
 
         # Define registers that are re-mapped in different ranges, there are duplicated registeres in the EM540
