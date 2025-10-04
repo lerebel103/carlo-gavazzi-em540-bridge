@@ -1,4 +1,10 @@
 em540_master:
+  mode: serial
+  baudrate: 9600
+  parity: N
+  bytesize: 8
+  stopbits: 1
+  serial_port: /dev/ttyUSB0
   host: 192.168.102.240
   port: 8899
   slave_id: 1
