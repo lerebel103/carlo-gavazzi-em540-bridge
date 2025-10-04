@@ -3,6 +3,7 @@
 import argparse
 import asyncio
 import logging
+import time
 
 from pyconfigparser import configparser
 from pymodbus import pymodbus_apply_logging_config
@@ -27,7 +28,6 @@ def parse_args():
     )
 
     return parser.parse_args()
-
 
 async def process_loop():
     conf = configparser.get_config()
@@ -59,28 +59,26 @@ async def process_loop():
     await em540_slave.start()
     await ts65a_slave.start()
 
-    from datetime import datetime
-
-    timeline = datetime.now().timestamp()
+    # Now we can start our data acquire loop
     read_interval = conf.em540_master.update_interval
+    start_time = time.perf_counter()
+    next_call_time = start_time + read_interval
 
-    # This our main loop, we try to read data at a fixed interval
     while True:
-        # Ensure em540 client is connected
-        if not em540_master.connected:
-            await em540_master.connect()
+        current_time = time.perf_counter()
+        if current_time >= next_call_time:
+            next_call_time += read_interval
 
-        # Acquire data from the EM540
-        await em540_master.acquire_data()
+            # Ensure em540 client is connected
+            if not em540_master.connected:
+                await em540_master.connect()
 
-        timeline += read_interval
-        delta = timeline - datetime.now().timestamp()
-        if delta < -0.2:
-            logger.warning(f"Falling behind schedule by {delta:.2f} seconds")
-        if delta > 0:
-            await asyncio.sleep(delta)
-        else:
-            timeline = datetime.now().timestamp()
+            # Acquire data from the EM540
+            await em540_master.acquire_data()
+
+            # Add a small sleep to avoid busy-waiting for very short intervals
+        if next_call_time - current_time > 0.001: # Example: sleep if more than 1ms till next call
+             time.sleep(max(0, next_call_time - current_time - 0.0001)) # Subtract a small buffer
 
 
 async def main():
