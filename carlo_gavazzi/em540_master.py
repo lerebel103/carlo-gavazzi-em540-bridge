@@ -4,9 +4,9 @@ import sys
 import threading
 from threading import Thread
 
-from pymodbus import FramerType
-from pymodbus.client import AsyncModbusTcpClient, AsyncModbusSerialClient, ModbusBaseClient
-from pymodbus import ModbusException
+from pymodbus import FramerType, ModbusException
+from pymodbus.client import (AsyncModbusSerialClient, AsyncModbusTcpClient,
+                             ModbusBaseClient)
 from pymodbus.exceptions import ModbusIOException
 
 from carlo_gavazzi.meter_data import MeterData
@@ -44,21 +44,32 @@ class Em540Master:
         self._dyn_reg_read_counter: int = 0
         self._listeners: list[MeterDataListener] = []
         logger.setLevel(config.log_level)
-        self._client :ModbusBaseClient
+        self._client: ModbusBaseClient
 
-        if config.mode == 'serial':
+        if config.mode == "serial":
             # Create serial client
             self._client = AsyncModbusSerialClient(
-                port=config.serial_port, framer=FramerType.RTU, baudrate=config.baudrate,
-                parity=config.parity, stopbits=config.stopbits,
-                timeout=config.timeout, retries=config.retries)
-        elif config.mode == 'tcp':
+                port=config.serial_port,
+                framer=FramerType.RTU,
+                baudrate=config.baudrate,
+                parity=config.parity,
+                stopbits=config.stopbits,
+                timeout=config.timeout,
+                retries=config.retries,
+            )
+        elif config.mode == "tcp":
             # Create Modbus TCP client
             self._client = AsyncModbusTcpClient(
-                host=self.host, port=self.port, framer=FramerType.RTU,
-                timeout=config.timeout, retries=config.retries)
+                host=self.host,
+                port=self.port,
+                framer=FramerType.RTU,
+                timeout=config.timeout,
+                retries=config.retries,
+            )
         else:
-            raise ValueError(f"Invalid mode '{config.mode}' in configuration, must be 'tcp' or 'serial'")
+            raise ValueError(
+                f"Invalid mode '{config.mode}' in configuration, must be 'tcp' or 'serial'"
+            )
 
         # create notify mutex and thread for async notification of listeners
         self._condition: threading.Condition = threading.Condition()
