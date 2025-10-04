@@ -221,7 +221,7 @@ class Em540Frame:
         # Define our dynamic registers that are read often
         self.dynamic_reg_map = {
             # Reads the registers from 0x0000 to 0x0032 - up to "Phase sequence"
-            0x0000: RegisterDefinition("Meter Data1", [0] * 0x34),
+            0x0000: RegisterDefinition("Meter Data1", [0] * 0x36),
             # Reads Other Instantaneous variables and meters (read only), section 4.2
             0x0500: RegisterDefinition("Meter Data3", [0] * (0x053E - 0x0500 + 2)),
         }
@@ -251,6 +251,7 @@ class Em540Frame:
         self.remapped_reg_map[0x0042] = RegisterDefinition("kWh (+) L2", [0] * 2)
         self.remapped_reg_map[0x014E] = RegisterDefinition("Kwh (+) L2", [0] * 2)
         self.remapped_reg_map[0x0044] = RegisterDefinition("kWh (+) L3", [0] * 2)
+        self.remapped_reg_map[0x0046] = RegisterDefinition("Dummy", [0] * 2) # Not used
         self.remapped_reg_map[0x0150] = RegisterDefinition("Kwh (+) L3", [0] * 2)
         self.remapped_reg_map[0x004E] = RegisterDefinition("KWh (-) TOT", [0] * 2)
         self.remapped_reg_map[0x0116] = RegisterDefinition("Kwh (-) TOT", [0] * 2)

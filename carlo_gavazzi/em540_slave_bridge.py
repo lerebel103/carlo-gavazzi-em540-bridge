@@ -63,6 +63,7 @@ class Em540Slave(MeterDataListener):
             framer=FramerType.RTU,
             context=context,
             address=(self.host, self.rtu_port),
+            trace_pdu=self._pdu_helper.on_pdu,
             trace_connect=self._rtu_trace_connect,
         )
 
