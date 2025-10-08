@@ -1,42 +1,74 @@
 em540_master:
+  # Whether to use serial RS485 (RTU) or TCP communication to the energy meter
+  # Possible values: serial, tcp
   mode: serial
+
+  # --------------------------------------------------------------------------
+  # If serial mode is used, configure the following parameters accordingly
   baudrate: 9600
   parity: N
   bytesize: 8
   stopbits: 1
   serial_port: /dev/ttyUSB0
+  # --------------------------------------------------------------------------
+
+  # --------------------------------------------------------------------------
+  # If tcp mode is used, configure the following parameters
   host: 192.168.102.240
   port: 8899
   slave_id: 1
+  # --------------------------------------------------------------------------
+
+  # Master read interval in seconds, 10Hz max supported rate by EM540/EM530
   update_interval: 0.1
+  # Read timeout in seconds
   timeout: 0.15
+  # Number of retries on read failure
   retries: 0
+  # Log level for the master component
   log_level: INFO
 
 em540_slave:
+  # IP on which the data is proxied out by this application
   host: 0.0.0.0
+  # Port for Modbus RTU over TCP
   rtu_port: 5002
+  # Port for Modbus TCP
   tcp_port: 5001
+  # Slave ID assumed by the emulated slave
   slave_id: 1
+  # Timeout for client requests
   update_timeout: 0.5
+  # Log level info for this component
   log_level: INFO
 
 ts65a_slave:
+  # IP on which the data is proxied out by this application
   host: 0.0.0.0
+  # Port for Modbus RTU over TCP
   port: 5003
+  # Slave ID assumed by the emulated slave
   slave_id: 1
+  # Timeout for client requests
   update_timeout: 0.5
+  # Grid feed-in hard limit in Watts (negative value). This is used to track when we are over this limit
   grid_feed_in_hard_limit: -5000
+  # Number of points to use for smoothing the power values when checking against the hard limit
   smoothing_num_points: 20
+  # Log level info for this component
   log_level: INFO
 
 mqtt:
+  # Whether to enable MQTT publishing of the read values
   enabled: true
+  # MQTT broker connection parameters
   host: localhost
   port: 1883
   username: ""
   password: ""
+  # Update interval in seconds for publishing the values to MQTT
   update_interval: 0.5
+  # Log level for the MQTT component
   log_level: INFO
 
 pymodbus:

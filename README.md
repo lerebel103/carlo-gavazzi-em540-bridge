@@ -4,13 +4,13 @@
 
 Allows multiple IP clients to independently access real-time data from a single Carlo Gavazzi EM540/EM530 Energy Meter.
 
-To do so, a physical RS485 MODBUS/RTU to IP converter is first required so the meter data can be read over IP by this 
-bridge application, acting as a MODBUS master to the meter. This application then acts as a Modbus/TCP server, 
+To do so, a physical RS485 MODBUS/RTU to IP converter, or RS485 Serial device is first required so the meter data is
+made accessible to this bridge application, acting as a MODBUS master to the meter. This application then acts as a Modbus/TCP server, 
 to proxy the same data to multiple Modbus/TCP/RTU clients, emulating EM540 registers. Additionally, it can provide a
 Fronius TS-65-A emulation server, and MQTT publisher to Home Assistant.
 
 The general idea is to read all dynamic registers from the EM540 meter at a high rate, close to the maximum
-polling interval (100ms), and efficiently re-serves this data to multiple consumers in various formats:
+polling interval (100ms), and efficiently re-serve this data to multiple consumers in various formats:
 
 - **Transparent Modbus/RTU over sockets:** Direct access to EM540 registers for compatible clients (like Victron Gx devices).
 - **Fronius TS-65-A emulation over Modbus/TCP:** EM540/EM530 data is mapped and presented as if it were a Fronius TS-65-A smart meter.
@@ -91,23 +91,23 @@ The following measurements are exposed in Home Assistant and refreshed at which 
 
 The following Diagnostic sensors are also available in Home Assistant:
 
-| Sensor Name                          | Unit | Device Class | State Class | Topic                                            | Precision | Entity Category |
-|---------------------------------------|------|--------------|-------------|--------------------------------------------------|-----------|----------------|
-| Sys Uptime                           | s    | duration     | measurement | lerebel/sensor/em540_energy_meter_bridge/state   | 0         | diagnostic     |
-| Bridge Uptime                        | s    | duration     | measurement | lerebel/sensor/em540_energy_meter_bridge/state   | 0         | diagnostic     |
-| RS485 Master Read Rate                | Hz   | frequency    | measurement | lerebel/sensor/em540_energy_meter_bridge/state   | 2         | diagnostic     |
-| RS485 Master Read Failures            |      |              | measurement | lerebel/sensor/em540_energy_meter_bridge/state   | 0         | diagnostic     |
-| Min Power W                          | W    | power        | measurement | lerebel/sensor/em540_energy_meter_bridge/state   | 1         | diagnostic     |
-| Max Power W                          | W    | power        | measurement | lerebel/sensor/em540_energy_meter_bridge/state   | 1         | diagnostic     |
-| TS65A TCP Client Count               |      |              | measurement | lerebel/sensor/em540_energy_meter_bridge/state   | 0         | diagnostic     |
-| TS65A TCP Client Disconnect Count    |      |              | measurement | lerebel/sensor/em540_energy_meter_bridge/state   | 0         | diagnostic     |
-| Overfeed Limit Count                 |      |              | measurement | lerebel/sensor/em540_energy_meter_bridge/state   | 0         | diagnostic     |
-| Overfeed Limit Max Duration          | ms   | duration     | measurement | lerebel/sensor/em540_energy_meter_bridge/state   | 2         | diagnostic     |
-| EM540 RTU Client Count               |      |              | measurement | lerebel/sensor/em540_energy_meter_bridge/state   | 0         | diagnostic     |
-| EM540 RTU Client Disconnect Count    |      |              | measurement | lerebel/sensor/em540_energy_meter_bridge/state   | 0         | diagnostic     |
-| EM540 TCP Client Count               |      |              | measurement | lerebel/sensor/em540_energy_meter_bridge/state   | 0         | diagnostic     |
-| EM540 TCP Client Disconnect Count    |      |              | measurement | lerebel/sensor/em540_energy_meter_bridge/state   | 0         | diagnostic     |
-
+| Sensor Name                          | Unit | Device Class | State Class | Precision | Entity Category |
+|---------------------------------------|------|--------------|-------------|-----------|----------------|
+| Sys Uptime                           | s    | duration     | measurement | 0         | diagnostic     |
+| Bridge Uptime                        | s    | duration     | measurement | 0         | diagnostic     |
+| RS485 Master Read Rate                | Hz   | frequency    | measurement | 2         | diagnostic     |
+| RS485 Master Read Failures            |      |              | measurement | 0         | diagnostic     |
+| Min Power W                          | W    | power        | measurement | 1         | diagnostic     |
+| Max Power W                          | W    | power        | measurement | 1         | diagnostic     |
+| TS65A TCP Client Count               |      |              | measurement | 0         | diagnostic     |
+| TS65A TCP Client Disconnect Count    |      |              | measurement | 0         | diagnostic     |
+| Overfeed Limit Count                 |      |              | measurement | 0         | diagnostic     |
+| Overfeed Limit Max Duration          | ms   | duration     | measurement | 2         | diagnostic     |
+| EM540 RTU Client Count               |      |              | measurement | 0         | diagnostic     |
+| EM540 RTU Client Disconnect Count    |      |              | measurement | 0         | diagnostic     |
+| EM540 TCP Client Count               |      |              | measurement | 0         | diagnostic     |
+| EM540 TCP Client Disconnect Count    |      |              | measurement | 0         | diagnostic     |
+![Diagnostics](media/HA Diagnostics.png)
 
 ## Documentation
 
