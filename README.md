@@ -107,7 +107,9 @@ The following Diagnostic sensors are also available in Home Assistant:
 | EM540 RTU Client Disconnect Count    |      |              | measurement | 0         | diagnostic     |
 | EM540 TCP Client Count               |      |              | measurement | 0         | diagnostic     |
 | EM540 TCP Client Disconnect Count    |      |              | measurement | 0         | diagnostic     |
-![Diagnostics](media/HA Diagnostics.png)
+
+<img src="./media/HA%20Diagnostics.png" width=200>
+
 
 ## Documentation
 
