@@ -1,6 +1,8 @@
-pyconfigparser
-pymodbus
-paho-mqtt
-python-config-parser
-uptime
-pyserial
+paho-mqtt==2.1.0
+PyConfigParser==1.0.5
+pymodbus==3.11.2
+pyserial==3.5
+python-config-parser==3.1.6
+PyYAML==6.0.2
+schema==0.7.7
+uptime==3.0.1
