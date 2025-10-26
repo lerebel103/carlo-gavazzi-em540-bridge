@@ -20,7 +20,13 @@ class Sensor:
         self.state_topic = state_topic
         self.device_class = device_class
         self.state_class = state_class
-        self.value_template = "{{ value_json." + self.safe_name + " }}"
+        self.value_template = (
+            "{% if value_json."
+            + self.safe_name
+            + " is defined %} {{ value_json."
+            + self.safe_name
+            + " }} {% endif %}"
+        )
         self.unit_of_measurement = unit
         self.suggested_display_precision = precision
         self.enabled_by_default = enabled_by_default
