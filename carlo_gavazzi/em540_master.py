@@ -113,9 +113,18 @@ class Em540Master:
                 # Then notify listeners, noting a performance impact as we are holding a lock.
                 # However, this will prevent a new data acquire while we are notifying listeners.
 
-                self._data.update_from_frame()
-                for listener in self._listeners:
-                    asyncio.run(listener.new_data(self._data))
+                try:
+                    self._data.update_from_frame()
+                    for listener in self._listeners:
+                        asyncio.run(listener.new_data(self._data))
+                except Exception as e:
+                    # Yeah... this is not a great solution, looking for a safe way to ensure we handle critical errors
+                    logger.critical("Notify loop failure, restarting as a safe guard")
+                    logger.error(e)
+
+                    # As a docker container, this will cause the container to respawn safely to clear whatever
+                    # error state we might be in currently.
+                    sys.exit(1)
 
     @property
     def data(self) -> MeterData:
