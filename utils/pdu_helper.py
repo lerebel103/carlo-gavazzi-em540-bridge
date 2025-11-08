@@ -13,18 +13,23 @@ class PduHelper:
         self.bridge_timeout: float = bridge_timeout
         self.last_pdu: Optional[ModbusPDU] = None
         self._last_rx_timestamp: Optional[float] = None
+        self._last_warning_timestamp: float = 0
+        self._dropped_request_count: int = 0
 
     def on_pdu(self, flag: bool, pdu: ModbusPDU) -> ModbusPDU:
         # Here we deliberately drop requests if we have not received any data from the master
         # within the bridge timeout period.
         now: float = datetime.now().timestamp()
-        if (
-            self._last_rx_timestamp is None
-            or (now - self._last_rx_timestamp) > self.bridge_timeout
-        ):
-            self.logger.warning(
-                "Dropping request since no data received from master within timeout period"
-            )
+
+        if (self._last_rx_timestamp is None
+            or (now - self._last_rx_timestamp) > self.bridge_timeout):
+            self._dropped_request_count += 1
+
+            # Only print this warning every 10 seconds
+            if (now - self._last_warning_timestamp) > 10:
+                self.logger.warning(
+                    f"Dropping request, no data received (dropped {self._dropped_request_count} requests so far).")
+                self._last_warning_timestamp = now
 
             if flag:
                 # Only modify responses to say we are busy
