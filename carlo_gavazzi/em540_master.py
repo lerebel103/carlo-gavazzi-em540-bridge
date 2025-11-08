@@ -1,6 +1,6 @@
 import asyncio
 import logging
-import sys
+import os
 import threading
 from threading import Thread
 
@@ -105,6 +105,7 @@ class Em540Master:
             logger.info("Failed to connect to EM540.")
 
     def _notify_loop(self) -> None:
+        num_errors = 0
         while True:
             with self._condition:
                 self._condition.wait()
@@ -117,14 +118,20 @@ class Em540Master:
                     self._data.update_from_frame()
                     for listener in self._listeners:
                         asyncio.run(listener.new_data(self._data))
-                except Exception as e:
-                    # Yeah... this is not a great solution, looking for a safe way to ensure we handle critical errors
-                    logger.critical("Notify loop failure, restarting as a safe guard")
-                    logger.error(e)
 
-                    # As a docker container, this will cause the container to respawn safely to clear whatever
-                    # error state we might be in currently.
-                    sys.exit(1)
+                    num_errors = 0
+                except Exception as e:
+                    logger.critical("Notify loop failure, starting error counting", exc_info=True)
+                    logger.exception(e)
+                    num_errors += 1
+
+            if num_errors > 10:
+                logger.critical("Too many successive errors, restarting.")
+                break
+
+        # If we got here, we have a critical failure and will want to rely on docker compose to restart the container
+        os._exit(2)
+
 
     @property
     def data(self) -> MeterData:
@@ -213,7 +220,7 @@ class Em540Master:
                         f"Expected {num_registers} registers but got {len(result.registers)} "
                         f"for address {hex(reg_addr)}"
                     )
-                    sys.exit(1)
+                    os._exit(1)
 
                 self._bad_read_count = 0
 
