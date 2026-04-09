@@ -1,13 +1,17 @@
 services:
   em540-bridge:
     image: lerebel103/em540-bridge:latest
+    build:
+      context: .
+      args:
+        VERSION: ${VERSION:-dev}
     container_name: em540-bridge
     stdin_open: true
     privileged: false
     tty: true
     restart: unless-stopped
     volumes:
-      - /home/willc/em540-bridge:/app/config
+      - ./config.yaml:/etc/em540-bridge/config.yaml
     environment:
       - TZ="Australia/Perth"
     ports:

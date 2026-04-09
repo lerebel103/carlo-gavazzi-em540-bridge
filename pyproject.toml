@@ -1,0 +1,27 @@
+[project]
+name = "em540-bridge"
+version = "0.1.0"
+requires-python = ">=3.14"
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+exclude = [
+    ".venv",
+    "__pycache__",
+    ".git",
+    ".pytest_cache",
+    ".idea",
+]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = "*_test.py"
+python_classes = ""
+python_functions = "test_*"
+
+[tool.hypothesis]
+database_backend = "directory"

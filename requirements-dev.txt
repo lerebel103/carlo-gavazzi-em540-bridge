@@ -2,6 +2,8 @@
 -r requirements.txt
 
 # Development tools
-black==23.1.0
-flake8==6.0.0
-isort==5.10.1
+ruff
+
+# Testing
+pytest
+hypothesis
