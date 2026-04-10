@@ -107,9 +107,9 @@ def test_property_mqtt_discovery_payload_validity(state: AppState):
         assert not missing, f"Payload for {topic} missing keys: {missing}"
 
         # entity_category must be "config" (Req 9.3).
-        assert (
-            payload["entity_category"] == "config"
-        ), f"entity_category should be 'config', got {payload['entity_category']!r}"
+        assert payload["entity_category"] == "config", (
+            f"entity_category should be 'config', got {payload['entity_category']!r}"
+        )
 
         # For number entities, min/max/step must be present (Req 9.4).
         # For switch entities, payload_on/payload_off must be present.
@@ -120,21 +120,21 @@ def test_property_mqtt_discovery_payload_validity(state: AppState):
             assert payload["mode"] == "box"
         else:
             # Switches must have payload_on and payload_off
-            assert (
-                "payload_on" in payload and "payload_off" in payload
-            ), f"Switch payload for {topic} missing payload_on/payload_off"
+            assert "payload_on" in payload and "payload_off" in payload, (
+                f"Switch payload for {topic} missing payload_on/payload_off"
+            )
 
         # device must be a dict with at least an identifiers key.
         assert isinstance(payload["device"], dict), "device must be a dict"
         assert "identifiers" in payload["device"], "device must have identifiers"
 
         # name and unique_id must be non-empty strings.
-        assert (
-            isinstance(payload["name"], str) and payload["name"]
-        ), f"name must be a non-empty string, got {payload['name']!r}"
-        assert (
-            isinstance(payload["unique_id"], str) and payload["unique_id"]
-        ), f"unique_id must be a non-empty string, got {payload['unique_id']!r}"
+        assert isinstance(payload["name"], str) and payload["name"], (
+            f"name must be a non-empty string, got {payload['name']!r}"
+        )
+        assert isinstance(payload["unique_id"], str) and payload["unique_id"], (
+            f"unique_id must be a non-empty string, got {payload['unique_id']!r}"
+        )
 
         # command_topic and state_topic must be non-empty strings.
         assert isinstance(payload["command_topic"], str) and payload["command_topic"]
