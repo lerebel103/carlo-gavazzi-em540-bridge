@@ -1,30 +1,12 @@
-"""Tests for HABridge — validates sensor/config entity integration.
+"""Tests for HABridge — validates sensor/config entity integration."""
 
-Pre-patches sys.modules for ha_sensors (uses Python 3.10+ syntax) so that
-`import home_assistant.ha_bridge` succeeds on Python 3.9.
-"""
-
-import sys
 import unittest
 from unittest.mock import MagicMock
 
-# ---------------------------------------------------------------------------
-# Pre-patch modules that use Python 3.10+ syntax (str | None)
-# ---------------------------------------------------------------------------
-_ha_mock = MagicMock()
-for _mod in [
-    "home_assistant.ha_sensors",
-    "home_assistant.ha_diagnostics",
-    "app.home_assistant.ha_sensors",
-    "app.home_assistant.ha_diagnostics",
-]:
-    if _mod not in sys.modules:
-        sys.modules[_mod] = _ha_mock
-
-from app.carlo_gavazzi.meter_data import MeterData  # noqa: E402
-from app.config import AppState, ConfigManager, MqttConfig  # noqa: E402
-from app.home_assistant.ha_bridge import HABridge  # noqa: E402
-from app.home_assistant.ha_sensors import HA_AVAILABILITY_TOPIC  # noqa: E402
+from app.carlo_gavazzi.meter_data import MeterData
+from app.config import AppState, ConfigManager, MqttConfig
+from app.home_assistant.ha_bridge import HABridge
+from app.home_assistant.ha_sensors import HA_AVAILABILITY_TOPIC
 
 
 def _make_conf() -> MqttConfig:
