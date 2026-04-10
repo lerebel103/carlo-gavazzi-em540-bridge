@@ -105,7 +105,12 @@ class HABridge(MeterDataListener):
                 for entity in userdata._config_entities._entities:
                     value = getattr(entity.config_section, entity.field_name)
                     state_topic = f"lerebel/config/em540_bridge/{entity.safe_name}/state"
-                    client.publish(state_topic, str(value), retain=True)
+                    # Format state value based on entity type
+                    if entity.entity_type == "switch":
+                        state_value = "on" if value else "off"
+                    else:
+                        state_value = str(value)
+                    client.publish(state_topic, state_value, retain=True)
         else:
             logger.info("Failed to connect, return code %d\n", rc)
 
@@ -163,19 +168,21 @@ class HABridge(MeterDataListener):
             with self._condition:
                 self._condition.wait()
 
-                # Now publish all sensor data
-                topic, payload = self.sensors.mqtt_data()
-                try:
-                    self.publish(topic, payload)
-                except Exception as err:
-                    logger.error(f"Failed to publish sensor data on topic {topic}: {err}")
-
-                # Do the same with diagnostics, if we are ready for an update
-                now = datetime.now().timestamp()
-                if self._last_stats_update == 0 or (now - self._last_stats_update) > DIAGNOSTICS_INTERVAL:
-                    self._last_stats_update = now
-                    topic, payload = self._diagnostics.mqtt_data()
+                # Only publish sensor data if enable_ha_publish is True
+                if self._state.mqtt.enable_ha_publish:
+                    # Now publish all sensor data
+                    topic, payload = self.sensors.mqtt_data()
                     try:
                         self.publish(topic, payload)
                     except Exception as err:
-                        logger.error(f"Failed to publish diagnostics data on topic {topic}: {err}")
+                        logger.error(f"Failed to publish sensor data on topic {topic}: {err}")
+
+                    # Do the same with diagnostics, if we are ready for an update
+                    now = datetime.now().timestamp()
+                    if self._last_stats_update == 0 or (now - self._last_stats_update) > DIAGNOSTICS_INTERVAL:
+                        self._last_stats_update = now
+                        topic, payload = self._diagnostics.mqtt_data()
+                        try:
+                            self.publish(topic, payload)
+                        except Exception as err:
+                            logger.error(f"Failed to publish diagnostics data on topic {topic}: {err}")

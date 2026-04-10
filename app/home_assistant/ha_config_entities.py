@@ -42,11 +42,12 @@ class ConfigEntity:
     field_path: str  # e.g. "mqtt.update_interval"
     config_section: Any  # reference to the dataclass instance (e.g. state.mqtt)
     field_name: str  # attribute name on config_section
-    min_value: float
-    max_value: float
-    step: float
-    parse_value: Callable[[str], Any]
+    min_value: float | None = None
+    max_value: float | None = None
+    step: float | None = None
+    parse_value: Callable[[str], Any] | None = None
     unit: str | None = None
+    entity_type: str = "number"  # "number" or "switch"
 
     @property
     def safe_name(self) -> str:
@@ -169,6 +170,14 @@ class HAConfigEntities:
                 unit="s",
                 parse_value=float,
             ),
+            ConfigEntity(
+                name="Home Assistant Sensor Publishing",
+                field_path="mqtt.enable_ha_publish",
+                config_section=self._state.mqtt,
+                field_name="enable_ha_publish",
+                parse_value=lambda x: x.lower() in ("on", "true", "1"),
+                entity_type="switch",
+            ),
         ]
         return defs
 
@@ -178,20 +187,33 @@ class HAConfigEntities:
         """Generate MQTT discovery payloads for all config entities."""
         payloads: list[tuple[str, str]] = []
         for entity in self._entities:
-            topic = f"homeassistant/number/em540_bridge_{entity.safe_name}/config"
-            payload_obj: dict[str, Any] = {
-                "name": entity.name,
-                "unique_id": f"em540_bridge_config_{entity.safe_name}",
-                "command_topic": f"lerebel/config/em540_bridge/{entity.safe_name}/set",
-                "state_topic": f"lerebel/config/em540_bridge/{entity.safe_name}/state",
-                "min": entity.min_value,
-                "max": entity.max_value,
-                "step": entity.step,
-                "device": DEVICE_INFO,
-                "entity_category": "config",
-            }
-            if entity.unit is not None:
-                payload_obj["unit_of_measurement"] = entity.unit
+            if entity.entity_type == "switch":
+                topic = f"homeassistant/switch/em540_bridge_{entity.safe_name}/config"
+                payload_obj: dict[str, Any] = {
+                    "name": entity.name,
+                    "unique_id": f"em540_bridge_config_{entity.safe_name}",
+                    "command_topic": f"lerebel/config/em540_bridge/{entity.safe_name}/set",
+                    "state_topic": f"lerebel/config/em540_bridge/{entity.safe_name}/state",
+                    "payload_on": "on",
+                    "payload_off": "off",
+                    "device": DEVICE_INFO,
+                    "entity_category": "config",
+                }
+            else:  # number
+                topic = f"homeassistant/number/em540_bridge_{entity.safe_name}/config"
+                payload_obj: dict[str, Any] = {
+                    "name": entity.name,
+                    "unique_id": f"em540_bridge_config_{entity.safe_name}",
+                    "command_topic": f"lerebel/config/em540_bridge/{entity.safe_name}/set",
+                    "state_topic": f"lerebel/config/em540_bridge/{entity.safe_name}/state",
+                    "min": entity.min_value,
+                    "max": entity.max_value,
+                    "step": entity.step,
+                    "device": DEVICE_INFO,
+                    "entity_category": "config",
+                }
+                if entity.unit is not None:
+                    payload_obj["unit_of_measurement"] = entity.unit
             payloads.append((topic, json.dumps(payload_obj)))
         return payloads
 
@@ -223,6 +245,12 @@ class HAConfigEntities:
         # Schedule persistence
         self._config_manager.schedule_persist()
 
-        # Publish updated state
+        # Publish updated state (echo back for HA UI to update)
         state_topic = f"lerebel/config/em540_bridge/{entity.safe_name}/state"
-        self._mqtt_client.publish(state_topic, str(value), retain=True)
+        if entity.entity_type == "switch":
+            # Switches use on/off payloads
+            state_value = "on" if value else "off"
+        else:
+            # Numbers use string representation
+            state_value = str(value)
+        self._mqtt_client.publish(state_topic, state_value, retain=True)

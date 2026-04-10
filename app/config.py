@@ -73,6 +73,7 @@ class Ts65aSlaveConfig:
 @dataclass
 class MqttConfig:
     enabled: bool = True
+    enable_ha_publish: bool = True
     host: str = "localhost"
     port: int = 1883
     username: str = ""
@@ -104,6 +105,7 @@ PERSISTED_FIELDS: set[str] = {
     "ts65a_slave.grid_feed_in_hard_limit",
     "ts65a_slave.smoothing_num_points",
     "mqtt.update_interval",
+    "mqtt.enable_ha_publish",
     "em540_master.update_interval",
     "em540_master.retries",
     "em540_master.timeout",
