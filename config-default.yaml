@@ -61,6 +61,8 @@ ts65a_slave:
 mqtt:
   # Whether to enable MQTT publishing of the read values
   enabled: true
+  # Whether to enable publishing sensors and diagnostics to Home Assistant
+  enable_ha_publish: true
   # MQTT broker connection parameters
   host: localhost
   port: 1883
