@@ -99,6 +99,24 @@ class TestEm540Slave(unittest.TestCase):
                     addr + REG_OFFSET, values_dict, f"Remapped {hex(addr)} missing at {hex(addr + REG_OFFSET)}"
                 )
 
+    def test_datablock_prefills_contiguous_compatibility_range(self):
+        """Contiguous EM540 range should be materialized to avoid sparse KeyError reads."""
+        frame = Em540Frame()
+        config = self._make_config()
+
+        with (
+            patch("app.carlo_gavazzi.em540_slave_bridge.ModbusTcpServer"),
+            patch("app.carlo_gavazzi.em540_slave_bridge.ModbusServerContext"),
+            patch("app.carlo_gavazzi.em540_slave_bridge.ModbusSparseDataBlock") as mock_block_cls,
+        ):
+            mock_block_cls.create.return_value = MagicMock()
+            Em540Slave(config, frame)
+
+            values_dict = mock_block_cls.create.call_args[0][0]
+
+            for addr in range(0x0000, 0x0160 + 1):
+                self.assertIn(addr + REG_OFFSET, values_dict, f"Missing compatibility register {hex(addr)}")
+
     # --- Requirement 12.1: new_data updates dynamic registers ---
 
     def test_new_data_updates_dynamic_registers(self):

@@ -13,6 +13,11 @@ from app.utils.pdu_helper import PduHelper
 
 REG_OFFSET = 1  # Modbus addresses are 1-based, pymodbus uses 0-based
 
+# Some downstream EM540 clients issue contiguous bulk reads that span sparse gaps.
+# Populate these compatibility windows with explicit zero placeholders so reads
+# return stable values instead of illegal-address exceptions.
+_COMPATIBILITY_RANGES: tuple[tuple[int, int], ...] = ((0x0000, 0x0160),)
+
 logger = logging.getLogger("em540-slave")
 
 
@@ -45,6 +50,10 @@ class Em540Slave(MeterDataListener):
         for addr in frame.remapped_reg_map:
             logger.debug("Adding remapped reg " + hex(addr))
             values[addr + REG_OFFSET] = frame.remapped_reg_map[addr].values
+
+        for range_start, range_end in _COMPATIBILITY_RANGES:
+            for addr in range(range_start, range_end + 1):
+                values.setdefault(addr + REG_OFFSET, [0])
 
         self._static_addrs = tuple(frame.static_reg_map.keys())
         self._dynamic_addrs = tuple(frame.dynamic_reg_map.keys())
