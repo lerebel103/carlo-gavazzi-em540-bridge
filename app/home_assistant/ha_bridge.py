@@ -3,8 +3,8 @@ from __future__ import annotations
 import logging
 import random
 import threading
+import time
 from dataclasses import dataclass, field
-from datetime import datetime
 
 from paho.mqtt import client as mqtt_client
 from paho.mqtt.enums import CallbackAPIVersion
@@ -16,7 +16,7 @@ from app.config import AppState, ConfigManager, MqttConfig
 from app.fronius.ts65a_slave_stats import Ts65aSlaveStats
 from app.home_assistant.ha_config_entities import HAConfigEntities
 from app.home_assistant.ha_diagnostics import DIAGNOSTICS_INTERVAL, HADiagnostics
-from app.home_assistant.ha_sensors import HA_AVAILABILITY_TOPIC, EnergyMeterSensor
+from app.home_assistant.ha_sensors import EnergyMeterSensor
 
 FIRST_RECONNECT_DELAY = 1
 MAX_RECONNECT_DELAY = 60
@@ -92,11 +92,11 @@ class HABridge(MeterDataListener):
         )
         self.connected = False
         self._loop_started = False
-        self._update_interval = conf.update_interval
-        self._last_update = 0
-        self.sensors = EnergyMeterSensor()
-        self._diagnostics = HADiagnostics()
-        self._last_stats_update: float = 0
+        self._topic_prefix = conf.ha_topic_prefix
+        self.sensors = EnergyMeterSensor(topic_prefix=self._topic_prefix)
+        self._diagnostics = HADiagnostics(topic_prefix=self._topic_prefix)
+        self._next_sensor_publish_monotonic: float = 0.0
+        self._next_diagnostics_publish_monotonic: float = 0.0
         self._config_entities: HAConfigEntities | None = None
         self._last_payload_by_topic: dict[str, str] = {}
         self._stop_event = threading.Event()
@@ -107,7 +107,12 @@ class HABridge(MeterDataListener):
         self._availability_dirty = False
 
         if state is not None and config_manager is not None:
-            self._config_entities = HAConfigEntities(state, self.client, config_manager)
+            self._config_entities = HAConfigEntities(
+                state,
+                self.client,
+                config_manager,
+                topic_prefix=self._topic_prefix,
+            )
 
         # Background thread to handle updates outside of asyncio loop
         self._condition: threading.Condition = threading.Condition()
@@ -178,7 +183,7 @@ class HABridge(MeterDataListener):
                 userdata._config_entities.subscribe()
                 for entity in userdata._config_entities._entities:
                     value = getattr(entity.config_section, entity.field_name)
-                    state_topic = f"lerebel/config/em540_bridge/{entity.safe_name}/state"
+                    state_topic = userdata._config_entities.state_topic_for(entity)
                     # Format state value based on entity type
                     if entity.entity_type == "switch":
                         state_value = "on" if value else "off"
@@ -199,15 +204,11 @@ class HABridge(MeterDataListener):
 
     async def new_data(self, data: MeterData):
         self._set_data_available(True)
-
-        # Update sensor if enough time has passed
-        if data.timestamp - self._last_update > self._update_interval:
-            self._last_update = data.timestamp
-            with self._condition:
-                self._copy_snapshot(data, self._back_snapshot)
-                self._front_snapshot, self._back_snapshot = self._back_snapshot, self._front_snapshot
-                self._snapshot_pending = True
-                self._condition.notify_all()
+        with self._condition:
+            self._copy_snapshot(data, self._back_snapshot)
+            self._front_snapshot, self._back_snapshot = self._back_snapshot, self._front_snapshot
+            self._snapshot_pending = True
+            self._condition.notify_all()
 
     async def read_failed(self):
         self._diagnostics.read_failed()
@@ -243,13 +244,21 @@ class HABridge(MeterDataListener):
         """Background thread to publish sensor data when notified of new data"""
         while not self._stop_event.is_set():
             with self._condition:
-                while not self._snapshot_pending and not self._availability_dirty and not self._stop_event.is_set():
-                    self._condition.wait()
+                while not self._stop_event.is_set():
+                    now = time.monotonic()
+                    next_due = self._next_due_monotonic(now)
+                    if self._snapshot_pending or self._availability_dirty:
+                        break
+                    if next_due is not None and next_due <= now:
+                        break
+                    timeout = None if next_due is None else max(0.0, next_due - now)
+                    self._condition.wait(timeout=timeout)
 
                 if self._stop_event.is_set():
                     return
 
                 snapshot = self._front_snapshot
+                snapshot_pending = self._snapshot_pending
                 availability_dirty = self._availability_dirty
                 self._snapshot_pending = False
                 self._availability_dirty = False
@@ -257,48 +266,88 @@ class HABridge(MeterDataListener):
             if availability_dirty:
                 self._publish_availability()
 
-            if snapshot.timestamp > 0:
+            if snapshot_pending and snapshot.timestamp > 0:
                 self._diagnostics.new_data(snapshot)
                 self.sensors.update(snapshot)
 
-            # Only publish sensor data if enable_ha_publish is True and upstream data is available
-            if snapshot.timestamp > 0 and self._mqtt_config.enable_ha_publish and self._data_available:
-                # Now publish all sensor data
-                topic, payload = self.sensors.mqtt_data()
-                try:
-                    self.publish(topic, payload)
-                except Exception as err:
-                    logger.error(f"Failed to publish sensor data on topic {topic}: {err}")
+            # Only publish sensor data when upstream data is available
+            if snapshot.timestamp > 0 and self._data_available:
+                now = time.monotonic()
 
-                # Do the same with diagnostics, if we are ready for an update
-                now = datetime.now().timestamp()
-                if self._last_stats_update == 0 or (now - self._last_stats_update) > DIAGNOSTICS_INTERVAL:
-                    self._last_stats_update = now
+                if self._next_sensor_publish_monotonic == 0:
+                    self._next_sensor_publish_monotonic = now
+                if self._next_diagnostics_publish_monotonic == 0:
+                    self._next_diagnostics_publish_monotonic = now
+
+                if now >= self._next_sensor_publish_monotonic:
+                    topic, payload = self.sensors.mqtt_data()
+                    try:
+                        self.publish(topic, payload)
+                    except Exception as err:
+                        logger.error(f"Failed to publish sensor data on topic {topic}: {err}")
+                    else:
+                        self._diagnostics.record_mqtt_publish(now)
+                    self._next_sensor_publish_monotonic = self._advance_publish_deadline(
+                        self._next_sensor_publish_monotonic,
+                        self._sensor_update_interval(),
+                        now,
+                    )
+
+                if now >= self._next_diagnostics_publish_monotonic:
                     topic, payload = self._diagnostics.mqtt_data()
                     try:
                         self.publish(topic, payload)
                     except Exception as err:
                         logger.error(f"Failed to publish diagnostics data on topic {topic}: {err}")
+                    self._next_diagnostics_publish_monotonic = self._advance_publish_deadline(
+                        self._next_diagnostics_publish_monotonic,
+                        DIAGNOSTICS_INTERVAL,
+                        now,
+                    )
+
+    def _next_due_monotonic(self, now: float) -> float | None:
+        if not self._data_available or self._front_snapshot.timestamp <= 0:
+            return None
+
+        sensor_due = self._next_sensor_publish_monotonic or now
+        diagnostics_due = self._next_diagnostics_publish_monotonic or now
+        return min(sensor_due, diagnostics_due)
+
+    def _sensor_update_interval(self) -> float:
+        return max(0.001, float(self._mqtt_config.update_interval))
+
+    @staticmethod
+    def _advance_publish_deadline(deadline: float, interval: float, now: float) -> float:
+        next_deadline = deadline + interval
+        if next_deadline > now:
+            return next_deadline
+
+        skipped_intervals = int((now - deadline) // interval) + 1
+        return deadline + skipped_intervals * interval
 
     def _set_data_available(self, available: bool) -> None:
         if self._data_available == available:
             return
 
         self._data_available = available
+        if not available:
+            self._next_sensor_publish_monotonic = 0.0
+            self._next_diagnostics_publish_monotonic = 0.0
         with self._condition:
             self._availability_dirty = True
             self._condition.notify_all()
 
     def _publish_availability(self, client: mqtt_client.Client | None = None) -> None:
         payload = "online" if self._data_available else "offline"
+        availability_topic = self.sensors.availability_topic
         try:
             if client is not None:
-                client.publish(HA_AVAILABILITY_TOPIC, payload, retain=True)
-                self._last_payload_by_topic[HA_AVAILABILITY_TOPIC] = payload
+                client.publish(availability_topic, payload, retain=True)
+                self._last_payload_by_topic[availability_topic] = payload
             else:
-                self.publish(HA_AVAILABILITY_TOPIC, payload, retain=True)
+                self.publish(availability_topic, payload, retain=True)
         except Exception as err:
-            logger.error(f"Failed to publish availability on topic {HA_AVAILABILITY_TOPIC}: {err}")
+            logger.error(f"Failed to publish availability on topic {availability_topic}: {err}")
 
     def _copy_snapshot(self, data: MeterData, target: _HASnapshot) -> None:
         target.timestamp = data.timestamp

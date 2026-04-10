@@ -1,5 +1,6 @@
 import asyncio
 import threading
+import time
 import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, PropertyMock, patch
@@ -210,6 +211,45 @@ class TestEm540Master(unittest.TestCase):
 
         asyncio.run(self.master.connect())
         self.assertTrue(self.master._static_data_valid)
+
+    def test_timing_stats_notifies_listeners_each_cycle(self):
+        """Timing stats should be pushed every cycle for diagnostics consumers."""
+        observed = []
+
+        def _on_stats(stats):
+            observed.append(
+                (
+                    stats.modbus_read_duration_ms_last,
+                    stats.post_read_processing_ms_last,
+                    stats.non_read_processing_ms_last,
+                )
+            )
+
+        self.master.add_stats_listener(_on_stats)
+
+        cycle_start = time.perf_counter() - 0.02
+        self.master._update_timing_stats(
+            cycle_start=cycle_start,
+            modbus_read_ms=12.0,
+            post_read_processing_ms=3.0,
+        )
+
+        self.assertTrue(observed)
+        modbus_ms, post_ms, non_read_ms = observed[-1]
+        self.assertEqual(modbus_ms, 12.0)
+        self.assertEqual(post_ms, 3.0)
+        self.assertGreaterEqual(non_read_ms, 0.0)
+
+    def test_refresh_client_runtime_config_uses_live_shared_config_values(self):
+        self.mock_client.timeout = 1.0
+        self.mock_client.retries = 0
+
+        self.config.timeout = 0.25
+        self.config.retries = 3
+        self.master._refresh_client_runtime_config()
+
+        self.assertEqual(self.mock_client.timeout, 0.25)
+        self.assertEqual(self.mock_client.retries, 3)
 
 
 class TestSkipNRead(unittest.TestCase):

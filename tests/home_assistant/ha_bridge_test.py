@@ -9,13 +9,14 @@ from app.home_assistant.ha_bridge import HABridge
 from app.home_assistant.ha_sensors import HA_AVAILABILITY_TOPIC
 
 
-def _make_conf() -> MqttConfig:
+def _make_conf(topic_prefix: str = "") -> MqttConfig:
     return MqttConfig(
         host="localhost",
         port=1883,
         username="user",
         password="pass",
         update_interval=10,
+        ha_topic_prefix=topic_prefix,
         log_level="DEBUG",
     )
 
@@ -101,8 +102,6 @@ class TestHABridge(unittest.TestCase):
         data.system.power = 1234.0
         data.phases[0].current = 1.2
         data.other_energies.kwh_plus_total = 12.3
-        self.bridge._last_update = 80
-        self.bridge._update_interval = 10
         self.bridge.sensors.update = MagicMock()
         self.bridge._diagnostics.new_data = MagicMock()
         self.bridge._condition = MagicMock()
@@ -121,6 +120,33 @@ class TestHABridge(unittest.TestCase):
         self.bridge.sensors.update.assert_not_called()
         self.bridge._diagnostics.new_data.assert_not_called()
         self.assertEqual(self.bridge._condition.notify_all.call_count, 2)
+
+    def test_sensor_update_interval_reads_live_config_value(self):
+        self.bridge._mqtt_config.update_interval = 0.75
+
+        self.assertEqual(self.bridge._sensor_update_interval(), 0.75)
+
+    def test_advance_publish_deadline_skips_missed_intervals_without_drift(self):
+        next_deadline = self.bridge._advance_publish_deadline(10.0, 0.5, 11.3)
+
+        self.assertEqual(next_deadline, 11.5)
+
+    def test_next_due_uses_immediate_publish_until_deadlines_are_initialized(self):
+        self.bridge._data_available = True
+        self.bridge._front_snapshot.timestamp = 123.0
+
+        self.assertEqual(self.bridge._next_due_monotonic(50.0), 50.0)
+
+    def test_set_data_available_false_resets_publish_schedules(self):
+        self.bridge._data_available = True
+        self.bridge._next_sensor_publish_monotonic = 12.0
+        self.bridge._next_diagnostics_publish_monotonic = 17.0
+        self.bridge._condition = MagicMock()
+
+        self.bridge._set_data_available(False)
+
+        self.assertEqual(self.bridge._next_sensor_publish_monotonic, 0.0)
+        self.assertEqual(self.bridge._next_diagnostics_publish_monotonic, 0.0)
 
     def test_read_failed_marks_data_unavailable(self):
         import asyncio
@@ -196,6 +222,25 @@ class TestHABridgeConfigEntities(unittest.TestCase):
         HABridge.on_connect(mock_client, bridge, None, 0, None)
 
         mock_client.publish.assert_any_call(HA_AVAILABILITY_TOPIC, "online", retain=True)
+        bridge.stop()
+
+    def test_on_connect_uses_prefixed_availability_topic(self):
+        state = AppState()
+        cm = MagicMock(spec=ConfigManager)
+        bridge = HABridge(_make_conf(topic_prefix="qa/test-stack"), state=state, config_manager=cm)
+        bridge.sensors.advertise_data = MagicMock(return_value=[])
+        bridge._diagnostics.advertise_data = MagicMock(return_value=[])
+        bridge._data_available = True
+
+        mock_client = MagicMock()
+
+        HABridge.on_connect(mock_client, bridge, None, 0, None)
+
+        mock_client.publish.assert_any_call(
+            "qa/test-stack/lerebel/sensor/em540_energy_meter_bridge/availability",
+            "online",
+            retain=True,
+        )
         bridge.stop()
 
 

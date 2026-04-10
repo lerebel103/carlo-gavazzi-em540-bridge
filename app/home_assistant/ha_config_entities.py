@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from typing import Any, Callable
 
 from app.config import AppState, ConfigManager
+from app.home_assistant.ha_topics import discovery_model_name, prefix_topic, topic_namespace
 from app.version import __version__
 
 logger = logging.getLogger(__name__)
@@ -67,17 +68,31 @@ class HAConfigEntities:
         state: AppState,
         mqtt_client: Any,
         config_manager: ConfigManager,
+        topic_prefix: str = "",
     ) -> None:
         self._state = state
         self._mqtt_client = mqtt_client
         self._config_manager = config_manager
+        self._topic_prefix = topic_prefix
+        self._namespace = topic_namespace(topic_prefix)
+        self._device_info = dict(DEVICE_INFO)
+        self._device_info["identifiers"] = [self._namespace]
+        self._device_info["model"] = discovery_model_name(topic_prefix)
 
         self._entities: list[ConfigEntity] = self._build_entities()
 
         # Lookup from command topic → entity for fast dispatch
-        self._topic_to_entity: dict[str, ConfigEntity] = {
-            f"lerebel/config/em540_bridge/{e.safe_name}/set": e for e in self._entities
-        }
+        self._topic_to_entity: dict[str, ConfigEntity] = {self.command_topic_for(e): e for e in self._entities}
+
+    def command_topic_for(self, entity: ConfigEntity) -> str:
+        return prefix_topic(f"lerebel/config/em540_bridge/{entity.safe_name}/set", self._topic_prefix)
+
+    def state_topic_for(self, entity: ConfigEntity) -> str:
+        return prefix_topic(f"lerebel/config/em540_bridge/{entity.safe_name}/state", self._topic_prefix)
+
+    def discovery_topic_for(self, entity: ConfigEntity) -> str:
+        # Discovery must remain under Home Assistant's configured discovery prefix.
+        return f"homeassistant/{entity.entity_type}/{self._namespace}_{entity.safe_name}/config"
 
     # -- entity definitions --------------------------------------------------
 
@@ -170,14 +185,6 @@ class HAConfigEntities:
                 unit="s",
                 parse_value=float,
             ),
-            ConfigEntity(
-                name="Home Assistant Sensor Publishing",
-                field_path="mqtt.enable_ha_publish",
-                config_section=self._state.mqtt,
-                field_name="enable_ha_publish",
-                parse_value=lambda x: x.lower() in ("on", "true", "1"),
-                entity_type="switch",
-            ),
         ]
         return defs
 
@@ -188,28 +195,29 @@ class HAConfigEntities:
         payloads: list[tuple[str, str]] = []
         for entity in self._entities:
             if entity.entity_type == "switch":
-                topic = f"homeassistant/switch/em540_bridge_{entity.safe_name}/config"
+                topic = self.discovery_topic_for(entity)
                 payload_obj: dict[str, Any] = {
                     "name": entity.name,
-                    "unique_id": f"em540_bridge_config_{entity.safe_name}",
-                    "command_topic": f"lerebel/config/em540_bridge/{entity.safe_name}/set",
-                    "state_topic": f"lerebel/config/em540_bridge/{entity.safe_name}/state",
+                    "unique_id": f"{self._namespace}_config_{entity.safe_name}",
+                    "command_topic": self.command_topic_for(entity),
+                    "state_topic": self.state_topic_for(entity),
                     "payload_on": "on",
                     "payload_off": "off",
-                    "device": DEVICE_INFO,
+                    "device": self._device_info,
                     "entity_category": "config",
                 }
             else:  # number
-                topic = f"homeassistant/number/em540_bridge_{entity.safe_name}/config"
+                topic = self.discovery_topic_for(entity)
                 payload_obj: dict[str, Any] = {
                     "name": entity.name,
-                    "unique_id": f"em540_bridge_config_{entity.safe_name}",
-                    "command_topic": f"lerebel/config/em540_bridge/{entity.safe_name}/set",
-                    "state_topic": f"lerebel/config/em540_bridge/{entity.safe_name}/state",
+                    "unique_id": f"{self._namespace}_config_{entity.safe_name}",
+                    "command_topic": self.command_topic_for(entity),
+                    "state_topic": self.state_topic_for(entity),
                     "min": entity.min_value,
                     "max": entity.max_value,
                     "step": entity.step,
-                    "device": DEVICE_INFO,
+                    "mode": "box",
+                    "device": self._device_info,
                     "entity_category": "config",
                 }
                 if entity.unit is not None:
@@ -246,7 +254,7 @@ class HAConfigEntities:
         self._config_manager.schedule_persist()
 
         # Publish updated state (echo back for HA UI to update)
-        state_topic = f"lerebel/config/em540_bridge/{entity.safe_name}/state"
+        state_topic = self.state_topic_for(entity)
         if entity.entity_type == "switch":
             # Switches use on/off payloads
             state_value = "on" if value else "off"

@@ -10,7 +10,7 @@ from pymodbus.pdu import ModbusPDU
 class PduHelper:
     def __init__(self, logger: logging.Logger, bridge_timeout: float) -> None:
         self.logger: logging.Logger = logger
-        self.bridge_timeout: float = bridge_timeout
+        self.bridge_timeout = bridge_timeout
         self.last_pdu: Optional[ModbusPDU] = None
         self._last_rx_timestamp: Optional[float] = None
         self._last_warning_timestamp: float = 0
@@ -58,7 +58,8 @@ class PduHelper:
         now: float = datetime.now().timestamp()
 
         stale_age = self.stale_age_seconds(now)
-        is_stale = stale_age is None or stale_age > self.bridge_timeout
+        bridge_timeout = self.bridge_timeout() if callable(self.bridge_timeout) else self.bridge_timeout
+        is_stale = stale_age is None or stale_age > bridge_timeout
         if is_stale:
             self._open_circuit("stale upstream data", now)
 
@@ -73,12 +74,23 @@ class PduHelper:
                 self._last_warning_timestamp = now
 
             # Reply with a clear Modbus exception when the data path is stale or open-circuit.
-            return ExceptionResponse(
-                pdu.function_code,
-                exception_code=ExcCodes.DEVICE_BUSY,
-                device_id=pdu.dev_id,
-                transaction=pdu.transaction_id,
-            )
+            try:
+                return ExceptionResponse(
+                    pdu.function_code,
+                    exception_code=ExcCodes.DEVICE_BUSY,
+                    device_id=pdu.dev_id,
+                    transaction=pdu.transaction_id,
+                )
+            except TypeError:
+                response = ExceptionResponse(
+                    pdu.function_code,
+                    exception_code=ExcCodes.DEVICE_BUSY,
+                )
+                if hasattr(response, "dev_id"):
+                    response.dev_id = pdu.dev_id
+                if hasattr(response, "transaction_id"):
+                    response.transaction_id = pdu.transaction_id
+                return response
 
         # Log some exceptions so we can debug any issues with register access not accounted for...
         # For whatever reason, Victron seems to be wanting slave_id 2, just mute this one

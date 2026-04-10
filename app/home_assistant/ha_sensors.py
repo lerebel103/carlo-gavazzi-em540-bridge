@@ -1,9 +1,26 @@
 import json
 
 from app.carlo_gavazzi.meter_data import MeterData
+from app.home_assistant.ha_topics import discovery_model_name, prefix_topic, topic_namespace
 from app.version import __version__
 
+BASE_STATE_TOPIC = "lerebel/sensor/em540_energy_meter_bridge/state"
 HA_AVAILABILITY_TOPIC = "lerebel/sensor/em540_energy_meter_bridge/availability"
+
+
+def configure_sensor_topic_metadata(
+    sensors: list["Sensor"],
+    namespace: str,
+    topic_prefix: str,
+    availability_topic: str,
+) -> None:
+    for sensor in sensors:
+        sensor.unique_id = f"{namespace}_{sensor.safe_name}"
+        # Discovery must remain under Home Assistant's configured discovery prefix.
+        sensor.advertisement_topic = f"homeassistant/sensor/{namespace}_{sensor.safe_name}/config"
+        sensor.availability_topic = availability_topic
+        sensor.device["identifiers"] = [namespace]
+        sensor.device["model"] = discovery_model_name(topic_prefix)
 
 
 class Sensor:
@@ -87,8 +104,11 @@ class Sensor:
 
 
 class EnergyMeterSensor:
-    def __init__(self):
-        self.state_topic = "lerebel/sensor/em540_energy_meter_bridge/state"
+    def __init__(self, topic_prefix: str = ""):
+        self._topic_prefix = topic_prefix
+        self.namespace = topic_namespace(topic_prefix)
+        self.state_topic = prefix_topic(BASE_STATE_TOPIC, topic_prefix)
+        self.availability_topic = prefix_topic(HA_AVAILABILITY_TOPIC, topic_prefix)
 
         # Grouped sensor definitions
         self.frequency = Sensor("Frequency", "Hz", "frequency", "measurement", self.state_topic, precision=2)
@@ -289,6 +309,31 @@ class EnergyMeterSensor:
             self.state_topic,
             precision=1,
             enabled_by_default=False,
+        )
+
+        sensors = (
+            [self.frequency]
+            + self.voltage_sensors
+            + self.current_sensors
+            + self.power_sensors
+            + self.reactive_power_sensors
+            + self.apparent_power_sensors
+            + self.power_factor_sensors
+            + [
+                self.energy_import,
+                self.energy_export,
+                self.kvarh_neg_total,
+                self.kvarh_plus_total,
+                self.run_hour_meter,
+                self.kvah_total,
+            ]
+        )
+
+        configure_sensor_topic_metadata(
+            sensors=sensors,
+            namespace=self.namespace,
+            topic_prefix=self._topic_prefix,
+            availability_topic=self.availability_topic,
         )
 
     def update(self, data: MeterData):

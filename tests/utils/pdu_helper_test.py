@@ -1,6 +1,15 @@
 import unittest
 from types import SimpleNamespace
 
+import pymodbus.constants as _const
+
+if not hasattr(_const, "ExcCodes"):
+
+    class _ExcCodes:
+        DEVICE_BUSY = 0x06
+
+    _const.ExcCodes = _ExcCodes
+
 from app.utils.pdu_helper import PduHelper
 
 
@@ -44,6 +53,17 @@ class TestPduHelperCircuitBreaker(unittest.TestCase):
 
         helper.data_received(123.0)
         self.assertFalse(helper.circuit_open)
+
+    def test_callable_bridge_timeout_is_used_dynamically(self):
+        timeout_holder = {"value": 10.0}
+        helper = PduHelper(self.logger, bridge_timeout=lambda: timeout_holder["value"])
+        helper.data_received(100.0)
+
+        timeout_holder["value"] = 0.1
+        response = helper.on_pdu(True, _make_pdu())
+
+        self.assertTrue(helper.circuit_open)
+        self.assertEqual(getattr(response, "exception_code", None), 6)
 
 
 if __name__ == "__main__":

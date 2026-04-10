@@ -29,6 +29,12 @@ class Em540MasterStats:
         self.consumer_max_seq_gap: int = 0
         self.read_duration_ms_last: float = 0.0
         self.read_duration_ms_max: float = 0.0
+        self.modbus_read_duration_ms_last: float = 0.0
+        self.modbus_read_duration_ms_max: float = 0.0
+        self.post_read_processing_ms_last: float = 0.0
+        self.post_read_processing_ms_max: float = 0.0
+        self.non_read_processing_ms_last: float = 0.0
+        self.non_read_processing_ms_max: float = 0.0
         self.tick_headroom_ms_last: float = 0.0
         self.tick_headroom_ms_min: float = 0.0
         self.tick_overrun_count: int = 0
@@ -99,7 +105,38 @@ class Em540Master:
         else:
             raise ValueError(f"Invalid mode '{config.mode}' in configuration, must be 'tcp' or 'serial'")
 
+    def _refresh_client_runtime_config(self) -> None:
+        timeout = self._config.timeout
+        retries = self._config.retries
+
+        for attr_name, value in (("timeout", timeout), ("retries", retries)):
+            if hasattr(self._client, attr_name):
+                try:
+                    setattr(self._client, attr_name, value)
+                except Exception:
+                    logger.debug("Failed to update client attribute %s", attr_name, exc_info=True)
+
+        for container_name, nested_attr in (
+            ("params", "timeout"),
+            ("params", "retries"),
+            ("comm_params", "timeout"),
+            ("comm_params", "retries"),
+        ):
+            container = getattr(self._client, container_name, None)
+            if container is None or not hasattr(container, nested_attr):
+                continue
+            try:
+                setattr(container, nested_attr, timeout if nested_attr == "timeout" else retries)
+            except Exception:
+                logger.debug(
+                    "Failed to update client nested attribute %s.%s",
+                    container_name,
+                    nested_attr,
+                    exc_info=True,
+                )
+
     async def connect(self) -> None:
+        self._refresh_client_runtime_config()
         # Simulate connecting to the EM540 device
         if self._config.mode == "serial":
             logger.info("Connecting to EM540 via serial port " + self._config.serial_port + "...")
@@ -176,12 +213,14 @@ class Em540Master:
 
     async def acquire_data(self) -> bool:
         cycle_start = time.perf_counter()
+        modbus_read_ms = 0.0
+        post_read_processing_ms = 0.0
 
         # No point reading if we are not connected
         if not self._client.connected:
             for listener in self._listeners:
                 await listener.read_failed()
-            self._update_timing_stats(cycle_start)
+            self._update_timing_stats(cycle_start, modbus_read_ms, post_read_processing_ms)
             return False
 
         # Use back buffer as the mutable working set and keep front buffer immutable for listeners.
@@ -191,13 +230,16 @@ class Em540Master:
 
         # Read our dynamic registers
         self._dyn_reg_read_counter += 1
+        read_start = time.perf_counter()
         is_ok: bool = await self._read_registers(
             frame.dynamic_reg_map,
             dyn_reg=True,
             fallback_reg_map=self._front_data.frame.dynamic_reg_map,
             reg_addrs=self._dynamic_read_plan,
         )
+        modbus_read_ms = (time.perf_counter() - read_start) * 1000.0
         if is_ok:
+            process_start = time.perf_counter()
             self._back_data.update_from_frame()
 
             # Atomic swap so listeners always read a coherent, latest snapshot.
@@ -205,23 +247,37 @@ class Em540Master:
                 self._front_data, self._back_data = self._back_data, self._front_data
                 self._data_seq += 1
                 self._condition.notify_all()
+            post_read_processing_ms = (time.perf_counter() - process_start) * 1000.0
         else:
             # Now notify listeners
             for listener in self._listeners:
                 await listener.read_failed()
 
-        self._update_timing_stats(cycle_start)
+        self._update_timing_stats(cycle_start, modbus_read_ms, post_read_processing_ms)
 
         return is_ok
 
-    def _update_timing_stats(self, cycle_start: float) -> None:
+    def _update_timing_stats(self, cycle_start: float, modbus_read_ms: float, post_read_processing_ms: float) -> None:
         elapsed_ms = (time.perf_counter() - cycle_start) * 1000.0
+        non_read_processing_ms = max(0.0, elapsed_ms - modbus_read_ms - post_read_processing_ms)
         tick_budget_ms = float(getattr(self._config, "update_interval", 0.1)) * 1000.0
         headroom_ms = tick_budget_ms - elapsed_ms
 
         with self._stats_lock:
             self._stats.read_duration_ms_last = elapsed_ms
             self._stats.read_duration_ms_max = max(self._stats.read_duration_ms_max, elapsed_ms)
+            self._stats.modbus_read_duration_ms_last = modbus_read_ms
+            self._stats.modbus_read_duration_ms_max = max(self._stats.modbus_read_duration_ms_max, modbus_read_ms)
+            self._stats.post_read_processing_ms_last = post_read_processing_ms
+            self._stats.post_read_processing_ms_max = max(
+                self._stats.post_read_processing_ms_max,
+                post_read_processing_ms,
+            )
+            self._stats.non_read_processing_ms_last = non_read_processing_ms
+            self._stats.non_read_processing_ms_max = max(
+                self._stats.non_read_processing_ms_max,
+                non_read_processing_ms,
+            )
             self._stats.tick_headroom_ms_last = headroom_ms
 
             if self._stats.tick_headroom_ms_min == 0:
@@ -231,6 +287,9 @@ class Em540Master:
 
             if headroom_ms < 0:
                 self._stats.tick_overrun_count += 1
+
+        # Timing stats are expected to update continuously for diagnostics consumers.
+        self._stats.changed()
 
     def _copy_meter_data(self, source: MeterData, target: MeterData) -> None:
         """Copy frame register values between buffers while keeping object allocation stable."""
@@ -314,6 +373,7 @@ class Em540Master:
         fallback_reg_map: dict | None = None,
         reg_addrs: tuple[int, ...] | None = None,
     ) -> bool:
+        self._refresh_client_runtime_config()
         try:
             # Read dynamic registers
             # Only read the primary register every cycle, the rest are read less often

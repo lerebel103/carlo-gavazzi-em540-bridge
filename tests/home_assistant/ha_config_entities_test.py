@@ -25,11 +25,29 @@ def _make_entities(state: AppState | None = None) -> HAConfigEntities:
     return HAConfigEntities(state, mqtt_client, config_manager)
 
 
+def test_topic_prefix_is_applied_to_config_entity_topics_and_ids():
+    state = AppState()
+    mqtt_client = MagicMock()
+    config_manager = MagicMock(spec=ConfigManager)
+    entities = HAConfigEntities(state, mqtt_client, config_manager, topic_prefix="qa/test-stack")
+
+    discovery_topic, raw_payload = entities.advertise()[0]
+    payload = json.loads(raw_payload)
+
+    assert discovery_topic.startswith("homeassistant/")
+    assert payload["command_topic"].startswith("qa/test-stack/lerebel/")
+    assert payload["state_topic"].startswith("qa/test-stack/lerebel/")
+    assert payload["name"] == "Grid Feed-In Hard Limit"
+    assert payload["unique_id"].startswith("em540_bridge_qa_test_stack_config_")
+    assert payload["device"]["identifiers"] == ["em540_bridge_qa_test_stack"]
+    assert payload["device"]["model"] == "[qa/test-stack] EM540 Bridge"
+
+
 # Required keys that every discovery payload must contain (Req 9.2, 9.3).
 _REQUIRED_KEYS = {"name", "unique_id", "command_topic", "state_topic", "device", "entity_category"}
 
 # Additional keys required for number entities (Req 9.4).
-_NUMBER_KEYS = {"min", "max", "step"}
+_NUMBER_KEYS = {"min", "max", "step", "mode"}
 
 
 # ---------------------------------------------------------------------------
@@ -89,9 +107,9 @@ def test_property_mqtt_discovery_payload_validity(state: AppState):
         assert not missing, f"Payload for {topic} missing keys: {missing}"
 
         # entity_category must be "config" (Req 9.3).
-        assert payload["entity_category"] == "config", (
-            f"entity_category should be 'config', got {payload['entity_category']!r}"
-        )
+        assert (
+            payload["entity_category"] == "config"
+        ), f"entity_category should be 'config', got {payload['entity_category']!r}"
 
         # For number entities, min/max/step must be present (Req 9.4).
         # For switch entities, payload_on/payload_off must be present.
@@ -99,23 +117,24 @@ def test_property_mqtt_discovery_payload_validity(state: AppState):
         if not is_switch:
             missing_number = _NUMBER_KEYS - payload.keys()
             assert not missing_number, f"Number payload for {topic} missing keys: {missing_number}"
+            assert payload["mode"] == "box"
         else:
             # Switches must have payload_on and payload_off
-            assert "payload_on" in payload and "payload_off" in payload, (
-                f"Switch payload for {topic} missing payload_on/payload_off"
-            )
+            assert (
+                "payload_on" in payload and "payload_off" in payload
+            ), f"Switch payload for {topic} missing payload_on/payload_off"
 
         # device must be a dict with at least an identifiers key.
         assert isinstance(payload["device"], dict), "device must be a dict"
         assert "identifiers" in payload["device"], "device must have identifiers"
 
         # name and unique_id must be non-empty strings.
-        assert isinstance(payload["name"], str) and payload["name"], (
-            f"name must be a non-empty string, got {payload['name']!r}"
-        )
-        assert isinstance(payload["unique_id"], str) and payload["unique_id"], (
-            f"unique_id must be a non-empty string, got {payload['unique_id']!r}"
-        )
+        assert (
+            isinstance(payload["name"], str) and payload["name"]
+        ), f"name must be a non-empty string, got {payload['name']!r}"
+        assert (
+            isinstance(payload["unique_id"], str) and payload["unique_id"]
+        ), f"unique_id must be a non-empty string, got {payload['unique_id']!r}"
 
         # command_topic and state_topic must be non-empty strings.
         assert isinstance(payload["command_topic"], str) and payload["command_topic"]
@@ -127,7 +146,7 @@ def test_property_mqtt_discovery_payload_validity(state: AppState):
 # ---------------------------------------------------------------------------
 
 # Strategy: pick a random entity index and a valid value within its range.
-_ENTITY_COUNT = 8  # number of entities built by HAConfigEntities
+_ENTITY_COUNT = 7  # number of entities built by HAConfigEntities
 
 _entity_index = st.integers(min_value=0, max_value=_ENTITY_COUNT - 1)
 

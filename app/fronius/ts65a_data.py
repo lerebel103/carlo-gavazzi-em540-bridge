@@ -23,6 +23,12 @@ class RunningAverage:
     def reset(self):
         self.values.clear()
 
+    def set_max_points(self, max_points):
+        if max_points == self.max_points:
+            return
+        self.max_points = max_points
+        self.values = collections.deque(self.values, maxlen=max_points)
+
 
 # def get_sign(number: float):
 #    if number >= 0:
@@ -342,6 +348,42 @@ class Ts65aMeterData:
         self._vah_plus_a = 0
         self._vah_plus_b = 0
         self._vah_plus_c = 0
+
+    def reconfigure(self, max_points, grid_feed_in_hard_limit):
+        self.stats.grid_feed_in_hard_limit = grid_feed_in_hard_limit
+
+        for attr_name in (
+            "_current_an",
+            "_current_a",
+            "_current_b",
+            "_current_c",
+            "_voltage_ln",
+            "_voltage_ln_a",
+            "_voltage_ln_b",
+            "_voltage_ln_c",
+            "_voltage_ll",
+            "_voltage_ll_a",
+            "_voltage_ll_b",
+            "_voltage_ll_c",
+            "_frequency",
+            "_power",
+            "_power_a",
+            "_power_b",
+            "_power_c",
+            "_apparent_power",
+            "_apparent_power_a",
+            "_apparent_power_b",
+            "_apparent_power_c",
+            "_reactive_power",
+            "_reactive_power_a",
+            "_reactive_power_b",
+            "_reactive_power_c",
+            "_power_factor",
+            "_power_factor_a",
+            "_power_factor_b",
+            "_power_factor_c",
+        ):
+            getattr(self, attr_name).set_max_points(max_points)
 
     def _reset_means(self):
         self.logger.warn("Resetting running averages due to power over feed in limit")

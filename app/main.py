@@ -55,15 +55,16 @@ async def process_loop():
     await em540_slave.start()
     await ts65a_slave.start()
 
-    read_interval = state.em540_master.update_interval
+    initial_interval = state.em540_master.update_interval
     start_time = time.perf_counter()
-    next_call_time = start_time + read_interval
-    reconnect_backoff = read_interval
+    next_call_time = start_time + initial_interval
+    reconnect_backoff = initial_interval
     max_reconnect_backoff = 5.0
     next_connect_attempt_time = 0.0
 
     try:
         while True:
+            read_interval = max(0.001, float(state.em540_master.update_interval))
             current_time = time.perf_counter()
             if current_time >= next_call_time:
                 # If we are late, skip missed ticks instead of executing catch-up bursts.

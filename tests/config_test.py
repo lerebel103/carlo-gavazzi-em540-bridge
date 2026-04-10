@@ -1205,6 +1205,6 @@ def test_property_non_persisted_fields_preserved_on_write(non_persisted_values):
         for dotted_key, expected in non_persisted_values.items():
             section, key = dotted_key.split(".")
             actual = reloaded.get(section, {}).get(key)
-            assert actual == expected, (
-                f"Non-persisted field {dotted_key} changed after _write(): expected {expected!r}, got {actual!r}"
-            )
+            assert (
+                actual == expected
+            ), f"Non-persisted field {dotted_key} changed after _write(): expected {expected!r}, got {actual!r}"

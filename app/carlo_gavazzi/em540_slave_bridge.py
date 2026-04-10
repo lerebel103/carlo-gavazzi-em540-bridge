@@ -20,12 +20,13 @@ class Em540Slave(MeterDataListener):
     """Represents a Modbus slave that serves data read from an EM540 master."""
 
     def __init__(self, config, frame: Em540Frame) -> None:
+        self._config = config
         self.host: str = config.host
         self.rtu_port: int = config.rtu_port
         self.tcp_port: int = config.tcp_port
         self.last_pdu: object = None
         self._slave_id: int = config.slave_id
-        self._pdu_helper: PduHelper = PduHelper(logger, config.update_timeout)
+        self._pdu_helper: PduHelper = PduHelper(logger, lambda: self._config.update_timeout)
         self._stats: EM540SlaveStats = EM540SlaveStats()
         logger.setLevel(config.log_level)
 

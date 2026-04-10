@@ -61,16 +61,16 @@ ts65a_slave:
 mqtt:
   # Whether to enable MQTT integration from the top level.
   enabled: true
-  # Whether to enable publishing sensors and diagnostics to Home Assistant, 
-  # but keep the command path for remote configuration changes active still.
-  enable_ha_publish: true
+  # Optional prefix added to all Home Assistant MQTT topics for test isolation.
+  # Leave blank for normal production topics.
+  ha_topic_prefix: ""
   # MQTT broker connection parameters
   host: localhost
   port: 1883
   username: ""
   password: ""
   # Update interval in seconds for publishing the values to MQTT
-  update_interval: 0.5
+  update_interval: 1.0
   # Log level for the MQTT component
   log_level: INFO
 

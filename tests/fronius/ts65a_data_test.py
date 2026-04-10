@@ -197,6 +197,18 @@ class TestTs65aMeterData(unittest.TestCase):
         self.assertGreater(self.meter.power_c, 0)
         self.assertGreater(self.meter.power_factor_c, 0)
 
+    def test_reconfigure_updates_max_points_and_grid_feed_in_limit(self):
+        self.meter.update(self.data)
+        self.meter.update(self.data)
+
+        self.meter.reconfigure(1, -2500)
+        self.data.system.power = 321
+        self.meter.update(self.data)
+
+        self.assertEqual(self.meter.stats.grid_feed_in_hard_limit, -2500)
+        self.assertEqual(self.meter._power.max_points, 1)
+        self.assertEqual(len(self.meter._power.values), 1)
+
 
 if __name__ == "__main__":
     unittest.main()

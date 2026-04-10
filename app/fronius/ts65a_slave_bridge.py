@@ -17,10 +17,11 @@ logger = logging.getLogger("ts65a-slave")
 
 class Ts65aSlaveBridge(MeterDataListener):
     def __init__(self, config):
+        self._config = config
         self.host = config.host
         self.port: int = config.port
         self._slave_id: int = config.slave_id
-        self._pdu_helper = PduHelper(logger, config.update_timeout)
+        self._pdu_helper = PduHelper(logger, lambda: self._config.update_timeout)
         self._stats = Ts65aSlaveStats()
         logger.setLevel(config.log_level)
 
@@ -219,7 +220,7 @@ class Ts65aSlaveBridge(MeterDataListener):
             trace_connect=self._trace_connect,
         )
         self._dynamic_start_address: int = 40072
-        self._dynamic_register_buffer: list[int] = [0] * 82
+        self._dynamic_register_buffer: list[int] = [0] * (len(self._dynamic_values()) * 2)
 
     def _trace_connect(self, connect):
         logger.info(f"Client connection to TCP server: {connect}")
@@ -247,15 +248,8 @@ class Ts65aSlaveBridge(MeterDataListener):
         self._stats.dropped_stale_request_count = self._pdu_helper.dropped_request_count
         self._stats.changed()
 
-    async def new_data(self, data: meter_data.MeterData):
-        registers = self._dynamic_register_buffer
-        index = 0
-
-        # Run the data through our smoothing and grid feed-in limiter
-        self.meter_data.update(data)
-
-        # now update the registers in the Modbus datastore
-        values = (
+    def _dynamic_values(self) -> tuple[float, ...]:
+        return (
             self.meter_data.current_an,
             self.meter_data.current_a,
             self.meter_data.current_b,
@@ -302,6 +296,20 @@ class Ts65aSlaveBridge(MeterDataListener):
             self.meter_data.vah_plus_b,
             self.meter_data.vah_plus_c,
         )
+
+    async def new_data(self, data: meter_data.MeterData):
+        registers = self._dynamic_register_buffer
+        index = 0
+
+        # Run the data through our smoothing and grid feed-in limiter
+        self.meter_data.reconfigure(
+            self._config.smoothing_num_points,
+            self._config.grid_feed_in_hard_limit,
+        )
+        self.meter_data.update(data)
+
+        # now update the registers in the Modbus datastore
+        values = self._dynamic_values()
 
         for value in values:
             reg_pair = ModbusTcpClient.convert_to_registers(value, ModbusTcpClient.DATATYPE.FLOAT32, "big")
