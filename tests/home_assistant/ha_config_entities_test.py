@@ -70,8 +70,9 @@ def test_property_mqtt_discovery_payload_validity(state: AppState):
     Property 7 — MQTT discovery payload validity:
     For any PERSISTED_FIELDS entry, the generated MQTT_Discovery_Payload
     SHALL be valid JSON containing at minimum: name, unique_id,
-    command_topic, state_topic, device, entity_category ("config"),
-    and for number entities: min, max, and step.
+    command_topic, state_topic, device, entity_category ("config").
+    For number entities: min, max, and step.
+    For switch entities: payload_on and payload_off.
     """
     entities = _make_entities(state)
     payloads = entities.advertise()
@@ -92,9 +93,17 @@ def test_property_mqtt_discovery_payload_validity(state: AppState):
             f"entity_category should be 'config', got {payload['entity_category']!r}"
         )
 
-        # All current entities are numbers, so min/max/step must be present (Req 9.4).
-        missing_number = _NUMBER_KEYS - payload.keys()
-        assert not missing_number, f"Number payload for {topic} missing keys: {missing_number}"
+        # For number entities, min/max/step must be present (Req 9.4).
+        # For switch entities, payload_on/payload_off must be present.
+        is_switch = "payload_on" in payload
+        if not is_switch:
+            missing_number = _NUMBER_KEYS - payload.keys()
+            assert not missing_number, f"Number payload for {topic} missing keys: {missing_number}"
+        else:
+            # Switches must have payload_on and payload_off
+            assert "payload_on" in payload and "payload_off" in payload, (
+                f"Switch payload for {topic} missing payload_on/payload_off"
+            )
 
         # device must be a dict with at least an identifiers key.
         assert isinstance(payload["device"], dict), "device must be a dict"

@@ -59,9 +59,10 @@ ts65a_slave:
   log_level: INFO
 
 mqtt:
-  # Whether to enable MQTT publishing of the read values
+  # Whether to enable MQTT integration from the top level.
   enabled: true
-  # Whether to enable publishing sensors and diagnostics to Home Assistant
+  # Whether to enable publishing sensors and diagnostics to Home Assistant, 
+  # but keep the command path for remote configuration changes active still.
   enable_ha_publish: true
   # MQTT broker connection parameters
   host: localhost

@@ -155,6 +155,13 @@ def test_non_mapping_yaml(tmp_path):
 
 
 def test_loads_existing_config_yaml():
+    # Skip this test if config.yaml (user-specific config) doesn't exist.
+    # It's optional and not committed to the repo.
+    import os
+
+    if not os.path.exists("config.yaml"):
+        pytest.skip("config.yaml not found (user-specific config file)")
+
     state = ConfigManager("config.yaml").load()
     assert state.em540_master.mode == "tcp"
     assert state.em540_master.host == "192.168.102.240"
