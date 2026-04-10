@@ -49,4 +49,4 @@ USER lerebel103
 ENV PYTHONPATH=/app
 
 # Default command
-CMD ["python", "-m", "app", "--config", "/etc/em540-bridge/config.yaml"]
+CMD ["python", "-m", "app", "--config", "/etc/carlo-gavazzi-em540-bridge/config.yaml"]

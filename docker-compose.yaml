@@ -1,14 +1,14 @@
 services:
-  em540-bridge:
+  carlo-gavazzi-em540-bridge:
     image: lerebel103/carlo-gavazzi-em540-bridge:latest
     build:
       context: .
       args:
         VERSION: ${VERSION:-dev}
-    container_name: em540-bridge
+    container_name: carlo-gavazzi-em540-bridge
     restart: unless-stopped
     volumes:
-      - ./config.yaml:/etc/em540-bridge/config.yaml
+      - ./config.yaml:/etc/carlo-gavazzi-em540-bridge/config.yaml
     environment:
       TZ: Australia/Perth
     ports:

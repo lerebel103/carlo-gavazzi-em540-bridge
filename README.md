@@ -33,16 +33,40 @@ readings (see `config-default.yaml`).
 
 - **Hardware:** RS485 to Modbus/RTU physical converter to connect the EM540 meter to your network.
 - **Meter configuration:** EM540 must be set to a baud rate of 57600 or higher to support a 100 ms read cycle.
-- **Software:** Python 3.13 and all dependencies listed in `requirements.txt`.
+- **Software (Docker path):** Docker Engine with Docker Compose plugin.
+- **Software (manual path):** Python 3.13 and all dependencies listed in `requirements.txt`.
 
-## Usage
+## Install and Run with Docker Compose (Recommended)
 
-1. Install Python dependencies: `pip install -r requirements.txt`
-2. Connect the EM540 meter via an RS485-to-IP converter.
-3. Configure the meter for a baud rate of 57600 or higher; ensure the converter matches (baud rate, data bits, parity, stop bits).
-4. Copy `config-default.yaml` and update it with your converter's IP address/port and any other settings.
-5. Run the bridge: `python -m app` (or `make up` for Docker).
-6. For Home Assistant, point the bridge at the MQTT broker used by HA — see the `mqtt` section in the config file.
+1. Clone this repository.
+2. Copy the example config and edit it for your environment:
+	`cp config-default.yaml config.yaml`
+3. Update `config.yaml` with your RS485 converter details and MQTT broker settings.
+4. Start the bridge with Compose:
+	`docker compose up -d`
+5. Check logs:
+	`docker compose logs -f carlo-gavazzi-em540-bridge`
+6. Stop the service:
+	`docker compose down`
+
+Notes:
+- The provided `docker-compose.yaml` mounts `./config.yaml` into the container at `/etc/carlo-gavazzi-em540-bridge/config.yaml`.
+- The Compose file uses image `lerebel103/carlo-gavazzi-em540-bridge:latest` by default.
+- Exposed ports are `5001` (Modbus TCP), `5002` (Modbus RTU-over-TCP), and `5003` (TS-65-A emulation).
+
+## Build and Run Manually (Without Docker)
+
+1. Install Python dependencies:
+	`pip install -r requirements.txt`
+2. Copy and edit configuration:
+	`cp config-default.yaml config.yaml`
+3. Run the bridge:
+	`python -m app --config ./config.yaml`
+
+Optional helper commands:
+- Start stack with project Makefile: `make up`
+- Stop stack: `make down`
+- View logs: `make logs`
 
 ## Development
 

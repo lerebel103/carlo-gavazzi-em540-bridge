@@ -47,7 +47,7 @@ down stop:
 
 .PHONY: logs
 logs:
-	docker compose logs -f em540-bridge
+	docker compose logs -f carlo-gavazzi-em540-bridge
 
 .PHONY: test
 test:
