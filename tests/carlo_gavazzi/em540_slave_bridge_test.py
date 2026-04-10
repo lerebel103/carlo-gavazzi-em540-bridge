@@ -107,6 +107,7 @@ class TestEm540Slave(unittest.TestCase):
         slave, mock_datablock = self._build_slave(frame)
 
         meter_data = MeterData()
+        meter_data.frame = frame
         meter_data.frame.dynamic_reg_map[0x0000].values = [42] * 0x34
         meter_data.frame.dynamic_reg_map[0x0500].values = [7] * 0x40
 
@@ -120,14 +121,13 @@ class TestEm540Slave(unittest.TestCase):
 
     # --- Requirement 12.2: new_data does not rewrite static registers ---
 
-    def test_new_data_does_not_update_static_registers(self):
-        """Requirement 12.2 – static register values are not rewritten on every update."""
+    def test_new_data_does_not_update_static_registers_when_unchanged(self):
+        """Requirement 12.2 – static register values are not rewritten unless source static data changes."""
         frame = Em540Frame()
         slave, mock_datablock = self._build_slave(frame)
 
         meter_data = MeterData()
-        for reg in meter_data.frame.static_reg_map.values():
-            reg.values = [99] * len(reg.values)
+        meter_data.frame = frame
 
         asyncio.run(slave.new_data(meter_data))
 
@@ -148,6 +148,7 @@ class TestEm540Slave(unittest.TestCase):
         slave, mock_datablock = self._build_slave(frame)
 
         meter_data = MeterData()
+        meter_data.frame = frame
         for reg in meter_data.frame.remapped_reg_map.values():
             reg.values = [55] * len(reg.values)
 
@@ -158,6 +159,55 @@ class TestEm540Slave(unittest.TestCase):
             expected_addr = addr + REG_OFFSET
             self.assertIn(expected_addr, calls, f"Remapped {hex(addr)} not updated at {hex(expected_addr)}")
             self.assertEqual(calls[expected_addr], meter_data.frame.remapped_reg_map[addr].values)
+
+    def test_new_data_resyncs_static_registers_when_source_static_changes(self):
+        frame = Em540Frame()
+        slave, mock_datablock = self._build_slave(frame)
+
+        meter_data = MeterData()
+        meter_data.frame = frame
+        meter_data._timestamp = 123.0
+
+        asyncio.run(slave.new_data(meter_data))
+        mock_datablock.setValues.reset_mock()
+
+        first_static_addr = next(iter(frame.static_reg_map))
+        reg = frame.static_reg_map[first_static_addr]
+        reg.values = [99] * len(reg.values)
+
+        asyncio.run(slave.new_data(meter_data))
+
+        calls = {c[0][0]: c[0][1] for c in mock_datablock.setValues.call_args_list}
+        self.assertIn(first_static_addr + REG_OFFSET, calls)
+        self.assertEqual(calls[first_static_addr + REG_OFFSET], frame.static_reg_map[first_static_addr].values)
+
+    def test_new_data_keeps_circuit_open_until_static_sync(self):
+        frame = Em540Frame()
+        slave, _ = self._build_slave(frame)
+
+        meter_data = MeterData()
+        meter_data.frame = frame
+        meter_data._timestamp = 123.0
+
+        asyncio.run(slave.new_data(meter_data))
+
+        self.assertTrue(slave._stats.circuit_breaker_open)
+
+    def test_new_data_closes_circuit_once_static_sync_completed(self):
+        frame = Em540Frame()
+        slave, _ = self._build_slave(frame)
+
+        meter_data = MeterData()
+        meter_data.frame = frame
+        meter_data._timestamp = 123.0
+
+        first_static_addr = next(iter(frame.static_reg_map))
+        reg = frame.static_reg_map[first_static_addr]
+        reg.values = [42] * len(reg.values)
+
+        asyncio.run(slave.new_data(meter_data))
+
+        self.assertFalse(slave._stats.circuit_breaker_open)
 
 
 if __name__ == "__main__":
