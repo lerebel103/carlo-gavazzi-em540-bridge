@@ -5,16 +5,16 @@ from __future__ import annotations
 import json
 from unittest.mock import MagicMock
 
-import pytest
-from hypothesis import given, settings, strategies as st
+from hypothesis import given, settings
+from hypothesis import strategies as st
 
-from app.config import AppState, ConfigManager, PERSISTED_FIELDS
+from app.config import PERSISTED_FIELDS, AppState, ConfigManager
 from app.home_assistant.ha_config_entities import HAConfigEntities
-
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _make_entities(state: AppState | None = None) -> HAConfigEntities:
     """Build HAConfigEntities with mocked mqtt_client and config_manager."""
@@ -77,9 +77,7 @@ def test_property_mqtt_discovery_payload_validity(state: AppState):
     payloads = entities.advertise()
 
     # There must be exactly one payload per PERSISTED_FIELD.
-    assert len(payloads) == len(PERSISTED_FIELDS), (
-        f"Expected {len(PERSISTED_FIELDS)} payloads, got {len(payloads)}"
-    )
+    assert len(payloads) == len(PERSISTED_FIELDS), f"Expected {len(PERSISTED_FIELDS)} payloads, got {len(payloads)}"
 
     for topic, raw_payload in payloads:
         # Payload must be valid JSON.
@@ -96,9 +94,7 @@ def test_property_mqtt_discovery_payload_validity(state: AppState):
 
         # All current entities are numbers, so min/max/step must be present (Req 9.4).
         missing_number = _NUMBER_KEYS - payload.keys()
-        assert not missing_number, (
-            f"Number payload for {topic} missing keys: {missing_number}"
-        )
+        assert not missing_number, f"Number payload for {topic} missing keys: {missing_number}"
 
         # device must be a dict with at least an identifiers key.
         assert isinstance(payload["device"], dict), "device must be a dict"
@@ -140,17 +136,21 @@ def entity_and_value(draw):
 
     # Generate a value within [min_value, max_value] respecting the type
     if entity.parse_value is int:
-        value = draw(st.integers(
-            min_value=int(entity.min_value),
-            max_value=int(entity.max_value),
-        ))
+        value = draw(
+            st.integers(
+                min_value=int(entity.min_value),
+                max_value=int(entity.max_value),
+            )
+        )
     else:
-        value = draw(st.floats(
-            min_value=entity.min_value,
-            max_value=entity.max_value,
-            allow_nan=False,
-            allow_infinity=False,
-        ))
+        value = draw(
+            st.floats(
+                min_value=entity.min_value,
+                max_value=entity.max_value,
+                allow_nan=False,
+                allow_infinity=False,
+            )
+        )
 
     return idx, value
 
@@ -189,13 +189,9 @@ def test_property_valid_command_updates_state_and_triggers_persist(data):
     actual = getattr(entity.config_section, entity.field_name)
     expected = entity.parse_value(str(value))
     if isinstance(expected, float):
-        assert abs(actual - expected) < 1e-9, (
-            f"Expected {entity.field_path} = {expected}, got {actual}"
-        )
+        assert abs(actual - expected) < 1e-9, f"Expected {entity.field_path} = {expected}, got {actual}"
     else:
-        assert actual == expected, (
-            f"Expected {entity.field_path} = {expected}, got {actual}"
-        )
+        assert actual == expected, f"Expected {entity.field_path} = {expected}, got {actual}"
 
     # 2) schedule_persist() was called (Req 10.2)
     config_manager.schedule_persist.assert_called_once()
@@ -210,10 +206,23 @@ def test_property_valid_command_updates_state_and_triggers_persist(data):
 # ---------------------------------------------------------------------------
 
 # Strategy: generate invalid string values that cannot be parsed as int or float.
-_invalid_values = st.sampled_from([
-    "abc", "not_a_number", "", "  ", "NaN", "inf", "-inf",
-    "12.34.56", "1,000", "true", "null", "None", "0x1F",
-]) | st.text(
+_invalid_values = st.sampled_from(
+    [
+        "abc",
+        "not_a_number",
+        "",
+        "  ",
+        "NaN",
+        "inf",
+        "-inf",
+        "12.34.56",
+        "1,000",
+        "true",
+        "null",
+        "None",
+        "0x1F",
+    ]
+) | st.text(
     alphabet=st.sampled_from("abcdefghijklmnopqrstuvwxyz!@#$%^&*()_"),
     min_size=1,
     max_size=10,
@@ -234,6 +243,7 @@ def entity_index_and_invalid_value(draw):
         entity.parse_value(value)
         # If parsing succeeds, this is actually a valid value — skip it.
         from hypothesis import assume
+
         assume(False)
     except (ValueError, TypeError):
         pass
@@ -275,9 +285,7 @@ def test_property_invalid_command_leaves_state_unchanged(data):
 
     # 1) AppState field is unchanged (Req 10.4)
     actual = getattr(entity.config_section, entity.field_name)
-    assert actual == original_value, (
-        f"Expected {entity.field_path} to remain {original_value}, got {actual}"
-    )
+    assert actual == original_value, f"Expected {entity.field_path} to remain {original_value}, got {actual}"
 
     # 2) schedule_persist() was NOT called
     config_manager.schedule_persist.assert_not_called()

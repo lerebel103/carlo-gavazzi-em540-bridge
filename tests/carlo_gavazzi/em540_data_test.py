@@ -2,50 +2,44 @@ import unittest
 
 from pymodbus.client import ModbusTcpClient
 
-from app.carlo_gavazzi.em540_data import RegisterDefinition
-
+from app.carlo_gavazzi.em540_data import ZERO_FILL, Em540Frame, RegisterDefinition, register_remap
 
 # ---------------------------------------------------------------------------
 # Test helpers – encode values into Modbus register lists using pymodbus
 # ---------------------------------------------------------------------------
 
+
 def encode_int32_le(value: int) -> list:
     """Encode a signed 32-bit integer as two 16-bit registers in little-endian word order."""
-    return ModbusTcpClient.convert_to_registers(
-        value, ModbusTcpClient.DATATYPE.INT32, "little"
-    )
+    return ModbusTcpClient.convert_to_registers(value, ModbusTcpClient.DATATYPE.INT32, "little")
 
 
 def encode_int16_le(value: int) -> list:
     """Encode a signed 16-bit integer as one 16-bit register."""
-    return ModbusTcpClient.convert_to_registers(
-        value, ModbusTcpClient.DATATYPE.INT16, "little"
-    )
+    return ModbusTcpClient.convert_to_registers(value, ModbusTcpClient.DATATYPE.INT16, "little")
 
 
 def encode_int64_le(value: int) -> list:
     """Encode a signed 64-bit integer as four 16-bit registers in little-endian word order."""
-    return ModbusTcpClient.convert_to_registers(
-        value, ModbusTcpClient.DATATYPE.INT64, "little"
-    )
+    return ModbusTcpClient.convert_to_registers(value, ModbusTcpClient.DATATYPE.INT64, "little")
 
 
 def build_dynamic_registers(
-    phase_voltages_ln=(2300, 2310, 2320),   # Volt * 10
-    phase_voltages_ll=(3990, 4000, 4010),   # Volt * 10
-    phase_currents=(10500, 11000, 10800),   # Ampere * 1000
-    phase_powers=(2415, 2530, 2480),        # Watt * 10
-    phase_apparent=(2500, 2600, 2550),      # VA * 10
-    phase_reactive=(500, 520, 510),         # var * 10
-    sys_voltage_ln=2310,                    # Volt * 10
-    sys_voltage_ll=4000,                    # Volt * 10
-    sys_power=7425,                         # Watt * 10
-    sys_apparent=7650,                      # VA * 10
-    sys_reactive=1530,                      # var * 10
-    phase_pfs=(980, 970, 975),              # PF * 1000
-    sys_pf=975,                             # PF * 1000
-    phase_seq=1,                            # Phase sequence
-    frequency=500,                          # Hz * 10
+    phase_voltages_ln=(2300, 2310, 2320),  # Volt * 10
+    phase_voltages_ll=(3990, 4000, 4010),  # Volt * 10
+    phase_currents=(10500, 11000, 10800),  # Ampere * 1000
+    phase_powers=(2415, 2530, 2480),  # Watt * 10
+    phase_apparent=(2500, 2600, 2550),  # VA * 10
+    phase_reactive=(500, 520, 510),  # var * 10
+    sys_voltage_ln=2310,  # Volt * 10
+    sys_voltage_ll=4000,  # Volt * 10
+    sys_power=7425,  # Watt * 10
+    sys_apparent=7650,  # VA * 10
+    sys_reactive=1530,  # var * 10
+    phase_pfs=(980, 970, 975),  # PF * 1000
+    sys_pf=975,  # PF * 1000
+    phase_seq=1,  # Phase sequence
+    frequency=500,  # Hz * 10
 ) -> list:
     """Build a 0x34-length register array matching the 0x0000 dynamic block layout."""
     regs = [0] * 0x34
@@ -111,6 +105,7 @@ def build_dynamic_registers(
 # TestRegisterDefinition – Requirements 6.1, 6.2, 6.3
 # ---------------------------------------------------------------------------
 
+
 class TestRegisterDefinition(unittest.TestCase):
     """Validates: Requirements 6.1, 6.2, 6.3"""
 
@@ -145,13 +140,10 @@ class TestRegisterDefinition(unittest.TestCase):
 if __name__ == "__main__":
     unittest.main()
 
-
-from app.carlo_gavazzi.em540_data import Em540Frame, register_remap, ZERO_FILL
-
-
 # ---------------------------------------------------------------------------
 # Helper to build a 0x0500-block register array (length 0x40)
 # ---------------------------------------------------------------------------
+
 
 def build_energy_registers(
     kwh_plus_tot=0,
@@ -178,15 +170,24 @@ def build_energy_registers(
     regs = [0] * 0x40
     # 13 consecutive INT64 values (4 regs each) starting at offset 0
     int64_vals = [
-        kwh_plus_tot, kvarh_plus_tot, kwh_plus_partial, kvarh_plus_partial,
-        kwh_plus_l1, kwh_plus_l2, kwh_plus_l3,
-        kwh_neg_tot, kwh_neg_partial, kvarh_neg_tot, kvarh_neg_partial,
-        kvah_tot, kvah_partial,
+        kwh_plus_tot,
+        kvarh_plus_tot,
+        kwh_plus_partial,
+        kvarh_plus_partial,
+        kwh_plus_l1,
+        kwh_plus_l2,
+        kwh_plus_l3,
+        kwh_neg_tot,
+        kwh_neg_partial,
+        kvarh_neg_tot,
+        kvarh_neg_partial,
+        kvah_tot,
+        kvah_partial,
     ]
     for i, val in enumerate(int64_vals):
         encoded = encode_int64_le(val)
         base = i * 4
-        regs[base:base + 4] = encoded
+        regs[base : base + 4] = encoded
 
     # INT32 values for run hour meters (offsets 0x34, 0x36, 0x38, 0x3A from 0x500 base)
     for offset, val in [
@@ -213,6 +214,7 @@ def build_energy_registers(
 # TestEm540Frame – Requirements 7.1, 7.2, 7.3, 5.1, 5.2, 5.3, 5.4, 5.5, 5.6
 # ---------------------------------------------------------------------------
 
+
 class TestEm540Frame(unittest.TestCase):
     """Validates: Requirements 7.1, 7.2, 7.3, 5.1, 5.2, 5.3, 5.4, 5.5, 5.6"""
 
@@ -224,9 +226,23 @@ class TestEm540Frame(unittest.TestCase):
     def test_static_reg_map_contains_all_expected_addresses(self):
         """Requirement 7.1 – static_reg_map has all expected register addresses."""
         expected_addresses = {
-            0x0302, 0x000B, 0x1002, 0x1010, 0x1012, 0x1101, 0x1103,
-            0x1104, 0x110B, 0x1150, 0x1200, 0x1600, 0x4100, 0x4200,
-            0x5000, 0x5008, 0x5012,
+            0x0302,
+            0x000B,
+            0x1002,
+            0x1010,
+            0x1012,
+            0x1101,
+            0x1103,
+            0x1104,
+            0x110B,
+            0x1150,
+            0x1200,
+            0x1600,
+            0x4100,
+            0x4200,
+            0x5000,
+            0x5008,
+            0x5012,
         }
         self.assertEqual(set(self.frame.static_reg_map.keys()), expected_addresses)
 
@@ -247,8 +263,7 @@ class TestEm540Frame(unittest.TestCase):
     def test_remapped_reg_map_contains_all_remap_targets(self):
         """Requirement 7.3 – remapped_reg_map has all target addresses from register_remap."""
         for _src, target in register_remap:
-            self.assertIn(target, self.frame.remapped_reg_map,
-                          f"Target {hex(target)} missing from remapped_reg_map")
+            self.assertIn(target, self.frame.remapped_reg_map, f"Target {hex(target)} missing from remapped_reg_map")
 
     # --- Requirement 5.1: remap copies source to correct targets ---
 
@@ -311,13 +326,10 @@ class TestEm540Frame(unittest.TestCase):
         self.frame.dynamic_reg_map[0x0000].values = regs
         self.frame.remap_registers()
 
-        zero_fill_targets = [
-            target for src, target in register_remap if src == ZERO_FILL
-        ]
+        zero_fill_targets = [target for src, target in register_remap if src == ZERO_FILL]
         for target in zero_fill_targets:
             self.assertEqual(
-                self.frame.remapped_reg_map[target].values[0], 0,
-                f"ZERO_FILL target {hex(target)} should be 0"
+                self.frame.remapped_reg_map[target].values[0], 0, f"ZERO_FILL target {hex(target)} should be 0"
             )
 
     # --- Requirement 5.3: energy counter INT64→INT32 /100 ---
@@ -330,9 +342,7 @@ class TestEm540Frame(unittest.TestCase):
         self.frame.remap_registers()
 
         # Expected: INT32 encoding of kwh_wh / 100
-        expected = ModbusTcpClient.convert_to_registers(
-            int(kwh_wh / 100), ModbusTcpClient.DATATYPE.INT32, "little"
-        )
+        expected = ModbusTcpClient.convert_to_registers(int(kwh_wh / 100), ModbusTcpClient.DATATYPE.INT32, "little")
         self.assertEqual(self.frame.remapped_reg_map[0x0034].values, expected)
 
     # --- Requirement 5.4: frequency INT32 Hz*1000 → INT16 Hz*10 ---
@@ -400,14 +410,13 @@ class TestEm540Frame(unittest.TestCase):
         for src, target in register_remap:
             if src == ZERO_FILL:
                 self.assertEqual(
-                    self.frame.remapped_reg_map[target].values[0], 0,
-                    f"ZERO_FILL target {hex(target)} not zero"
+                    self.frame.remapped_reg_map[target].values[0], 0, f"ZERO_FILL target {hex(target)} not zero"
                 )
             else:
                 self.assertEqual(
                     self.frame.remapped_reg_map[target].values[0],
                     self.frame.dynamic_reg_map[0x0000].values[src],
-                    f"Remap {hex(src)} → {hex(target)} mismatch"
+                    f"Remap {hex(src)} → {hex(target)} mismatch",
                 )
 
     # --- Run hour meter straight copies ---

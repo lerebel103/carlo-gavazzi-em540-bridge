@@ -16,6 +16,11 @@ class Ts65aSlaveStats:
         self.power_over_feed_in_limit_count: int = 0
         self.power_over_feed_limit_max_duration_sec: float = 0.0
 
+        self.circuit_breaker_open: bool = True
+        self.circuit_breaker_open_count: int = 0
+        self.stale_data_age_ms: float = 0.0
+        self.dropped_stale_request_count: int = 0
+
         self._listeners: list[Callable[["Ts65aSlaveStats"], None]] = []
 
     def changed(self):
@@ -38,9 +43,7 @@ class Ts65aSlaveStats:
         if self._over_limit_start_time is not None:
             # We were already over the limit, so accumulate the duration
             duration = timestamp - self._over_limit_start_time
-            self.power_over_feed_limit_max_duration_sec = max(
-                duration, self.power_over_feed_limit_max_duration_sec
-            )
+            self.power_over_feed_limit_max_duration_sec = max(duration, self.power_over_feed_limit_max_duration_sec)
             # Reset the timer
             self._over_limit_start_time = None
             self.changed()

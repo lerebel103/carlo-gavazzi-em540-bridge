@@ -9,7 +9,6 @@ runs cleanly regardless of the installed pymodbus version.
 """
 
 import asyncio
-import sys
 import unittest
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -29,7 +28,7 @@ if not hasattr(_const, "ExcCodes"):
 
 # Now safe to import the module under test and its dependencies
 from app.carlo_gavazzi.em540_data import Em540Frame
-from app.carlo_gavazzi.em540_slave_bridge import Em540Slave, REG_OFFSET
+from app.carlo_gavazzi.em540_slave_bridge import REG_OFFSET, Em540Slave
 from app.carlo_gavazzi.meter_data import MeterData
 
 
@@ -55,9 +54,11 @@ class TestEm540Slave(unittest.TestCase):
             frame = Em540Frame()
         config = self._make_config()
 
-        with patch("app.carlo_gavazzi.em540_slave_bridge.ModbusTcpServer"), \
-             patch("app.carlo_gavazzi.em540_slave_bridge.ModbusServerContext"), \
-             patch("app.carlo_gavazzi.em540_slave_bridge.ModbusSparseDataBlock") as mock_block_cls:
+        with (
+            patch("app.carlo_gavazzi.em540_slave_bridge.ModbusTcpServer"),
+            patch("app.carlo_gavazzi.em540_slave_bridge.ModbusServerContext"),
+            patch("app.carlo_gavazzi.em540_slave_bridge.ModbusSparseDataBlock") as mock_block_cls,
+        ):
             mock_datablock = MagicMock()
             mock_block_cls.create.return_value = mock_datablock
             slave = Em540Slave(config, frame)
@@ -77,23 +78,26 @@ class TestEm540Slave(unittest.TestCase):
         frame = Em540Frame()
         config = self._make_config()
 
-        with patch("app.carlo_gavazzi.em540_slave_bridge.ModbusTcpServer"), \
-             patch("app.carlo_gavazzi.em540_slave_bridge.ModbusServerContext"), \
-             patch("app.carlo_gavazzi.em540_slave_bridge.ModbusSparseDataBlock") as mock_block_cls:
+        with (
+            patch("app.carlo_gavazzi.em540_slave_bridge.ModbusTcpServer"),
+            patch("app.carlo_gavazzi.em540_slave_bridge.ModbusServerContext"),
+            patch("app.carlo_gavazzi.em540_slave_bridge.ModbusSparseDataBlock") as mock_block_cls,
+        ):
             mock_block_cls.create.return_value = MagicMock()
             Em540Slave(config, frame)
 
             values_dict = mock_block_cls.create.call_args[0][0]
 
             for addr in frame.static_reg_map:
-                self.assertIn(addr + REG_OFFSET, values_dict,
-                              f"Static {hex(addr)} missing at {hex(addr + REG_OFFSET)}")
+                self.assertIn(addr + REG_OFFSET, values_dict, f"Static {hex(addr)} missing at {hex(addr + REG_OFFSET)}")
             for addr in frame.dynamic_reg_map:
-                self.assertIn(addr + REG_OFFSET, values_dict,
-                              f"Dynamic {hex(addr)} missing at {hex(addr + REG_OFFSET)}")
+                self.assertIn(
+                    addr + REG_OFFSET, values_dict, f"Dynamic {hex(addr)} missing at {hex(addr + REG_OFFSET)}"
+                )
             for addr in frame.remapped_reg_map:
-                self.assertIn(addr + REG_OFFSET, values_dict,
-                              f"Remapped {hex(addr)} missing at {hex(addr + REG_OFFSET)}")
+                self.assertIn(
+                    addr + REG_OFFSET, values_dict, f"Remapped {hex(addr)} missing at {hex(addr + REG_OFFSET)}"
+                )
 
     # --- Requirement 12.1: new_data updates dynamic registers ---
 
@@ -111,15 +115,13 @@ class TestEm540Slave(unittest.TestCase):
         calls = {c[0][0]: c[0][1] for c in mock_datablock.setValues.call_args_list}
         for addr in frame.dynamic_reg_map:
             expected_addr = addr + REG_OFFSET
-            self.assertIn(expected_addr, calls,
-                          f"Dynamic {hex(addr)} not updated at {hex(expected_addr)}")
-            self.assertEqual(calls[expected_addr],
-                             meter_data.frame.dynamic_reg_map[addr].values)
+            self.assertIn(expected_addr, calls, f"Dynamic {hex(addr)} not updated at {hex(expected_addr)}")
+            self.assertEqual(calls[expected_addr], meter_data.frame.dynamic_reg_map[addr].values)
 
-    # --- Requirement 12.2: new_data updates static registers ---
+    # --- Requirement 12.2: new_data does not rewrite static registers ---
 
-    def test_new_data_updates_static_registers(self):
-        """Requirement 12.2 – setValues called for every static register with +1 offset."""
+    def test_new_data_does_not_update_static_registers(self):
+        """Requirement 12.2 – static register values are not rewritten on every update."""
         frame = Em540Frame()
         slave, mock_datablock = self._build_slave(frame)
 
@@ -132,10 +134,11 @@ class TestEm540Slave(unittest.TestCase):
         calls = {c[0][0]: c[0][1] for c in mock_datablock.setValues.call_args_list}
         for addr in frame.static_reg_map:
             expected_addr = addr + REG_OFFSET
-            self.assertIn(expected_addr, calls,
-                          f"Static {hex(addr)} not updated at {hex(expected_addr)}")
-            self.assertEqual(calls[expected_addr],
-                             meter_data.frame.static_reg_map[addr].values)
+            self.assertNotIn(
+                expected_addr,
+                calls,
+                f"Static {hex(addr)} should not be rewritten at {hex(expected_addr)}",
+            )
 
     # --- Requirement 12.3: new_data updates remapped registers ---
 
@@ -153,10 +156,8 @@ class TestEm540Slave(unittest.TestCase):
         calls = {c[0][0]: c[0][1] for c in mock_datablock.setValues.call_args_list}
         for addr in frame.remapped_reg_map:
             expected_addr = addr + REG_OFFSET
-            self.assertIn(expected_addr, calls,
-                          f"Remapped {hex(addr)} not updated at {hex(expected_addr)}")
-            self.assertEqual(calls[expected_addr],
-                             meter_data.frame.remapped_reg_map[addr].values)
+            self.assertIn(expected_addr, calls, f"Remapped {hex(addr)} not updated at {hex(expected_addr)}")
+            self.assertEqual(calls[expected_addr], meter_data.frame.remapped_reg_map[addr].values)
 
 
 if __name__ == "__main__":

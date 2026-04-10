@@ -21,8 +21,8 @@ em540_master:
 
   # Master read interval in seconds, 10Hz max supported rate by EM540/EM530
   update_interval: 0.1
-  # Read timeout in seconds
-  timeout: 0.15
+  # Read timeout in seconds (keep below update_interval for best 10Hz stability)
+  timeout: 0.08
   # Number of retries on read failure
   retries: 0
   # Log level for the master component

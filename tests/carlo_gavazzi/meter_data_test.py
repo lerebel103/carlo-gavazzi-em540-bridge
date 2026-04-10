@@ -1,19 +1,16 @@
 import unittest
 from unittest.mock import patch
 
+from app.carlo_gavazzi.meter_data import MeterData, OtherEnergies, PhaseData, SystemData
 from tests.carlo_gavazzi.em540_data_test import (
-    encode_int32_le,
-    encode_int16_le,
-    encode_int64_le,
     build_dynamic_registers,
     build_energy_registers,
 )
-from app.carlo_gavazzi.meter_data import PhaseData, SystemData, OtherEnergies, MeterData
-
 
 # ---------------------------------------------------------------------------
 # TestPhaseData – Requirements 1.1, 1.2, 1.3, 1.4, 1.5, 1.6, 1.7, 1.8
 # ---------------------------------------------------------------------------
+
 
 class TestPhaseData(unittest.TestCase):
     """Validates: Requirements 1.1, 1.2, 1.3, 1.4, 1.5, 1.6, 1.7, 1.8"""
@@ -29,7 +26,8 @@ class TestPhaseData(unittest.TestCase):
             phase = PhaseData()
             phase.parse(phase_idx, regs)
             self.assertAlmostEqual(
-                phase.line_neutral_voltage, raw / 10.0,
+                phase.line_neutral_voltage,
+                raw / 10.0,
                 msg=f"Phase {phase_idx} voltage L-N mismatch",
             )
 
@@ -44,7 +42,8 @@ class TestPhaseData(unittest.TestCase):
             phase = PhaseData()
             phase.parse(phase_idx, regs)
             self.assertAlmostEqual(
-                phase.line_line_voltage, raw / 10.0,
+                phase.line_line_voltage,
+                raw / 10.0,
                 msg=f"Phase {phase_idx} voltage L-L mismatch",
             )
 
@@ -59,7 +58,8 @@ class TestPhaseData(unittest.TestCase):
             phase = PhaseData()
             phase.parse(phase_idx, regs)
             self.assertAlmostEqual(
-                phase.current, raw / 1000.0,
+                phase.current,
+                raw / 1000.0,
                 msg=f"Phase {phase_idx} current mismatch",
             )
 
@@ -74,7 +74,8 @@ class TestPhaseData(unittest.TestCase):
             phase = PhaseData()
             phase.parse(phase_idx, regs)
             self.assertAlmostEqual(
-                phase.power, raw / 10.0,
+                phase.power,
+                raw / 10.0,
                 msg=f"Phase {phase_idx} power mismatch",
             )
 
@@ -89,7 +90,8 @@ class TestPhaseData(unittest.TestCase):
             phase = PhaseData()
             phase.parse(phase_idx, regs)
             self.assertAlmostEqual(
-                phase.apparent_power, raw / 10.0,
+                phase.apparent_power,
+                raw / 10.0,
                 msg=f"Phase {phase_idx} apparent power mismatch",
             )
 
@@ -104,7 +106,8 @@ class TestPhaseData(unittest.TestCase):
             phase = PhaseData()
             phase.parse(phase_idx, regs)
             self.assertAlmostEqual(
-                phase.reactive_power, raw / 10.0,
+                phase.reactive_power,
+                raw / 10.0,
                 msg=f"Phase {phase_idx} reactive power mismatch",
             )
 
@@ -119,7 +122,8 @@ class TestPhaseData(unittest.TestCase):
             phase = PhaseData()
             phase.parse(phase_idx, regs)
             self.assertAlmostEqual(
-                phase.power_factor, raw / 1000.0,
+                phase.power_factor,
+                raw / 1000.0,
                 msg=f"Phase {phase_idx} power factor mismatch",
             )
 
@@ -168,11 +172,13 @@ class TestPhaseData(unittest.TestCase):
             phase = PhaseData()
             phase.parse(phase_idx, regs)
             self.assertAlmostEqual(
-                phase.power, raw / 10.0,
+                phase.power,
+                raw / 10.0,
                 msg=f"Phase {phase_idx} negative power mismatch",
             )
             self.assertLess(
-                phase.power, 0,
+                phase.power,
+                0,
                 msg=f"Phase {phase_idx} power should be negative",
             )
 
@@ -180,6 +186,7 @@ class TestPhaseData(unittest.TestCase):
 # ---------------------------------------------------------------------------
 # TestSystemData – Requirements 2.1, 2.2, 2.3, 2.4, 2.5, 2.6, 2.7
 # ---------------------------------------------------------------------------
+
 
 class TestSystemData(unittest.TestCase):
     """Validates: Requirements 2.1, 2.2, 2.3, 2.4, 2.5, 2.6, 2.7"""
@@ -259,6 +266,7 @@ class TestSystemData(unittest.TestCase):
 # TestOtherEnergies – Requirements 3.1, 3.2, 3.3, 3.4, 3.5, 3.6, 3.7, 3.8
 # ---------------------------------------------------------------------------
 
+
 class TestOtherEnergies(unittest.TestCase):
     """Validates: Requirements 3.1, 3.2, 3.3, 3.4, 3.5, 3.6, 3.7, 3.8"""
 
@@ -287,9 +295,7 @@ class TestOtherEnergies(unittest.TestCase):
     def test_parse_kwh_per_phase(self):
         """Requirement 3.3 – per-phase kWh (+) parsed from offsets 0x10, 0x14, 0x18."""
         l1_raw, l2_raw, l3_raw = 40000000, 41000000, 42000000
-        regs = build_energy_registers(
-            kwh_plus_l1=l1_raw, kwh_plus_l2=l2_raw, kwh_plus_l3=l3_raw
-        )
+        regs = build_energy_registers(kwh_plus_l1=l1_raw, kwh_plus_l2=l2_raw, kwh_plus_l3=l3_raw)
         oe = OtherEnergies()
         oe.parse(regs)
         self.assertAlmostEqual(oe.kwh_plus_l1, l1_raw / 1000.0)
@@ -332,9 +338,7 @@ class TestOtherEnergies(unittest.TestCase):
         """Requirement 3.7 – run hour meters parsed from offsets 0x34, 0x36 as INT32 /100."""
         run_hour_raw = 123456  # hours * 100 → 1234.56 hours
         run_hour_neg_raw = 78901
-        regs = build_energy_registers(
-            run_hour_meter=run_hour_raw, run_hour_meter_neg=run_hour_neg_raw
-        )
+        regs = build_energy_registers(run_hour_meter=run_hour_raw, run_hour_meter_neg=run_hour_neg_raw)
         oe = OtherEnergies()
         oe.parse(regs)
         self.assertAlmostEqual(oe.run_hour_meter, run_hour_raw / 100.0)
@@ -365,6 +369,7 @@ class TestOtherEnergies(unittest.TestCase):
 # TestMeterDataUpdateFromFrame – Requirements 4.1, 4.2, 4.3, 4.4
 # ---------------------------------------------------------------------------
 
+
 class TestMeterDataUpdateFromFrame(unittest.TestCase):
     """Validates: Requirements 4.1, 4.2, 4.3, 4.4"""
 
@@ -387,7 +392,8 @@ class TestMeterDataUpdateFromFrame(unittest.TestCase):
 
         for phase_idx, raw in enumerate(currents):
             self.assertAlmostEqual(
-                md.phases[phase_idx].current, raw / 1000.0,
+                md.phases[phase_idx].current,
+                raw / 1000.0,
                 msg=f"Phase {phase_idx} current not parsed correctly",
             )
 

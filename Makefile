@@ -2,6 +2,7 @@
 VERSION := $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
 IMAGE_NAME = em540-bridge
 DOCKER_USER = lerebel103
+PYTHON ?= python3
 
 .PHONY: help
 help:
@@ -47,17 +48,17 @@ logs:
 
 .PHONY: test
 test:
-	python -m pytest tests/ -v
+	$(PYTHON) -m pytest tests/ -v
 
 .PHONY: lint
 lint:
-	python -m ruff check app/ tests/
-	python -m ruff format --check app/ tests/
+	$(PYTHON) -m ruff check app/ tests/
+	$(PYTHON) -m ruff format --check app/ tests/
 
 .PHONY: format
 format:
-	python -m ruff format app/ tests/
-	python -m ruff check --fix app/ tests/
+	$(PYTHON) -m ruff format app/ tests/
+	$(PYTHON) -m ruff check --fix app/ tests/
 
 .PHONY: clean
 clean:

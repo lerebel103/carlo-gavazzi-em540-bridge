@@ -19,7 +19,9 @@ config_manager = None
 def parse_args():
     parser = argparse.ArgumentParser(description="EM540 Modbus bridge")
     parser.add_argument(
-        "--config", type=str, default="config.yaml",
+        "--config",
+        type=str,
+        default="config.yaml",
         help="Path to configuration file",
     )
     return parser.parse_args()
@@ -37,13 +39,15 @@ async def process_loop():
     em540_master.add_listener(ts65a_slave)
 
     if state.mqtt.enabled:
-        mqtt_bridge = HABridge(
-            state.mqtt, state=state, config_manager=config_manager
-        )
+        mqtt_bridge = HABridge(state.mqtt, state=state, config_manager=config_manager)
         em540_master.add_listener(mqtt_bridge)
+        em540_master.add_stats_listener(mqtt_bridge.on_em540_master_stats)
         em540_slave.add_stats_listener(mqtt_bridge.on_em540_slave_stats)
         ts65a_slave.add_stats_listener(mqtt_bridge.on_ts65a_slave_stats)
-        mqtt_bridge.connect()
+        try:
+            mqtt_bridge.connect()
+        except Exception:
+            logger.exception("Failed to initialize MQTT bridge connection")
 
     config_manager.start_flush_loop()
     await em540_slave.start()
@@ -52,16 +56,35 @@ async def process_loop():
     read_interval = state.em540_master.update_interval
     start_time = time.perf_counter()
     next_call_time = start_time + read_interval
+    reconnect_backoff = read_interval
+    max_reconnect_backoff = 5.0
+    next_connect_attempt_time = 0.0
 
     while True:
         current_time = time.perf_counter()
         if current_time >= next_call_time:
-            next_call_time += read_interval
+            # If we are late, skip missed ticks instead of executing catch-up bursts.
+            lag = current_time - next_call_time
+            if lag >= read_interval:
+                skipped_ticks = int(lag // read_interval)
+                next_call_time += (skipped_ticks + 1) * read_interval
+            else:
+                next_call_time += read_interval
+
             if not em540_master.connected:
-                await em540_master.connect()
+                if current_time >= next_connect_attempt_time:
+                    await em540_master.connect()
+                    if em540_master.connected:
+                        reconnect_backoff = read_interval
+                        next_connect_attempt_time = 0.0
+                    else:
+                        next_connect_attempt_time = time.perf_counter() + reconnect_backoff
+                        reconnect_backoff = min(reconnect_backoff * 2, max_reconnect_backoff)
             await em540_master.acquire_data()
-        if next_call_time - current_time > 0.001:
-            time.sleep(max(0, next_call_time - current_time - 0.0001))
+
+        sleep_for = max(0, next_call_time - time.perf_counter() - 0.0001)
+        if sleep_for > 0:
+            await asyncio.sleep(sleep_for)
 
 
 async def main():

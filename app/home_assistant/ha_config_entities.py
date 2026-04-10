@@ -8,10 +8,10 @@ from __future__ import annotations
 
 import json
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Callable
 
-from app.config import AppState, ConfigManager, PERSISTED_FIELDS
+from app.config import AppState, ConfigManager
 from app.version import __version__
 
 logger = logging.getLogger(__name__)
@@ -75,8 +75,7 @@ class HAConfigEntities:
 
         # Lookup from command topic → entity for fast dispatch
         self._topic_to_entity: dict[str, ConfigEntity] = {
-            f"lerebel/config/em540_bridge/{e.safe_name}/set": e
-            for e in self._entities
+            f"lerebel/config/em540_bridge/{e.safe_name}/set": e for e in self._entities
         }
 
     # -- entity definitions --------------------------------------------------

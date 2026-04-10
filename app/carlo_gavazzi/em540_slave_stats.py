@@ -9,6 +9,11 @@ class EM540SlaveStats:
         self.tcp_client_count: int = 0
         self.tcp_client_disconnect_count: int = 0
 
+        self.circuit_breaker_open: bool = True
+        self.circuit_breaker_open_count: int = 0
+        self.stale_data_age_ms: float = 0.0
+        self.dropped_stale_request_count: int = 0
+
         self._listeners: list[Callable[["EM540SlaveStats"], None]] = []
 
     def changed(self) -> None:

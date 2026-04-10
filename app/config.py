@@ -44,7 +44,7 @@ class Em540MasterConfig:
     port: int = 8899
     slave_id: int = 1
     update_interval: float = 0.1
-    timeout: float = 0.15
+    timeout: float = 0.08
     retries: int = 0
     log_level: str = "INFO"
 
@@ -170,9 +170,7 @@ class ConfigManager:
         # --- validate required sections ---
         for section in REQUIRED_SECTIONS:
             if section not in data:
-                raise ConfigError(
-                    f"Missing required config section: {section}"
-                )
+                raise ConfigError(f"Missing required config section: {section}")
 
         # --- populate AppState ---
         state = AppState()
@@ -212,10 +210,7 @@ class ConfigManager:
         """Validate populated AppState; raise ConfigError on first failure."""
         # 1. mode
         if state.em540_master.mode not in self._VALID_MODES:
-            raise ConfigError(
-                f"em540_master.mode must be one of {self._VALID_MODES}, "
-                f"got '{state.em540_master.mode}'"
-            )
+            raise ConfigError(f"em540_master.mode must be one of {self._VALID_MODES}, got '{state.em540_master.mode}'")
 
         # 2. ports  (0 < port < 65535)
         port_fields = [
@@ -227,9 +222,7 @@ class ConfigManager:
         ]
         for name, value in port_fields:
             if not (0 < value < 65535):
-                raise ConfigError(
-                    f"{name} must satisfy 0 < port < 65535, got {value}"
-                )
+                raise ConfigError(f"{name} must satisfy 0 < port < 65535, got {value}")
 
         # 3. slave_id  (0 < slave_id < 256)
         slave_id_fields = [
@@ -239,9 +232,7 @@ class ConfigManager:
         ]
         for name, value in slave_id_fields:
             if not (0 < value < 256):
-                raise ConfigError(
-                    f"{name} must satisfy 0 < slave_id < 256, got {value}"
-                )
+                raise ConfigError(f"{name} must satisfy 0 < slave_id < 256, got {value}")
 
         # 4. log_level
         log_level_fields = [
@@ -254,16 +245,12 @@ class ConfigManager:
         ]
         for name, value in log_level_fields:
             if value not in self._VALID_LOG_LEVELS:
-                raise ConfigError(
-                    f"{name} must be one of {self._VALID_LOG_LEVELS}, "
-                    f"got '{value}'"
-                )
+                raise ConfigError(f"{name} must be one of {self._VALID_LOG_LEVELS}, got '{value}'")
 
         # 5. grid_feed_in_hard_limit  (<= 0)
         if state.ts65a_slave.grid_feed_in_hard_limit > 0:
             raise ConfigError(
-                f"ts65a_slave.grid_feed_in_hard_limit must be <= 0, "
-                f"got {state.ts65a_slave.grid_feed_in_hard_limit}"
+                f"ts65a_slave.grid_feed_in_hard_limit must be <= 0, got {state.ts65a_slave.grid_feed_in_hard_limit}"
             )
 
         # 6. smoothing_num_points  (1 <= value <= 600)
@@ -320,9 +307,7 @@ class ConfigManager:
     def start_flush_loop(self) -> None:
         """Create and start the background daemon flush thread."""
         self._stop_event.clear()
-        self._flush_thread = threading.Thread(
-            target=self._flush_loop, daemon=True, name="config-flush"
-        )
+        self._flush_thread = threading.Thread(target=self._flush_loop, daemon=True, name="config-flush")
         self._flush_thread.start()
 
     def stop(self) -> None:

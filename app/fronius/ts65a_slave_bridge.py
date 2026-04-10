@@ -3,8 +3,7 @@ from typing import Callable
 
 from pymodbus import FramerType
 from pymodbus.client import ModbusTcpClient
-from pymodbus.datastore import (ModbusDeviceContext, ModbusServerContext,
-                                ModbusSparseDataBlock)
+from pymodbus.datastore import ModbusDeviceContext, ModbusServerContext, ModbusSparseDataBlock
 from pymodbus.server import ModbusTcpServer
 
 from app.carlo_gavazzi import meter_data
@@ -14,16 +13,6 @@ from app.fronius.ts65a_slave_stats import Ts65aSlaveStats
 from app.utils.pdu_helper import PduHelper
 
 logger = logging.getLogger("ts65a-slave")
-
-
-def _append_registers(registers, values):
-    """Append successive float32 values as big-endian registers to the register list."""
-    for value in values:
-        registers.extend(
-            ModbusTcpClient.convert_to_registers(
-                value, ModbusTcpClient.DATATYPE.FLOAT32, "big"
-            )
-        )
 
 
 class Ts65aSlaveBridge(MeterDataListener):
@@ -229,6 +218,8 @@ class Ts65aSlaveBridge(MeterDataListener):
             trace_pdu=self._pdu_helper.on_pdu,
             trace_connect=self._trace_connect,
         )
+        self._dynamic_start_address: int = 40072
+        self._dynamic_register_buffer: list[int] = [0] * 82
 
     def _trace_connect(self, connect):
         logger.info(f"Client connection to TCP server: {connect}")
@@ -248,137 +239,82 @@ class Ts65aSlaveBridge(MeterDataListener):
     def stop(self):
         pass
 
+    def _sync_pdu_stats(self) -> None:
+        stale_age = self._pdu_helper.stale_age_seconds()
+        self._stats.stale_data_age_ms = 0.0 if stale_age is None else stale_age * 1000.0
+        self._stats.circuit_breaker_open = self._pdu_helper.circuit_open
+        self._stats.circuit_breaker_open_count = self._pdu_helper.circuit_open_count
+        self._stats.dropped_stale_request_count = self._pdu_helper.dropped_request_count
+        self._stats.changed()
+
     async def new_data(self, data: meter_data.MeterData):
-        address = 40072
-        registers = list()
+        registers = self._dynamic_register_buffer
+        index = 0
 
         # Run the data through our smoothing and grid feed-in limiter
         self.meter_data.update(data)
 
         # now update the registers in the Modbus datastore
-        _append_registers(
-            registers,
-            [
-                self.meter_data.current_an,
-                self.meter_data.current_a,
-                self.meter_data.current_b,
-                self.meter_data.current_c,
-            ],
+        values = (
+            self.meter_data.current_an,
+            self.meter_data.current_a,
+            self.meter_data.current_b,
+            self.meter_data.current_c,
+            self.meter_data.voltage_ln,
+            self.meter_data.voltage_ln_a,
+            self.meter_data.voltage_ln_b,
+            self.meter_data.voltage_ln_c,
+            self.meter_data.voltage_ll,
+            self.meter_data.voltage_ll_a,
+            self.meter_data.voltage_ll_b,
+            self.meter_data.voltage_ll_c,
+            self.meter_data.frequency,
+            self.meter_data.power,
+            self.meter_data.power_a,
+            self.meter_data.power_b,
+            self.meter_data.power_c,
+            self.meter_data.apparent_power,
+            self.meter_data.apparent_power_a,
+            self.meter_data.apparent_power_b,
+            self.meter_data.apparent_power_c,
+            self.meter_data.reactive_power,
+            self.meter_data.reactive_power_a,
+            self.meter_data.reactive_power_b,
+            self.meter_data.reactive_power_c,
+            self.meter_data.power_factor,
+            self.meter_data.power_factor_a,
+            self.meter_data.power_factor_b,
+            self.meter_data.power_factor_c,
+            self.meter_data.wh_neg_total,
+            self.meter_data.wh_neg_a,
+            self.meter_data.wh_neg_b,
+            self.meter_data.wh_neg_c,
+            self.meter_data.wh_plus_total,
+            self.meter_data.wh_plus_l1,
+            self.meter_data.wh_plus_l2,
+            self.meter_data.wh_plus_l3,
+            self.meter_data.vah_neg_total,
+            self.meter_data.vah_neg_a,
+            self.meter_data.vah_neg_b,
+            self.meter_data.vah_neg_c,
+            self.meter_data.vah_plus_total,
+            self.meter_data.vah_plus_a,
+            self.meter_data.vah_plus_b,
+            self.meter_data.vah_plus_c,
         )
 
-        _append_registers(
-            registers,
-            [
-                self.meter_data.voltage_ln,
-                self.meter_data.voltage_ln_a,
-                self.meter_data.voltage_ln_b,
-                self.meter_data.voltage_ln_c,
-            ],
-        )
+        for value in values:
+            reg_pair = ModbusTcpClient.convert_to_registers(value, ModbusTcpClient.DATATYPE.FLOAT32, "big")
+            registers[index] = reg_pair[0]
+            registers[index + 1] = reg_pair[1]
+            index += 2
 
-        _append_registers(
-            registers,
-            [
-                self.meter_data.voltage_ll,
-                self.meter_data.voltage_ll_a,
-                self.meter_data.voltage_ll_b,
-                self.meter_data.voltage_ll_c,
-            ],
-        )
-
-        _append_registers(
-            registers,
-            [
-                self.meter_data.frequency,
-            ],
-        )
-
-        _append_registers(
-            registers,
-            [
-                self.meter_data.power,
-                self.meter_data.power_a,
-                self.meter_data.power_b,
-                self.meter_data.power_c,
-            ],
-        )
-
-        _append_registers(
-            registers,
-            [
-                self.meter_data.apparent_power,
-                self.meter_data.apparent_power_a,
-                self.meter_data.apparent_power_b,
-                self.meter_data.apparent_power_c,
-            ],
-        )
-
-        _append_registers(
-            registers,
-            [
-                self.meter_data.reactive_power,
-                self.meter_data.reactive_power_a,
-                self.meter_data.reactive_power_b,
-                self.meter_data.reactive_power_c,
-            ],
-        )
-
-        _append_registers(
-            registers,
-            [
-                self.meter_data.power_factor,
-                self.meter_data.power_factor_a,
-                self.meter_data.power_factor_b,
-                self.meter_data.power_factor_c,
-            ],
-        )
-
-        # Exported energy (negative power)
-        _append_registers(
-            registers,
-            [
-                self.meter_data.wh_neg_total,
-                self.meter_data.wh_neg_a,
-                self.meter_data.wh_neg_b,
-                self.meter_data.wh_neg_c,
-            ],
-        )
-        # Imported energy (positive power)
-        _append_registers(
-            registers,
-            [
-                self.meter_data.wh_plus_total,
-                self.meter_data.wh_plus_l1,
-                self.meter_data.wh_plus_l2,
-                self.meter_data.wh_plus_l3,
-            ],
-        )
-
-        # Export apparent energy (VAh)
-        _append_registers(
-            registers,
-            [
-                self.meter_data.vah_neg_total,
-                self.meter_data.vah_neg_a,
-                self.meter_data.vah_neg_b,
-                self.meter_data.vah_neg_c,
-            ],
-        )
-        # Import apparent energy (VAh)
-        _append_registers(
-            registers,
-            [
-                self.meter_data.vah_plus_total,
-                self.meter_data.vah_plus_a,
-                self.meter_data.vah_plus_b,
-                self.meter_data.vah_plus_c,
-            ],
-        )
-
-        self.datablock.setValues(address, registers)
+        self.datablock.setValues(self._dynamic_start_address, registers)
 
         # Notify the PDU helper that we have new data
         self._pdu_helper.data_received(data.timestamp)
+        self._sync_pdu_stats()
 
     async def read_failed(self):
-        pass
+        self._pdu_helper.upstream_failed()
+        self._sync_pdu_stats()

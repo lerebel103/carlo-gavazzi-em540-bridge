@@ -2,11 +2,12 @@ import asyncio
 import logging
 import os
 import threading
+import time
 from threading import Thread
+from typing import Callable
 
 from pymodbus import FramerType, ModbusException
-from pymodbus.client import (AsyncModbusSerialClient, AsyncModbusTcpClient,
-                             ModbusBaseClient)
+from pymodbus.client import AsyncModbusSerialClient, AsyncModbusTcpClient, ModbusBaseClient
 from pymodbus.exceptions import ModbusIOException
 
 from app.carlo_gavazzi.meter_data import MeterData
@@ -20,6 +21,25 @@ class MeterDataListener:
 
     async def read_failed(self):
         raise NotImplementedError()
+
+
+class Em540MasterStats:
+    def __init__(self) -> None:
+        self.consumer_missed_updates_total: int = 0
+        self.consumer_max_seq_gap: int = 0
+        self.read_duration_ms_last: float = 0.0
+        self.read_duration_ms_max: float = 0.0
+        self.tick_headroom_ms_last: float = 0.0
+        self.tick_headroom_ms_min: float = 0.0
+        self.tick_overrun_count: int = 0
+        self._listeners: list[Callable[["Em540MasterStats"], None]] = []
+
+    def changed(self) -> None:
+        for listener in self._listeners:
+            listener(self)
+
+    def add_listener(self, listener: Callable[["Em540MasterStats"], None]) -> None:
+        self._listeners.append(listener)
 
 
 class Em540Master:
@@ -38,10 +58,21 @@ class Em540Master:
 
     def __init__(self, config) -> None:
         self._config = config
-        self._data: MeterData = MeterData()
+        self._front_data: MeterData = MeterData()
+        self._back_data: MeterData = MeterData()
         self.slave_id: int = config.slave_id
         self._dyn_reg_read_counter: int = 0
+        self._static_data_valid: bool = False
         self._listeners: list[MeterDataListener] = []
+        self._listener_threads: dict[MeterDataListener, Thread] = {}
+        self._listener_last_seq: dict[MeterDataListener, int] = {}
+        self._listener_stop: bool = False
+        self._data_seq: int = 0
+        self._condition: threading.Condition = threading.Condition()
+        self._stats: Em540MasterStats = Em540MasterStats()
+        self._stats_lock: threading.Lock = threading.Lock()
+        self._static_read_plan: tuple[int, ...] = tuple(self._front_data.frame.static_reg_map.keys())
+        self._dynamic_read_plan: tuple[int, ...] = tuple(self._front_data.frame.dynamic_reg_map.keys())
         logger.setLevel(config.log_level)
         self._client: ModbusBaseClient
 
@@ -66,124 +97,231 @@ class Em540Master:
                 retries=config.retries,
             )
         else:
-            raise ValueError(
-                f"Invalid mode '{config.mode}' in configuration, must be 'tcp' or 'serial'"
-            )
-
-        # create notify mutex and thread for async notification of listeners
-        self._condition: threading.Condition = threading.Condition()
-        self._notify_thread: Thread = Thread(target=self._notify_loop, daemon=True)
-        self._notify_thread.start()
+            raise ValueError(f"Invalid mode '{config.mode}' in configuration, must be 'tcp' or 'serial'")
 
     async def connect(self) -> None:
         # Simulate connecting to the EM540 device
         if self._config.mode == "serial":
-            logger.info(
-                "Connecting to EM540 via serial port "
-                + self._config.serial_port
-                + "..."
-            )
+            logger.info("Connecting to EM540 via serial port " + self._config.serial_port + "...")
         else:
-            logger.info(
-                "Connecting to EM540 at "
-                + self._config.host
-                + ":"
-                + str(self._config.port)
-                + "..."
-            )
+            logger.info("Connecting to EM540 at " + self._config.host + ":" + str(self._config.port) + "...")
 
-        await self._client.connect()
+        try:
+            await self._client.connect()
+        except Exception as ex:
+            logger.warning("Failed to connect to EM540 transport: %s", ex)
+            try:
+                self._client.close()
+            except Exception:
+                logger.debug("Failed to close EM540 client after connect failure", exc_info=True)
+            return
+
         if self._client.connected:
             logger.info("Connected to EM540.")
-            if self._dyn_reg_read_counter == 0:
+            if not self._static_data_valid:
                 logger.debug("Reading static registers from EM540...")
-                frame = self._data.frame
-                if not await self._read_registers(frame.static_reg_map):
+                frame = self._front_data.frame
+                if not await self._read_registers(
+                    frame.static_reg_map,
+                    reg_addrs=self._static_read_plan,
+                ):
                     logger.error("Failed to read device info from EM540.")
                     self._client.close()
+                else:
+                    self._static_data_valid = True
+                    # Keep both buffers aligned so skipped reads in dynamic maps keep prior values.
+                    self._copy_meter_data(self._front_data, self._back_data)
         else:
             logger.info("Failed to connect to EM540.")
 
-    def _notify_loop(self) -> None:
-        num_errors = 0
-        while True:
-            with self._condition:
-                self._condition.wait()
-
-                # Now update the MeterData from the frame we have just received.
-                # Then notify listeners, noting a performance impact as we are holding a lock.
-                # However, this will prevent a new data acquire while we are notifying listeners.
-
-                try:
-                    self._data.update_from_frame()
-                    for listener in self._listeners:
-                        asyncio.run(listener.new_data(self._data))
-
-                    num_errors = 0
-                except Exception as e:
-                    logger.critical("Notify loop failure, starting error counting", exc_info=True)
-                    logger.exception(e)
-                    num_errors += 1
-
-            if num_errors > 10:
-                logger.critical("Too many successive errors, restarting.")
-                break
-
-        # If we got here, we have a critical failure and will want to rely on docker compose to restart the container
-        os._exit(2)
-
-
     @property
     def data(self) -> MeterData:
-        return self._data
+        return self._front_data
 
     async def disconnect(self) -> None:
         # Simulate disconnecting from the EM540 device
         if self._client.connected:
             logger.info("Disconnecting from EM540...")
+            self._client.close()
         else:
             logger.info("Already disconnected.")
 
     def add_listener(self, listener: MeterDataListener) -> None:
         self._listeners.append(listener)
+        self._listener_last_seq[listener] = 0
+
+        thread = Thread(
+            target=self._listener_loop,
+            args=(listener,),
+            daemon=True,
+            name=f"em540-listener-{len(self._listener_threads) + 1}",
+        )
+        self._listener_threads[listener] = thread
+        thread.start()
+
+    def add_stats_listener(self, listener: Callable[[Em540MasterStats], None]) -> None:
+        self._stats.add_listener(listener)
 
     def remove_listener(self, listener: MeterDataListener) -> None:
-        self._listeners.remove(listener)
+        if listener in self._listeners:
+            self._listeners.remove(listener)
+        self._listener_last_seq.pop(listener, None)
+        self._listener_threads.pop(listener, None)
+        with self._condition:
+            self._condition.notify_all()
 
     @property
     def connected(self) -> bool:
         return self._client.connected
 
     async def acquire_data(self) -> bool:
+        cycle_start = time.perf_counter()
+
         # No point reading if we are not connected
         if not self._client.connected:
             for listener in self._listeners:
                 await listener.read_failed()
+            self._update_timing_stats(cycle_start)
             return False
 
-        # Retrieve the frame we will be working with
-        frame = self._data.frame
+        # Use back buffer as the mutable working set and keep front buffer immutable for listeners.
+        # To avoid per-tick full-frame copies, skipped dynamic register groups are backfilled from front.
+        frame = self._back_data.frame
+        self._sync_dynamic_reg_meta(self._front_data.frame.dynamic_reg_map, frame.dynamic_reg_map)
 
         # Read our dynamic registers
         self._dyn_reg_read_counter += 1
-        is_ok: bool = await self._read_registers(frame.dynamic_reg_map, dyn_reg=True)
+        is_ok: bool = await self._read_registers(
+            frame.dynamic_reg_map,
+            dyn_reg=True,
+            fallback_reg_map=self._front_data.frame.dynamic_reg_map,
+            reg_addrs=self._dynamic_read_plan,
+        )
         if is_ok:
-            # Now notify listeners
+            self._back_data.update_from_frame()
+
+            # Atomic swap so listeners always read a coherent, latest snapshot.
             with self._condition:
-                self._condition.notify()
+                self._front_data, self._back_data = self._back_data, self._front_data
+                self._data_seq += 1
+                self._condition.notify_all()
         else:
             # Now notify listeners
             for listener in self._listeners:
                 await listener.read_failed()
 
+        self._update_timing_stats(cycle_start)
+
         return is_ok
 
-    async def _read_registers(self, reg_map: dict, dyn_reg: bool = False) -> bool:
+    def _update_timing_stats(self, cycle_start: float) -> None:
+        elapsed_ms = (time.perf_counter() - cycle_start) * 1000.0
+        tick_budget_ms = float(getattr(self._config, "update_interval", 0.1)) * 1000.0
+        headroom_ms = tick_budget_ms - elapsed_ms
+
+        with self._stats_lock:
+            self._stats.read_duration_ms_last = elapsed_ms
+            self._stats.read_duration_ms_max = max(self._stats.read_duration_ms_max, elapsed_ms)
+            self._stats.tick_headroom_ms_last = headroom_ms
+
+            if self._stats.tick_headroom_ms_min == 0:
+                self._stats.tick_headroom_ms_min = headroom_ms
+            else:
+                self._stats.tick_headroom_ms_min = min(self._stats.tick_headroom_ms_min, headroom_ms)
+
+            if headroom_ms < 0:
+                self._stats.tick_overrun_count += 1
+
+    def _copy_meter_data(self, source: MeterData, target: MeterData) -> None:
+        """Copy frame register values between buffers while keeping object allocation stable."""
+        source_frame = source.frame
+        target_frame = target.frame
+
+        for addr, reg in source_frame.static_reg_map.items():
+            target_frame.static_reg_map[addr].values = list(reg.values)
+            target_frame.static_reg_map[addr].skip_n_read = reg.skip_n_read
+
+        for addr, reg in source_frame.dynamic_reg_map.items():
+            target_frame.dynamic_reg_map[addr].values = list(reg.values)
+            target_frame.dynamic_reg_map[addr].skip_n_read = reg.skip_n_read
+
+        for addr, reg in source_frame.remapped_reg_map.items():
+            target_frame.remapped_reg_map[addr].values = list(reg.values)
+            target_frame.remapped_reg_map[addr].skip_n_read = reg.skip_n_read
+
+    def _sync_dynamic_reg_meta(self, source_reg_map: dict, target_reg_map: dict) -> None:
+        """Keep dynamic register scheduling metadata aligned across buffers."""
+        for addr, reg in source_reg_map.items():
+            target_reg_map[addr].skip_n_read = reg.skip_n_read
+
+    def _listener_loop(self, listener: MeterDataListener) -> None:
+        num_errors = 0
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            while True:
+                snapshot: MeterData | None = None
+                gap: int = 0
+
+                with self._condition:
+                    if self._listener_stop:
+                        return
+
+                    if listener not in self._listener_last_seq:
+                        return
+
+                    last_seq = self._listener_last_seq.get(listener, 0)
+                    while self._data_seq == last_seq and not self._listener_stop:
+                        self._condition.wait()
+                        if listener not in self._listener_last_seq:
+                            return
+
+                    if self._listener_stop:
+                        return
+
+                    current_seq = self._data_seq
+                    gap = current_seq - last_seq
+                    self._listener_last_seq[listener] = current_seq
+                    snapshot = self._front_data
+
+                if gap > 1:
+                    missed = gap - 1
+                    with self._stats_lock:
+                        self._stats.consumer_missed_updates_total += missed
+                        self._stats.consumer_max_seq_gap = max(self._stats.consumer_max_seq_gap, gap)
+                    self._stats.changed()
+
+                try:
+                    loop.run_until_complete(listener.new_data(snapshot))
+                    num_errors = 0
+                except Exception as e:
+                    logger.critical("Listener worker failure, starting error counting", exc_info=True)
+                    logger.exception(e)
+                    num_errors += 1
+
+                if num_errors > 10:
+                    logger.critical("Too many successive listener errors, restarting.")
+                    break
+        finally:
+            loop.close()
+
+        os._exit(2)
+
+    async def _read_registers(
+        self,
+        reg_map: dict,
+        dyn_reg: bool = False,
+        fallback_reg_map: dict | None = None,
+        reg_addrs: tuple[int, ...] | None = None,
+    ) -> bool:
         try:
             # Read dynamic registers
             # Only read the primary register every cycle, the rest are read less often
             # This is because we can't keep up a 10Hz read rate if we read all registers.
-            for reg_addr in reg_map:
+            if reg_addrs is None:
+                reg_addrs = tuple(reg_map.keys())
+
+            for reg_addr in reg_addrs:
                 reg_desc = reg_map[reg_addr]
                 skip_n_read: int = reg_desc.skip_n_read
 
@@ -191,25 +329,30 @@ class Em540Master:
                 # Then skip reads as configured
                 if dyn_reg and self._dyn_reg_read_counter > 1 and skip_n_read > 0:
                     if (self._dyn_reg_read_counter % (skip_n_read + 1)) != 0:
+                        if fallback_reg_map is not None and reg_addr in fallback_reg_map:
+                            reg_map[reg_addr].values = list(fallback_reg_map[reg_addr].values)
                         logger.debug(
-                            f">>>> Skipping read of '{reg_desc.description}' register "
-                            f"at {hex(reg_addr)}, read counter={self._dyn_reg_read_counter}, skip_n_read={skip_n_read}"
+                            ">>>> Skipping read of '%s' register at %s, read counter=%s, skip_n_read=%s",
+                            reg_desc.description,
+                            hex(reg_addr),
+                            self._dyn_reg_read_counter,
+                            skip_n_read,
                         )
                         continue
 
                 num_registers: int = len(reg_desc.values)
                 logger.debug(
-                    f"Reading '{reg_desc.description}' from start register address {hex(reg_addr)}, "
-                    f"count={num_registers}"
+                    "Reading '%s' from start register address %s, count=%s",
+                    reg_desc.description,
+                    hex(reg_addr),
+                    num_registers,
                 )
                 result = await self._client.read_holding_registers(
                     reg_addr, count=num_registers, device_id=self.slave_id
                 )
 
                 if result.isError():
-                    logger.error(
-                        f"Error reading register {hex(reg_addr)}, count={num_registers}"
-                    )
+                    logger.error(f"Error reading register {hex(reg_addr)}, count={num_registers}")
                     return False
 
                 # Check if we received the expected number of registers
@@ -228,6 +371,7 @@ class Em540Master:
                 reg_map[reg_addr].values = result.registers
         except ModbusIOException as ex:
             logger.error("Modbus IO error reading registers from EM540: %s", ex)
+            self._client.close()
             return False
         except ModbusException as ex:
             logger.error("Could not read dynamic registers from EM540: %s", ex)

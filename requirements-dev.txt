@@ -2,8 +2,8 @@
 -r requirements.txt
 
 # Development tools
-ruff
+ruff==0.15.10
 
 # Testing
-pytest
-hypothesis
+pytest==9.0.3
+hypothesis==6.151.12

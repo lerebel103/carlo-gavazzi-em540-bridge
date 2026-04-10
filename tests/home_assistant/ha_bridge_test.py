@@ -3,6 +3,7 @@
 Pre-patches sys.modules for ha_sensors (uses Python 3.10+ syntax) so that
 `import home_assistant.ha_bridge` succeeds on Python 3.9.
 """
+
 import sys
 import unittest
 from unittest.mock import MagicMock
@@ -39,16 +40,27 @@ def _make_conf() -> MqttConfig:
 class TestHABridge(unittest.TestCase):
     def setUp(self):
         self.bridge = HABridge(_make_conf())
-        self.bridge.client.connect = MagicMock()
+        self.bridge.client.connect_async = MagicMock()
         self.bridge.client.loop_start = MagicMock()
+
+    def test_connect_schedules_background_connection(self):
+        self.bridge.connect()
+
+        self.bridge.client.loop_start.assert_called_once()
+        self.bridge.client.connect_async.assert_called_once_with("localhost", 1883)
+
+    def test_connect_swallow_initial_connection_error(self):
+        self.bridge.client.connect_async.side_effect = RuntimeError("broker unavailable")
+
+        self.bridge.connect()
+
+        self.bridge.client.loop_start.assert_called_once()
 
     def test_publish_when_connected(self):
         self.bridge.connected = True
         self.bridge.client.publish = MagicMock()
         self.bridge.publish("test/topic", "payload", retain=True)
-        self.bridge.client.publish.assert_called_with(
-            "test/topic", "payload", retain=True
-        )
+        self.bridge.client.publish.assert_called_with("test/topic", "payload", retain=True)
 
     def test_publish_when_not_connected(self):
         self.bridge.connected = False
@@ -56,13 +68,19 @@ class TestHABridge(unittest.TestCase):
         self.bridge.publish("test/topic", "payload", retain=True)
         self.bridge.client.publish.assert_not_called()
 
+    def test_disconnect_callback_does_not_attempt_blocking_reconnect(self):
+        client = MagicMock()
+        self.bridge._last_payload_by_topic["test/topic"] = "payload"
+
+        HABridge.on_disconnect(client, self.bridge, None, 1, None)
+
+        self.assertFalse(self.bridge.connected)
+        self.assertEqual(self.bridge._last_payload_by_topic, {})
+        client.reconnect.assert_not_called()
+
     def test_advertise_calls_publish(self):
-        self.bridge.sensors.advertise_data = MagicMock(
-            return_value=[("topic1", "msg1")]
-        )
-        self.bridge._diagnostics.advertise_data = MagicMock(
-            return_value=[("topic2", "msg2")]
-        )
+        self.bridge.sensors.advertise_data = MagicMock(return_value=[("topic1", "msg1")])
+        self.bridge._diagnostics.advertise_data = MagicMock(return_value=[("topic2", "msg2")])
         self.bridge.publish = MagicMock()
         self.bridge.advertise()
         self.bridge.publish.assert_any_call("topic1", "msg1", retain=True)

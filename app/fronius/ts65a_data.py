@@ -48,9 +48,7 @@ class Ts65aMeterData:
     particularly with equipment that have pulsating power requirements (PID driven heat elments, some A/Cs like Actron)
     """
 
-    def __init__(
-        self, max_points, grid_feed_in_hard_limit, logger, stats: Ts65aSlaveStats
-    ):
+    def __init__(self, max_points, grid_feed_in_hard_limit, logger, stats: Ts65aSlaveStats):
         self.stats = stats
         self.stats.grid_feed_in_hard_limit = grid_feed_in_hard_limit
         self.logger = logger
@@ -205,27 +203,19 @@ class Ts65aMeterData:
 
     @property
     def power_factor(self):
-        return _calculate_power_factor(
-            self._power_factor.mean, self._power.mean, self._reactive_power.mean
-        )
+        return _calculate_power_factor(self._power_factor.mean, self._power.mean, self._reactive_power.mean)
 
     @property
     def power_factor_a(self):
-        return _calculate_power_factor(
-            self._power_factor_a.mean, self._power_a.mean, self._reactive_power_a.mean
-        )
+        return _calculate_power_factor(self._power_factor_a.mean, self._power_a.mean, self._reactive_power_a.mean)
 
     @property
     def power_factor_b(self):
-        return _calculate_power_factor(
-            self._power_factor_b.mean, self._power_b.mean, self._reactive_power_b.mean
-        )
+        return _calculate_power_factor(self._power_factor_b.mean, self._power_b.mean, self._reactive_power_b.mean)
 
     @property
     def power_factor_c(self):
-        return _calculate_power_factor(
-            self._power_factor_c.mean, self._power_c.mean, self._reactive_power_c.mean
-        )
+        return _calculate_power_factor(self._power_factor_c.mean, self._power_c.mean, self._reactive_power_c.mean)
 
     @property
     def wh_neg_total(self):
@@ -336,22 +326,22 @@ class Ts65aMeterData:
         self._wh_neg_a = 0  # Not available from em540
         self._wh_neg_b = 0  # Not available from em540
         self._wh_neg_c = 0  # Not available from em540
-        self._wh_plus_total = (
-            data.other_energies.kwh_plus_total * 1000.0
-        )  # convert to Wh
+        self._wh_plus_total = data.other_energies.kwh_plus_total * 1000.0  # convert to Wh
         self._wh_plus_l1 = data.other_energies.kwh_plus_l1 * 1000.0  # convert to Wh
         self._wh_plus_l2 = data.other_energies.kwh_plus_l2 * 1000.0  # convert to Wh
         self._wh_plus_l3 = data.other_energies.kwh_plus_l3 * 1000.0  # convert to Wh
 
         # export / import energy in VAh
-        self._vah_neg_total = 0  # Not available from em540
-        self._vah_neg_a = 0  # Not available from em540
-        self._vah_neg_b = 0  # Not available from em540
-        self._vah_neg_c = 0  # Not available from em540
-        self._vah_plus_total = 0  # Not available from em540
-        self._vah_plus_a = 0  # Not available from em540
-        self._vah_plus_b = 0  # Not available from em540
-        self._vah_plus_c = 0  # Not available from em540
+        # EM540 provides only total apparent energy (kvah_total), not directional import/export.
+        # Intentionally zero to avoid ambiguity in TS65A semantics.
+        self._vah_neg_total = 0
+        self._vah_neg_a = 0
+        self._vah_neg_b = 0
+        self._vah_neg_c = 0
+        self._vah_plus_total = 0
+        self._vah_plus_a = 0
+        self._vah_plus_b = 0
+        self._vah_plus_c = 0
 
     def _reset_means(self):
         self.logger.warn("Resetting running averages due to power over feed in limit")

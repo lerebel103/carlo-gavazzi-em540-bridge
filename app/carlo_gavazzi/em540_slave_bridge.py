@@ -2,8 +2,7 @@ import logging
 from typing import Callable
 
 from pymodbus import FramerType
-from pymodbus.datastore import (ModbusDeviceContext, ModbusServerContext,
-                                ModbusSparseDataBlock)
+from pymodbus.datastore import ModbusDeviceContext, ModbusServerContext, ModbusSparseDataBlock
 from pymodbus.server import ModbusTcpServer
 
 from app.carlo_gavazzi.em540_data import Em540Frame
@@ -46,6 +45,9 @@ class Em540Slave(MeterDataListener):
             logger.debug("Adding remapped reg " + hex(addr))
             values[addr + REG_OFFSET] = frame.remapped_reg_map[addr].values
 
+        self._dynamic_addrs = tuple(frame.dynamic_reg_map.keys())
+        self._remapped_addrs = tuple(frame.remapped_reg_map.keys())
+
         self.datablock: ModbusSparseDataBlock = ModbusSparseDataBlock.create(values)
 
         self._context: ModbusDeviceContext = ModbusDeviceContext(
@@ -54,9 +56,7 @@ class Em540Slave(MeterDataListener):
             hr=self.datablock,
             ir=self.datablock,
         )
-        context: ModbusServerContext = ModbusServerContext(
-            devices={self._slave_id: self._context}, single=False
-        )
+        context: ModbusServerContext = ModbusServerContext(devices={self._slave_id: self._context}, single=False)
 
         # Modbus RTU over socket server
         self._rtu_server: ModbusTcpServer = ModbusTcpServer(
@@ -101,6 +101,14 @@ class Em540Slave(MeterDataListener):
         await self._rtu_server.serve_forever(background=True)
         await self._tcp_server.serve_forever(background=True)
 
+    def _sync_pdu_stats(self) -> None:
+        stale_age = self._pdu_helper.stale_age_seconds()
+        self._stats.stale_data_age_ms = 0.0 if stale_age is None else stale_age * 1000.0
+        self._stats.circuit_breaker_open = self._pdu_helper.circuit_open
+        self._stats.circuit_breaker_open_count = self._pdu_helper.circuit_open_count
+        self._stats.dropped_stale_request_count = self._pdu_helper.dropped_request_count
+        self._stats.changed()
+
     async def new_data(self, data: MeterData) -> None:
         """Handle new data from the master.
 
@@ -111,25 +119,17 @@ class Em540Slave(MeterDataListener):
         frame = data.frame
 
         # Update dynamic registers in the datablock
-        for addr in frame.dynamic_reg_map:
-            self.datablock.setValues(
-                addr + REG_OFFSET, frame.dynamic_reg_map[addr].values
-            )
-
-        # Update static registers in the datablock (in case they changed)
-        for addr in frame.static_reg_map:
-            self.datablock.setValues(
-                addr + REG_OFFSET, frame.static_reg_map[addr].values
-            )
+        for addr in self._dynamic_addrs:
+            self.datablock.setValues(addr + REG_OFFSET, frame.dynamic_reg_map[addr].values)
 
         # Update remapped values
-        for addr in frame.remapped_reg_map:
-            self.datablock.setValues(
-                addr + REG_OFFSET, frame.remapped_reg_map[addr].values
-            )
+        for addr in self._remapped_addrs:
+            self.datablock.setValues(addr + REG_OFFSET, frame.remapped_reg_map[addr].values)
 
         # Now update our PDU helper with the timestamp of this data
         self._pdu_helper.data_received(data.timestamp)
+        self._sync_pdu_stats()
 
     async def read_failed(self) -> None:
-        pass
+        self._pdu_helper.upstream_failed()
+        self._sync_pdu_stats()

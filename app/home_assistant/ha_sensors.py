@@ -22,19 +22,13 @@ class Sensor:
         self.device_class = device_class
         self.state_class = state_class
         self.value_template = (
-            "{% if value_json."
-            + self.safe_name
-            + " is defined %} {{ value_json."
-            + self.safe_name
-            + " }} {% endif %}"
+            "{% if value_json." + self.safe_name + " is defined %} {{ value_json." + self.safe_name + " }} {% endif %}"
         )
         self.unit_of_measurement = unit
         self.suggested_display_precision = precision
         self.enabled_by_default = enabled_by_default
         self.unique_id = f"em540_bridge_{self.safe_name}"
-        self.advertisement_topic = (
-            f"homeassistant/sensor/em540_bridge_{self.safe_name}/config"
-        )
+        self.advertisement_topic = f"homeassistant/sensor/em540_bridge_{self.safe_name}/config"
         self.entity_category = entity_category
         self.device = {
             "name": "EM540 Energy Meter Bridge",
@@ -91,9 +85,7 @@ class EnergyMeterSensor:
         self.state_topic = "lerebel/sensor/em540_energy_meter_bridge/state"
 
         # Grouped sensor definitions
-        self.frequency = Sensor(
-            "Frequency", "Hz", "frequency", "measurement", self.state_topic, precision=2
-        )
+        self.frequency = Sensor("Frequency", "Hz", "frequency", "measurement", self.state_topic, precision=2)
 
         self.voltage_sensors = [
             Sensor(
@@ -129,15 +121,9 @@ class EnergyMeterSensor:
 
         self.power_sensors = [
             Sensor("Power", "W", "power", "measurement", self.state_topic, precision=0),
-            Sensor(
-                "Power L1", "W", "power", "measurement", self.state_topic, precision=0
-            ),
-            Sensor(
-                "Power L2", "W", "power", "measurement", self.state_topic, precision=0
-            ),
-            Sensor(
-                "Power L3", "W", "power", "measurement", self.state_topic, precision=0
-            ),
+            Sensor("Power L1", "W", "power", "measurement", self.state_topic, precision=0),
+            Sensor("Power L2", "W", "power", "measurement", self.state_topic, precision=0),
+            Sensor("Power L3", "W", "power", "measurement", self.state_topic, precision=0),
         ]
 
         self.reactive_power_sensors = [
@@ -281,7 +267,7 @@ class EnergyMeterSensor:
         )
         self.kvah_total = Sensor(
             "Apparent Energy kvah",
-            "kWh",
+            "kVAh",
             "energy",
             "total_increasing",
             self.state_topic,

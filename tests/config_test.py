@@ -2,10 +2,24 @@
 
 from __future__ import annotations
 
+import time
+from dataclasses import fields as dc_fields
+
 import pytest
 import yaml
+from hypothesis import given, settings
+from hypothesis import strategies as st
 
-from app.config import AppState, ConfigError, ConfigManager
+from app.config import (
+    PERSISTED_FIELDS,
+    AppState,
+    ConfigError,
+    ConfigManager,
+    Em540MasterConfig,
+    Em540SlaveConfig,
+    MqttConfig,
+    Ts65aSlaveConfig,
+)
 
 
 @pytest.fixture()
@@ -26,6 +40,7 @@ def valid_yaml(tmp_path):
 
 # -- __init__ --
 
+
 def test_init_stores_path_and_state_is_none():
     cm = ConfigManager("/some/path.yaml")
     assert cm._path == "/some/path.yaml"
@@ -33,6 +48,7 @@ def test_init_stores_path_and_state_is_none():
 
 
 # -- load() happy path --
+
 
 def test_load_returns_app_state(valid_yaml):
     state = ConfigManager(valid_yaml).load()
@@ -65,6 +81,7 @@ def test_load_sets_internal_state(valid_yaml):
 
 # -- defaults for missing optional fields --
 
+
 def test_missing_optional_fields_get_defaults(tmp_path):
     data = {
         "em540_master": {},
@@ -87,9 +104,16 @@ def test_missing_optional_fields_get_defaults(tmp_path):
 
 # -- missing required section --
 
-@pytest.mark.parametrize("missing", [
-    "em540_master", "em540_slave", "ts65a_slave", "mqtt",
-])
+
+@pytest.mark.parametrize(
+    "missing",
+    [
+        "em540_master",
+        "em540_slave",
+        "ts65a_slave",
+        "mqtt",
+    ],
+)
 def test_missing_required_section_raises_config_error(tmp_path, missing):
     data = {
         "em540_master": {},
@@ -106,6 +130,7 @@ def test_missing_required_section_raises_config_error(tmp_path, missing):
 
 
 # -- file errors --
+
 
 def test_file_not_found(tmp_path):
     with pytest.raises(ConfigError, match="not found"):
@@ -128,6 +153,7 @@ def test_non_mapping_yaml(tmp_path):
 
 # -- backward compatibility with real config.yaml --
 
+
 def test_loads_existing_config_yaml():
     state = ConfigManager("config.yaml").load()
     assert state.em540_master.mode == "tcp"
@@ -141,14 +167,18 @@ def test_loads_existing_config_yaml():
 # Validation tests (Task 2.3)
 # ---------------------------------------------------------------------------
 
+
 def _make_config(tmp_path, overrides: dict | None = None):
     """Build a valid config dict, apply overrides, write to tmp file, return path."""
     data = {
         "em540_master": {"mode": "tcp", "host": "10.0.0.1", "port": 502, "slave_id": 1, "log_level": "INFO"},
         "em540_slave": {"host": "0.0.0.0", "rtu_port": 5002, "tcp_port": 5001, "slave_id": 1, "log_level": "INFO"},
         "ts65a_slave": {
-            "port": 5003, "slave_id": 1, "log_level": "INFO",
-            "grid_feed_in_hard_limit": -5000, "smoothing_num_points": 20,
+            "port": 5003,
+            "slave_id": 1,
+            "log_level": "INFO",
+            "grid_feed_in_hard_limit": -5000,
+            "smoothing_num_points": 20,
         },
         "mqtt": {"host": "broker.local", "port": 1883, "log_level": "INFO"},
         "pymodbus": {"log_level": "INFO"},
@@ -171,6 +201,7 @@ def _make_config(tmp_path, overrides: dict | None = None):
 
 # -- mode validation --
 
+
 @pytest.mark.parametrize("mode", ["tcp", "serial"])
 def test_valid_mode_accepted(tmp_path, mode):
     path = _make_config(tmp_path, {"em540_master.mode": mode})
@@ -187,13 +218,17 @@ def test_invalid_mode_raises(tmp_path, mode):
 
 # -- port validation --
 
-@pytest.mark.parametrize("field", [
-    "em540_master.port",
-    "em540_slave.rtu_port",
-    "em540_slave.tcp_port",
-    "ts65a_slave.port",
-    "mqtt.port",
-])
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "em540_master.port",
+        "em540_slave.rtu_port",
+        "em540_slave.tcp_port",
+        "ts65a_slave.port",
+        "mqtt.port",
+    ],
+)
 @pytest.mark.parametrize("bad_value", [0, -1, 65535, 70000])
 def test_invalid_port_raises(tmp_path, field, bad_value):
     path = _make_config(tmp_path, {field: bad_value})
@@ -201,13 +236,16 @@ def test_invalid_port_raises(tmp_path, field, bad_value):
         ConfigManager(path).load()
 
 
-@pytest.mark.parametrize("field", [
-    "em540_master.port",
-    "em540_slave.rtu_port",
-    "em540_slave.tcp_port",
-    "ts65a_slave.port",
-    "mqtt.port",
-])
+@pytest.mark.parametrize(
+    "field",
+    [
+        "em540_master.port",
+        "em540_slave.rtu_port",
+        "em540_slave.tcp_port",
+        "ts65a_slave.port",
+        "mqtt.port",
+    ],
+)
 def test_valid_port_accepted(tmp_path, field):
     path = _make_config(tmp_path, {field: 1})
     state = ConfigManager(path).load()
@@ -217,11 +255,15 @@ def test_valid_port_accepted(tmp_path, field):
 
 # -- slave_id validation --
 
-@pytest.mark.parametrize("field", [
-    "em540_master.slave_id",
-    "em540_slave.slave_id",
-    "ts65a_slave.slave_id",
-])
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "em540_master.slave_id",
+        "em540_slave.slave_id",
+        "ts65a_slave.slave_id",
+    ],
+)
 @pytest.mark.parametrize("bad_value", [0, -1, 256, 999])
 def test_invalid_slave_id_raises(tmp_path, field, bad_value):
     path = _make_config(tmp_path, {field: bad_value})
@@ -229,11 +271,14 @@ def test_invalid_slave_id_raises(tmp_path, field, bad_value):
         ConfigManager(path).load()
 
 
-@pytest.mark.parametrize("field", [
-    "em540_master.slave_id",
-    "em540_slave.slave_id",
-    "ts65a_slave.slave_id",
-])
+@pytest.mark.parametrize(
+    "field",
+    [
+        "em540_master.slave_id",
+        "em540_slave.slave_id",
+        "ts65a_slave.slave_id",
+    ],
+)
 def test_valid_slave_id_accepted(tmp_path, field):
     path = _make_config(tmp_path, {field: 255})
     state = ConfigManager(path).load()
@@ -242,12 +287,16 @@ def test_valid_slave_id_accepted(tmp_path, field):
 
 # -- log_level validation --
 
-@pytest.mark.parametrize("field", [
-    "em540_master.log_level",
-    "em540_slave.log_level",
-    "ts65a_slave.log_level",
-    "mqtt.log_level",
-])
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "em540_master.log_level",
+        "em540_slave.log_level",
+        "ts65a_slave.log_level",
+        "mqtt.log_level",
+    ],
+)
 @pytest.mark.parametrize("bad_value", ["debug", "info", "TRACE", "WARN", ""])
 def test_invalid_log_level_raises(tmp_path, field, bad_value):
     path = _make_config(tmp_path, {field: bad_value})
@@ -255,12 +304,15 @@ def test_invalid_log_level_raises(tmp_path, field, bad_value):
         ConfigManager(path).load()
 
 
-@pytest.mark.parametrize("field", [
-    "em540_master.log_level",
-    "em540_slave.log_level",
-    "ts65a_slave.log_level",
-    "mqtt.log_level",
-])
+@pytest.mark.parametrize(
+    "field",
+    [
+        "em540_master.log_level",
+        "em540_slave.log_level",
+        "ts65a_slave.log_level",
+        "mqtt.log_level",
+    ],
+)
 @pytest.mark.parametrize("level", ["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"])
 def test_valid_log_level_accepted(tmp_path, field, level):
     path = _make_config(tmp_path, {field: level})
@@ -270,10 +322,14 @@ def test_valid_log_level_accepted(tmp_path, field, level):
 
 # -- pymodbus / root log_level validation --
 
-@pytest.mark.parametrize("section,field", [
-    ("pymodbus", "pymodbus_log_level"),
-    ("root", "root_log_level"),
-])
+
+@pytest.mark.parametrize(
+    "section,field",
+    [
+        ("pymodbus", "pymodbus_log_level"),
+        ("root", "root_log_level"),
+    ],
+)
 def test_invalid_special_log_level_raises(tmp_path, section, field):
     path = _make_config(tmp_path, {f"{section}.log_level": "TRACE"})
     with pytest.raises(ConfigError, match="log_level"):
@@ -288,6 +344,7 @@ def test_valid_special_log_level_accepted(tmp_path, section):
 
 
 # -- grid_feed_in_hard_limit validation --
+
 
 @pytest.mark.parametrize("value", [1, 0.1, 100])
 def test_positive_grid_feed_in_hard_limit_raises(tmp_path, value):
@@ -304,6 +361,7 @@ def test_valid_grid_feed_in_hard_limit_accepted(tmp_path, value):
 
 
 # -- smoothing_num_points validation --
+
 
 @pytest.mark.parametrize("value", [0, -1, 601, 1000])
 def test_invalid_smoothing_num_points_raises(tmp_path, value):
@@ -322,9 +380,6 @@ def test_valid_smoothing_num_points_accepted(tmp_path, value):
 # ---------------------------------------------------------------------------
 # Persistence tests (Task 2.4)
 # ---------------------------------------------------------------------------
-
-import time
-import threading
 
 
 def test_schedule_persist_sets_dirty_and_timestamp(valid_yaml):
@@ -354,11 +409,21 @@ def test_schedule_persist_updates_timestamp_on_repeated_calls(valid_yaml):
 def test_write_updates_persisted_fields(tmp_path):
     """_write() should update PERSISTED_FIELDS in the YAML file."""
     data = {
-        "em540_master": {"mode": "tcp", "host": "10.0.0.1", "port": 502,
-                         "update_interval": 0.1, "retries": 0, "timeout": 0.15},
+        "em540_master": {
+            "mode": "tcp",
+            "host": "10.0.0.1",
+            "port": 502,
+            "update_interval": 0.1,
+            "retries": 0,
+            "timeout": 0.15,
+        },
         "em540_slave": {"host": "0.0.0.0", "update_timeout": 0.5},
-        "ts65a_slave": {"port": 5003, "grid_feed_in_hard_limit": -5000,
-                        "smoothing_num_points": 20, "update_timeout": 0.5},
+        "ts65a_slave": {
+            "port": 5003,
+            "grid_feed_in_hard_limit": -5000,
+            "smoothing_num_points": 20,
+            "update_timeout": 0.5,
+        },
         "mqtt": {"host": "broker.local", "port": 1883, "update_interval": 0.5},
     }
     p = tmp_path / "config.yaml"
@@ -382,11 +447,21 @@ def test_write_updates_persisted_fields(tmp_path):
 def test_write_preserves_non_persisted_fields(tmp_path):
     """_write() should not alter fields outside PERSISTED_FIELDS."""
     data = {
-        "em540_master": {"mode": "tcp", "host": "10.0.0.1", "port": 502,
-                         "update_interval": 0.1, "retries": 0, "timeout": 0.15},
+        "em540_master": {
+            "mode": "tcp",
+            "host": "10.0.0.1",
+            "port": 502,
+            "update_interval": 0.1,
+            "retries": 0,
+            "timeout": 0.15,
+        },
         "em540_slave": {"host": "0.0.0.0", "update_timeout": 0.5},
-        "ts65a_slave": {"port": 5003, "grid_feed_in_hard_limit": -5000,
-                        "smoothing_num_points": 20, "update_timeout": 0.5},
+        "ts65a_slave": {
+            "port": 5003,
+            "grid_feed_in_hard_limit": -5000,
+            "smoothing_num_points": 20,
+            "update_timeout": 0.5,
+        },
         "mqtt": {"host": "broker.local", "port": 1883, "update_interval": 0.5},
     }
     p = tmp_path / "config.yaml"
@@ -410,11 +485,21 @@ def test_write_preserves_non_persisted_fields(tmp_path):
 def test_write_clears_dirty_after_flush(tmp_path):
     """After _flush_loop writes, dirty flag should be cleared."""
     data = {
-        "em540_master": {"mode": "tcp", "host": "10.0.0.1", "port": 502,
-                         "update_interval": 0.1, "retries": 0, "timeout": 0.15},
+        "em540_master": {
+            "mode": "tcp",
+            "host": "10.0.0.1",
+            "port": 502,
+            "update_interval": 0.1,
+            "retries": 0,
+            "timeout": 0.15,
+        },
         "em540_slave": {"host": "0.0.0.0", "update_timeout": 0.5},
-        "ts65a_slave": {"port": 5003, "grid_feed_in_hard_limit": -5000,
-                        "smoothing_num_points": 20, "update_timeout": 0.5},
+        "ts65a_slave": {
+            "port": 5003,
+            "grid_feed_in_hard_limit": -5000,
+            "smoothing_num_points": 20,
+            "update_timeout": 0.5,
+        },
         "mqtt": {"host": "broker.local", "port": 1883, "update_interval": 0.5},
     }
     p = tmp_path / "config.yaml"
@@ -433,11 +518,21 @@ def test_write_clears_dirty_after_flush(tmp_path):
 def test_flush_loop_writes_after_debounce(tmp_path):
     """The flush loop should write dirty config after the 5s debounce."""
     data = {
-        "em540_master": {"mode": "tcp", "host": "10.0.0.1", "port": 502,
-                         "update_interval": 0.1, "retries": 0, "timeout": 0.15},
+        "em540_master": {
+            "mode": "tcp",
+            "host": "10.0.0.1",
+            "port": 502,
+            "update_interval": 0.1,
+            "retries": 0,
+            "timeout": 0.15,
+        },
         "em540_slave": {"host": "0.0.0.0", "update_timeout": 0.5},
-        "ts65a_slave": {"port": 5003, "grid_feed_in_hard_limit": -5000,
-                        "smoothing_num_points": 20, "update_timeout": 0.5},
+        "ts65a_slave": {
+            "port": 5003,
+            "grid_feed_in_hard_limit": -5000,
+            "smoothing_num_points": 20,
+            "update_timeout": 0.5,
+        },
         "mqtt": {"host": "broker.local", "port": 1883, "update_interval": 0.5},
     }
     p = tmp_path / "config.yaml"
@@ -482,11 +577,21 @@ def test_start_and_stop_flush_loop(valid_yaml):
 def test_write_failure_keeps_dirty_flag(tmp_path, monkeypatch):
     """If _write() raises, the flush loop should keep dirty=True for retry."""
     data = {
-        "em540_master": {"mode": "tcp", "host": "10.0.0.1", "port": 502,
-                         "update_interval": 0.1, "retries": 0, "timeout": 0.15},
+        "em540_master": {
+            "mode": "tcp",
+            "host": "10.0.0.1",
+            "port": 502,
+            "update_interval": 0.1,
+            "retries": 0,
+            "timeout": 0.15,
+        },
         "em540_slave": {"host": "0.0.0.0", "update_timeout": 0.5},
-        "ts65a_slave": {"port": 5003, "grid_feed_in_hard_limit": -5000,
-                        "smoothing_num_points": 20, "update_timeout": 0.5},
+        "ts65a_slave": {
+            "port": 5003,
+            "grid_feed_in_hard_limit": -5000,
+            "smoothing_num_points": 20,
+            "update_timeout": 0.5,
+        },
         "mqtt": {"host": "broker.local", "port": 1883, "update_interval": 0.5},
     }
     p = tmp_path / "config.yaml"
@@ -518,30 +623,45 @@ def test_write_failure_keeps_dirty_flag(tmp_path, monkeypatch):
 # Property-based tests (Task 2.5)
 # ---------------------------------------------------------------------------
 
-from hypothesis import given, settings, strategies as st
-
-
 # Strategy: pick a PERSISTED_FIELD and generate a valid value for it.
 _FIELD_STRATEGIES: dict[str, st.SearchStrategy] = {
     "ts65a_slave.grid_feed_in_hard_limit": st.floats(
-        min_value=-1e6, max_value=0, allow_nan=False, allow_infinity=False,
+        min_value=-1e6,
+        max_value=0,
+        allow_nan=False,
+        allow_infinity=False,
     ),
     "ts65a_slave.smoothing_num_points": st.integers(min_value=1, max_value=600),
     "mqtt.update_interval": st.floats(
-        min_value=0.01, max_value=1e4, allow_nan=False, allow_infinity=False,
+        min_value=0.01,
+        max_value=1e4,
+        allow_nan=False,
+        allow_infinity=False,
     ),
     "em540_master.update_interval": st.floats(
-        min_value=0.01, max_value=1e4, allow_nan=False, allow_infinity=False,
+        min_value=0.01,
+        max_value=1e4,
+        allow_nan=False,
+        allow_infinity=False,
     ),
     "em540_master.retries": st.integers(min_value=0, max_value=1000),
     "em540_master.timeout": st.floats(
-        min_value=0.01, max_value=1e4, allow_nan=False, allow_infinity=False,
+        min_value=0.01,
+        max_value=1e4,
+        allow_nan=False,
+        allow_infinity=False,
     ),
     "em540_slave.update_timeout": st.floats(
-        min_value=0.01, max_value=1e4, allow_nan=False, allow_infinity=False,
+        min_value=0.01,
+        max_value=1e4,
+        allow_nan=False,
+        allow_infinity=False,
     ),
     "ts65a_slave.update_timeout": st.floats(
-        min_value=0.01, max_value=1e4, allow_nan=False, allow_infinity=False,
+        min_value=0.01,
+        max_value=1e4,
+        allow_nan=False,
+        allow_infinity=False,
     ),
 }
 
@@ -561,17 +681,28 @@ def test_property_config_persistence_round_trip(field_and_value):
     the field on a loaded AppState, calling _write(), and reloading the
     config SHALL yield an AppState where the modified field has the new value.
     """
-    import tempfile, pathlib
+    import pathlib
+    import tempfile
 
     field_path, new_value = field_and_value
 
     # Build a minimal valid config file
     data = {
-        "em540_master": {"mode": "tcp", "host": "10.0.0.1", "port": 502,
-                         "update_interval": 0.1, "retries": 0, "timeout": 0.15},
+        "em540_master": {
+            "mode": "tcp",
+            "host": "10.0.0.1",
+            "port": 502,
+            "update_interval": 0.1,
+            "retries": 0,
+            "timeout": 0.15,
+        },
         "em540_slave": {"host": "0.0.0.0", "update_timeout": 0.5},
-        "ts65a_slave": {"port": 5003, "grid_feed_in_hard_limit": -5000,
-                        "smoothing_num_points": 20, "update_timeout": 0.5},
+        "ts65a_slave": {
+            "port": 5003,
+            "grid_feed_in_hard_limit": -5000,
+            "smoothing_num_points": 20,
+            "update_timeout": 0.5,
+        },
         "mqtt": {"host": "broker.local", "port": 1883, "update_interval": 0.5},
     }
     with tempfile.TemporaryDirectory() as tmp_dir:
@@ -595,18 +726,12 @@ def test_property_config_persistence_round_trip(field_and_value):
         sub_config2 = getattr(state2, section_name)
         actual = getattr(sub_config2, key)
 
-        assert actual == new_value, (
-            f"Round-trip failed for {field_path}: wrote {new_value!r}, got {actual!r}"
-        )
+        assert actual == new_value, f"Round-trip failed for {field_path}: wrote {new_value!r}, got {actual!r}"
 
 
 # ---------------------------------------------------------------------------
 # Property-based test: Defaults applied for missing optional fields (Task 2.6)
 # ---------------------------------------------------------------------------
-
-from dataclasses import fields as dc_fields
-
-from app.config import Em540MasterConfig, Em540SlaveConfig, MqttConfig, Ts65aSlaveConfig
 
 # Map each required section to its dataclass and field names.
 _SECTION_DATACLASSES: dict[str, type] = {
@@ -618,16 +743,17 @@ _SECTION_DATACLASSES: dict[str, type] = {
 
 # For each section, build a dict of field_name → default value.
 _SECTION_DEFAULTS: dict[str, dict[str, object]] = {
-    section: {f.name: f.default for f in dc_fields(cls)}
-    for section, cls in _SECTION_DATACLASSES.items()
+    section: {f.name: f.default for f in dc_fields(cls)} for section, cls in _SECTION_DATACLASSES.items()
 }
 
 # Strategy: for each section, draw a random subset of field names to *include*.
 # Omitted fields should get their dataclass defaults after load().
-_section_subsets = st.fixed_dictionaries({
-    section: st.sets(st.sampled_from(sorted(field_defaults.keys())))
-    for section, field_defaults in _SECTION_DEFAULTS.items()
-})
+_section_subsets = st.fixed_dictionaries(
+    {
+        section: st.sets(st.sampled_from(sorted(field_defaults.keys())))
+        for section, field_defaults in _SECTION_DEFAULTS.items()
+    }
+)
 
 
 @given(included=_section_subsets)
@@ -666,10 +792,7 @@ def test_property_defaults_applied_for_missing_optional_fields(included):
             for field_name in omitted:
                 actual = getattr(sub_config, field_name)
                 expected = field_defaults[field_name]
-                assert actual == expected, (
-                    f"{section}.{field_name}: expected default {expected!r}, "
-                    f"got {actual!r}"
-                )
+                assert actual == expected, f"{section}.{field_name}: expected default {expected!r}, got {actual!r}"
 
 
 # ---------------------------------------------------------------------------
@@ -679,11 +802,7 @@ def test_property_defaults_applied_for_missing_optional_fields(included):
 REQUIRED_SECTIONS = ("em540_master", "em540_slave", "ts65a_slave", "mqtt")
 
 
-@given(
-    omitted=st.sets(
-        st.sampled_from(REQUIRED_SECTIONS), min_size=1, max_size=len(REQUIRED_SECTIONS)
-    )
-)
+@given(omitted=st.sets(st.sampled_from(REQUIRED_SECTIONS), min_size=1, max_size=len(REQUIRED_SECTIONS)))
 @settings(max_examples=200, deadline=None)
 def test_property_missing_required_section_raises_error(omitted):
     """**Validates: Requirement 5.2**
@@ -715,9 +834,7 @@ def test_property_missing_required_section_raises_error(omitted):
 
         # The error message must name at least one of the omitted sections.
         msg = str(exc_info.value)
-        assert any(
-            section in msg for section in omitted
-        ), f"ConfigError message {msg!r} does not name any of {omitted}"
+        assert any(section in msg for section in omitted), f"ConfigError message {msg!r} does not name any of {omitted}"
 
 
 # ---------------------------------------------------------------------------
@@ -728,9 +845,7 @@ def test_property_missing_required_section_raises_error(omitted):
 # ConfigManager.load() must raise ConfigError for every such value.
 
 # -- Invalid mode: any string that is NOT "tcp" or "serial"
-_invalid_mode = st.text(min_size=0, max_size=30).filter(
-    lambda s: s not in ("tcp", "serial")
-)
+_invalid_mode = st.text(min_size=0, max_size=30).filter(lambda s: s not in ("tcp", "serial"))
 
 # -- Invalid port: integers outside exclusive (0, 65535)
 _invalid_port = st.one_of(
@@ -746,13 +861,14 @@ _invalid_slave_id = st.one_of(
 
 # -- Invalid log_level: any string NOT in the valid set
 _VALID_LOG_LEVELS = {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}
-_invalid_log_level = st.text(min_size=0, max_size=30).filter(
-    lambda s: s not in _VALID_LOG_LEVELS
-)
+_invalid_log_level = st.text(min_size=0, max_size=30).filter(lambda s: s not in _VALID_LOG_LEVELS)
 
 # -- Invalid grid_feed_in_hard_limit: floats > 0
 _invalid_grid_limit = st.floats(
-    min_value=0, allow_nan=False, allow_infinity=False, exclude_min=True,
+    min_value=0,
+    allow_nan=False,
+    allow_infinity=False,
+    exclude_min=True,
 )
 
 # -- Invalid smoothing_num_points: integers outside [1, 600]
@@ -764,17 +880,30 @@ _invalid_smoothing = st.one_of(
 # Composite strategy: draw a (field_path, invalid_value) pair.
 _invalid_field_and_value = st.one_of(
     _invalid_mode.map(lambda v: ("em540_master.mode", v)),
-    st.sampled_from([
-        "em540_master.port", "em540_slave.rtu_port", "em540_slave.tcp_port",
-        "ts65a_slave.port", "mqtt.port",
-    ]).flatmap(lambda f: _invalid_port.map(lambda v: (f, v))),
-    st.sampled_from([
-        "em540_master.slave_id", "em540_slave.slave_id", "ts65a_slave.slave_id",
-    ]).flatmap(lambda f: _invalid_slave_id.map(lambda v: (f, v))),
-    st.sampled_from([
-        "em540_master.log_level", "em540_slave.log_level",
-        "ts65a_slave.log_level", "mqtt.log_level",
-    ]).flatmap(lambda f: _invalid_log_level.map(lambda v: (f, v))),
+    st.sampled_from(
+        [
+            "em540_master.port",
+            "em540_slave.rtu_port",
+            "em540_slave.tcp_port",
+            "ts65a_slave.port",
+            "mqtt.port",
+        ]
+    ).flatmap(lambda f: _invalid_port.map(lambda v: (f, v))),
+    st.sampled_from(
+        [
+            "em540_master.slave_id",
+            "em540_slave.slave_id",
+            "ts65a_slave.slave_id",
+        ]
+    ).flatmap(lambda f: _invalid_slave_id.map(lambda v: (f, v))),
+    st.sampled_from(
+        [
+            "em540_master.log_level",
+            "em540_slave.log_level",
+            "ts65a_slave.log_level",
+            "mqtt.log_level",
+        ]
+    ).flatmap(lambda f: _invalid_log_level.map(lambda v: (f, v))),
     _invalid_grid_limit.map(lambda v: ("ts65a_slave.grid_feed_in_hard_limit", v)),
     _invalid_smoothing.map(lambda v: ("ts65a_slave.smoothing_num_points", v)),
 )
@@ -797,7 +926,6 @@ def test_property_config_validation_rejects_out_of_range_values(field_and_value)
     field_path, bad_value = field_and_value
 
     with tempfile.TemporaryDirectory() as tmp_dir:
-        p = pathlib.Path(tmp_dir) / "config.yaml"
         cfg_path = _make_config(pathlib.Path(tmp_dir), {field_path: bad_value})
 
         with pytest.raises(ConfigError):
@@ -832,11 +960,21 @@ def test_property_debounce_guarantee(num_calls):
     import tempfile
 
     data = {
-        "em540_master": {"mode": "tcp", "host": "10.0.0.1", "port": 502,
-                         "update_interval": 0.1, "retries": 0, "timeout": 0.15},
+        "em540_master": {
+            "mode": "tcp",
+            "host": "10.0.0.1",
+            "port": 502,
+            "update_interval": 0.1,
+            "retries": 0,
+            "timeout": 0.15,
+        },
         "em540_slave": {"host": "0.0.0.0", "update_timeout": 0.5},
-        "ts65a_slave": {"port": 5003, "grid_feed_in_hard_limit": -5000,
-                        "smoothing_num_points": 20, "update_timeout": 0.5},
+        "ts65a_slave": {
+            "port": 5003,
+            "grid_feed_in_hard_limit": -5000,
+            "smoothing_num_points": 20,
+            "update_timeout": 0.5,
+        },
         "mqtt": {"host": "broker.local", "port": 1883, "update_interval": 0.5},
     }
 
@@ -895,9 +1033,7 @@ def test_property_debounce_guarantee(num_calls):
         time.sleep(2)
         cm.stop()
 
-        assert len(write_timestamps) >= 1, (
-            "_write() was never called even though debounce period had elapsed"
-        )
+        assert len(write_timestamps) >= 1, "_write() was never called even though debounce period had elapsed"
 
         # Every write must have occurred >= 5s after _last_dirty.
         for wt in write_timestamps:
@@ -910,8 +1046,6 @@ def test_property_debounce_guarantee(num_calls):
 # ---------------------------------------------------------------------------
 # Property-based test: Non-persisted fields preserved on write (Task 2.10)
 # ---------------------------------------------------------------------------
-
-from app.config import PERSISTED_FIELDS
 
 # Build a mapping of ALL nested dataclass fields (section.field → strategy)
 # that are NOT in PERSISTED_FIELDS.  These are the fields _write() must leave
@@ -927,59 +1061,57 @@ _NON_PERSISTED_STRATEGIES["em540_master.bytesize"] = st.sampled_from([7, 8])
 _NON_PERSISTED_STRATEGIES["em540_master.stopbits"] = st.sampled_from([1, 2])
 _NON_PERSISTED_STRATEGIES["em540_master.serial_port"] = st.just("/dev/ttyUSB0")
 _NON_PERSISTED_STRATEGIES["em540_master.host"] = st.from_regex(
-    r"[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}", fullmatch=True,
+    r"[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}",
+    fullmatch=True,
 )
 _NON_PERSISTED_STRATEGIES["em540_master.port"] = st.integers(min_value=1, max_value=65534)
 _NON_PERSISTED_STRATEGIES["em540_master.slave_id"] = st.integers(min_value=1, max_value=255)
-_NON_PERSISTED_STRATEGIES["em540_master.log_level"] = st.sampled_from(
-    ["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
-)
+_NON_PERSISTED_STRATEGIES["em540_master.log_level"] = st.sampled_from(["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"])
 
 # em540_slave non-persisted fields
 _NON_PERSISTED_STRATEGIES["em540_slave.host"] = st.from_regex(
-    r"[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}", fullmatch=True,
+    r"[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}",
+    fullmatch=True,
 )
 _NON_PERSISTED_STRATEGIES["em540_slave.rtu_port"] = st.integers(min_value=1, max_value=65534)
 _NON_PERSISTED_STRATEGIES["em540_slave.tcp_port"] = st.integers(min_value=1, max_value=65534)
 _NON_PERSISTED_STRATEGIES["em540_slave.slave_id"] = st.integers(min_value=1, max_value=255)
-_NON_PERSISTED_STRATEGIES["em540_slave.log_level"] = st.sampled_from(
-    ["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
-)
+_NON_PERSISTED_STRATEGIES["em540_slave.log_level"] = st.sampled_from(["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"])
 
 # ts65a_slave non-persisted fields
 _NON_PERSISTED_STRATEGIES["ts65a_slave.host"] = st.from_regex(
-    r"[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}", fullmatch=True,
+    r"[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}",
+    fullmatch=True,
 )
 _NON_PERSISTED_STRATEGIES["ts65a_slave.port"] = st.integers(min_value=1, max_value=65534)
 _NON_PERSISTED_STRATEGIES["ts65a_slave.slave_id"] = st.integers(min_value=1, max_value=255)
-_NON_PERSISTED_STRATEGIES["ts65a_slave.log_level"] = st.sampled_from(
-    ["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
-)
+_NON_PERSISTED_STRATEGIES["ts65a_slave.log_level"] = st.sampled_from(["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"])
 
 # mqtt non-persisted fields
 _NON_PERSISTED_STRATEGIES["mqtt.enabled"] = st.booleans()
 _NON_PERSISTED_STRATEGIES["mqtt.host"] = st.from_regex(
-    r"[a-z][a-z0-9]{0,10}\.[a-z]{2,4}", fullmatch=True,
+    r"[a-z][a-z0-9]{0,10}\.[a-z]{2,4}",
+    fullmatch=True,
 )
 _NON_PERSISTED_STRATEGIES["mqtt.port"] = st.integers(min_value=1, max_value=65534)
 _NON_PERSISTED_STRATEGIES["mqtt.username"] = st.text(
-    alphabet=st.characters(whitelist_categories=("L", "N")), min_size=0, max_size=20,
+    alphabet=st.characters(whitelist_categories=("L", "N")),
+    min_size=0,
+    max_size=20,
 )
 _NON_PERSISTED_STRATEGIES["mqtt.password"] = st.text(
-    alphabet=st.characters(whitelist_categories=("L", "N")), min_size=0, max_size=20,
+    alphabet=st.characters(whitelist_categories=("L", "N")),
+    min_size=0,
+    max_size=20,
 )
-_NON_PERSISTED_STRATEGIES["mqtt.log_level"] = st.sampled_from(
-    ["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
-)
+_NON_PERSISTED_STRATEGIES["mqtt.log_level"] = st.sampled_from(["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"])
 
 # Remove any field that is actually persisted (safety check)
 for pf in PERSISTED_FIELDS:
     _NON_PERSISTED_STRATEGIES.pop(pf, None)
 
 # Composite strategy: draw values for ALL non-persisted fields at once.
-_all_non_persisted = st.fixed_dictionaries(
-    {k: v for k, v in _NON_PERSISTED_STRATEGIES.items()}
-)
+_all_non_persisted = st.fixed_dictionaries({k: v for k, v in _NON_PERSISTED_STRATEGIES.items()})
 
 
 @given(non_persisted_values=_all_non_persisted)
@@ -999,7 +1131,9 @@ def test_property_non_persisted_fields_preserved_on_write(non_persisted_values):
     # valid defaults for persisted fields.
     data: dict[str, dict[str, object]] = {
         "em540_master": {
-            "update_interval": 0.1, "retries": 0, "timeout": 0.15,
+            "update_interval": 0.1,
+            "retries": 0,
+            "timeout": 0.15,
         },
         "em540_slave": {"update_timeout": 0.5},
         "ts65a_slave": {
@@ -1037,6 +1171,5 @@ def test_property_non_persisted_fields_preserved_on_write(non_persisted_values):
             section, key = dotted_key.split(".")
             actual = reloaded.get(section, {}).get(key)
             assert actual == expected, (
-                f"Non-persisted field {dotted_key} changed after _write(): "
-                f"expected {expected!r}, got {actual!r}"
+                f"Non-persisted field {dotted_key} changed after _write(): expected {expected!r}, got {actual!r}"
             )

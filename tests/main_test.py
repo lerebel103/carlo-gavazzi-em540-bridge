@@ -4,6 +4,7 @@ Transitive imports from main.py hit several compatibility issues (pymodbus API
 differences, Python 3.10+ syntax in ha_sensors.py).  We inject mock modules into
 sys.modules for the problematic leaves so that `import main` succeeds cleanly.
 """
+
 import asyncio
 import sys
 import unittest
@@ -16,13 +17,17 @@ from unittest.mock import AsyncMock, MagicMock, PropertyMock, patch
 # ---------------------------------------------------------------------------
 # 1. pymodbus.constants.ExcCodes is missing in the installed pymodbus version
 import pymodbus.constants as _const
+
 if not hasattr(_const, "ExcCodes"):
+
     class _ExcCodes:
         DEVICE_BUSY = 0x06
+
     _const.ExcCodes = _ExcCodes
 
 # 2. pymodbus.datastore.ModbusDeviceContext is missing
 import pymodbus.datastore as _ds
+
 if not hasattr(_ds, "ModbusDeviceContext"):
     _ds.ModbusDeviceContext = type("ModbusDeviceContext", (), {})
 
@@ -78,12 +83,21 @@ def _make_state():
             smoothing_num_points=10,
             log_level="CRITICAL",
         ),
-        mqtt=SimpleNamespace(enabled=False),
+        mqtt=SimpleNamespace(
+            enabled=False,
+            host="localhost",
+            port=1883,
+            username="",
+            password="",
+            update_interval=0.5,
+            log_level="CRITICAL",
+        ),
     )
 
 
 class _LoopBreak(Exception):
     """Sentinel exception used to break out of the while True loop."""
+
     pass
 
 
@@ -135,12 +149,14 @@ class TestMainLoopPriority(unittest.TestCase):
 
         mocks["master"].acquire_data = AsyncMock(side_effect=_acquire)
 
-        with _patch_config_manager(state), \
-             patch.object(main, "pymodbus_apply_logging_config"), \
-             patch.object(main, "Em540Master", return_value=mocks["master"]), \
-             patch.object(main, "Em540Slave", return_value=mocks["slave"]), \
-             patch.object(main, "Ts65aSlaveBridge", return_value=mocks["ts65a"]), \
-             patch.object(main, "HABridge"):
+        with (
+            _patch_config_manager(state),
+            patch.object(main, "pymodbus_apply_logging_config"),
+            patch.object(main, "Em540Master", return_value=mocks["master"]),
+            patch.object(main, "Em540Slave", return_value=mocks["slave"]),
+            patch.object(main, "Ts65aSlaveBridge", return_value=mocks["ts65a"]),
+            patch.object(main, "HABridge"),
+        ):
             with self.assertRaises(_LoopBreak):
                 asyncio.run(main.process_loop())
 
@@ -160,12 +176,14 @@ class TestMainLoopPriority(unittest.TestCase):
 
         mocks["master"].acquire_data = AsyncMock(side_effect=_acquire)
 
-        with _patch_config_manager(state), \
-             patch.object(main, "pymodbus_apply_logging_config"), \
-             patch.object(main, "Em540Master", return_value=mocks["master"]), \
-             patch.object(main, "Em540Slave", return_value=mocks["slave"]), \
-             patch.object(main, "Ts65aSlaveBridge", return_value=mocks["ts65a"]), \
-             patch.object(main, "HABridge"):
+        with (
+            _patch_config_manager(state),
+            patch.object(main, "pymodbus_apply_logging_config"),
+            patch.object(main, "Em540Master", return_value=mocks["master"]),
+            patch.object(main, "Em540Slave", return_value=mocks["slave"]),
+            patch.object(main, "Ts65aSlaveBridge", return_value=mocks["ts65a"]),
+            patch.object(main, "HABridge"),
+        ):
             with self.assertRaises(_LoopBreak):
                 asyncio.run(main.process_loop())
 
@@ -199,19 +217,20 @@ class TestMainLoopPriority(unittest.TestCase):
 
         mocks["master"].acquire_data = AsyncMock(side_effect=_acquire)
 
-        with _patch_config_manager(state), \
-             patch.object(main, "pymodbus_apply_logging_config"), \
-             patch.object(main, "Em540Master", return_value=mocks["master"]), \
-             patch.object(main, "Em540Slave", return_value=mocks["slave"]), \
-             patch.object(main, "Ts65aSlaveBridge", return_value=mocks["ts65a"]), \
-             patch.object(main, "HABridge"), \
-             patch.object(main.time, "perf_counter", side_effect=_perf_counter) as mock_perf, \
-             patch.object(main.time, "sleep") as mock_sleep:
+        with (
+            _patch_config_manager(state),
+            patch.object(main, "pymodbus_apply_logging_config"),
+            patch.object(main, "Em540Master", return_value=mocks["master"]),
+            patch.object(main, "Em540Slave", return_value=mocks["slave"]),
+            patch.object(main, "Ts65aSlaveBridge", return_value=mocks["ts65a"]),
+            patch.object(main, "HABridge"),
+            patch.object(main.time, "perf_counter", side_effect=_perf_counter) as mock_perf,
+            patch.object(main.asyncio, "sleep", new_callable=AsyncMock),
+        ):
             with self.assertRaises(_LoopBreak):
                 asyncio.run(main.process_loop())
 
         self.assertTrue(mock_perf.called)
-        self.assertTrue(mock_sleep.called)
         self.assertEqual(mocks["master"].acquire_data.await_count, 3)
 
     # ------------------------------------------------------------------
@@ -239,17 +258,55 @@ class TestMainLoopPriority(unittest.TestCase):
 
         mocks["master"].acquire_data = AsyncMock(side_effect=_acquire)
 
-        with _patch_config_manager(state), \
-             patch.object(main, "pymodbus_apply_logging_config"), \
-             patch.object(main, "Em540Master", return_value=mocks["master"]), \
-             patch.object(main, "Em540Slave", return_value=mocks["slave"]), \
-             patch.object(main, "Ts65aSlaveBridge", return_value=mocks["ts65a"]), \
-             patch.object(main, "HABridge"):
+        with (
+            _patch_config_manager(state),
+            patch.object(main, "pymodbus_apply_logging_config"),
+            patch.object(main, "Em540Master", return_value=mocks["master"]),
+            patch.object(main, "Em540Slave", return_value=mocks["slave"]),
+            patch.object(main, "Ts65aSlaveBridge", return_value=mocks["ts65a"]),
+            patch.object(main, "HABridge"),
+        ):
             with self.assertRaises(_LoopBreak):
                 asyncio.run(main.process_loop())
 
         self.assertEqual(mocks["master"].acquire_data.await_count, 3)
         self.assertEqual(acquire_sequence, [1, 2, 3])
+
+    def test_mqtt_startup_failure_does_not_block_tick_loop(self):
+        """MQTT connect scheduling failures must not block process_loop startup or acquisitions."""
+        state = _make_state()
+        state.mqtt.enabled = True
+        mocks = _setup_mocks()
+
+        mqtt_bridge = MagicMock()
+        mqtt_bridge.on_em540_master_stats = MagicMock()
+        mqtt_bridge.on_em540_slave_stats = MagicMock()
+        mqtt_bridge.on_ts65a_slave_stats = MagicMock()
+        mqtt_bridge.connect = MagicMock(side_effect=RuntimeError("should not escape"))
+
+        call_count = {"n": 0}
+
+        async def _acquire():
+            call_count["n"] += 1
+            if call_count["n"] >= 1:
+                raise _LoopBreak()
+            return True
+
+        mocks["master"].acquire_data = AsyncMock(side_effect=_acquire)
+
+        with (
+            _patch_config_manager(state),
+            patch.object(main, "pymodbus_apply_logging_config"),
+            patch.object(main, "Em540Master", return_value=mocks["master"]),
+            patch.object(main, "Em540Slave", return_value=mocks["slave"]),
+            patch.object(main, "Ts65aSlaveBridge", return_value=mocks["ts65a"]),
+            patch.object(main, "HABridge", return_value=mqtt_bridge),
+        ):
+            with self.assertRaises(_LoopBreak):
+                asyncio.run(main.process_loop())
+
+        mocks["master"].add_listener.assert_any_call(mqtt_bridge)
+        self.assertEqual(mocks["master"].acquire_data.await_count, 1)
 
 
 if __name__ == "__main__":

@@ -1,10 +1,8 @@
 import asyncio
-import os
 import threading
-import time
 import unittest
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock, PropertyMock, call, patch
+from unittest.mock import AsyncMock, MagicMock, PropertyMock, patch
 
 from pymodbus import ModbusException
 from pymodbus.exceptions import ModbusIOException
@@ -118,9 +116,7 @@ class TestEm540Master(unittest.TestCase):
         """Requirement 9.4 – ModbusIOException returns False."""
         type(self.mock_client).connected = PropertyMock(return_value=True)
 
-        self.mock_client.read_holding_registers = AsyncMock(
-            side_effect=ModbusIOException("IO error")
-        )
+        self.mock_client.read_holding_registers = AsyncMock(side_effect=ModbusIOException("IO error"))
 
         result = asyncio.run(self.master.acquire_data())
 
@@ -133,9 +129,7 @@ class TestEm540Master(unittest.TestCase):
         """Requirement 9.5 – ModbusException closes client and returns False."""
         type(self.mock_client).connected = PropertyMock(return_value=True)
 
-        self.mock_client.read_holding_registers = AsyncMock(
-            side_effect=ModbusException("connection lost")
-        )
+        self.mock_client.read_holding_registers = AsyncMock(side_effect=ModbusException("connection lost"))
 
         result = asyncio.run(self.master.acquire_data())
 
@@ -151,7 +145,7 @@ class TestEm540Master(unittest.TestCase):
 
         # Build responses that match the expected register counts for each
         # dynamic register group
-        frame = self.master._data.frame
+        frame = self.master.data.frame
         responses = []
         for reg_addr in frame.dynamic_reg_map:
             reg_def = frame.dynamic_reg_map[reg_addr]
@@ -172,7 +166,7 @@ class TestEm540Master(unittest.TestCase):
         """Requirement 10.2 – acquire_data reads all dynamic register groups."""
         type(self.mock_client).connected = PropertyMock(return_value=True)
 
-        frame = self.master._data.frame
+        frame = self.master.data.frame
         responses = []
         for reg_addr in frame.dynamic_reg_map:
             reg_def = frame.dynamic_reg_map[reg_addr]
@@ -186,11 +180,36 @@ class TestEm540Master(unittest.TestCase):
         self.assertTrue(result)
         # Should have been called once per dynamic register group
         expected_calls = len(frame.dynamic_reg_map)
-        self.assertEqual(
-            self.mock_client.read_holding_registers.await_count, expected_calls
-        )
+        self.assertEqual(self.mock_client.read_holding_registers.await_count, expected_calls)
         # Counter should have been incremented
         self.assertEqual(self.master._dyn_reg_read_counter, 1)
+
+    def test_connect_failure_does_not_raise_and_closes_client(self):
+        """Transport connect failures should not escape connect() and should close the client."""
+        self.mock_client.connect = AsyncMock(side_effect=RuntimeError("dial failed"))
+
+        asyncio.run(self.master.connect())
+
+        self.mock_client.close.assert_called_once()
+
+    def test_static_read_is_retried_until_success(self):
+        """Static register reads should retry on later connects until they succeed."""
+        type(self.mock_client).connected = PropertyMock(return_value=True)
+        bad_result = MagicMock()
+        bad_result.isError.return_value = True
+
+        good_results = []
+        for reg_addr in self.master._static_read_plan:
+            static_reg = self.master.data.frame.static_reg_map[reg_addr]
+            good_results.append(_make_successful_result(len(static_reg.values)))
+
+        self.mock_client.read_holding_registers = AsyncMock(side_effect=[bad_result, *good_results])
+
+        asyncio.run(self.master.connect())
+        self.assertFalse(self.master._static_data_valid)
+
+        asyncio.run(self.master.connect())
+        self.assertTrue(self.master._static_data_valid)
 
 
 class TestSkipNRead(unittest.TestCase):
@@ -210,7 +229,7 @@ class TestSkipNRead(unittest.TestCase):
         self.master = Em540Master(self.config)
         self.master._client = self.mock_client
 
-        self.frame = self.master._data.frame
+        self.frame = self.master.data.frame
 
         # Set 0x0500 register to skip_n_read=2 (read every 3rd cycle)
         self.frame.dynamic_reg_map[0x0500].skip_n_read = 2
@@ -235,9 +254,7 @@ class TestSkipNRead(unittest.TestCase):
     # -----------------------------------------------------------------------
     def test_first_cycle_reads_all_registers(self):
         """Requirement 8.1 – First cycle (counter=1) reads all registers."""
-        self.mock_client.read_holding_registers = AsyncMock(
-            side_effect=self._build_responses_for_all()
-        )
+        self.mock_client.read_holding_registers = AsyncMock(side_effect=self._build_responses_for_all())
 
         with patch.object(self.master._condition, "notify"):
             result = asyncio.run(self.master.acquire_data())
@@ -264,9 +281,7 @@ class TestSkipNRead(unittest.TestCase):
         # Cycle 3: counter=3, 3%3=0 → read both
 
         # --- Cycle 1: reads all ---
-        self.mock_client.read_holding_registers = AsyncMock(
-            side_effect=self._build_responses_for_all()
-        )
+        self.mock_client.read_holding_registers = AsyncMock(side_effect=self._build_responses_for_all())
         with patch.object(self.master._condition, "notify"):
             asyncio.run(self.master.acquire_data())
         self.assertEqual(self.master._dyn_reg_read_counter, 1)
@@ -275,9 +290,7 @@ class TestSkipNRead(unittest.TestCase):
         self.mock_client.read_holding_registers.reset_mock()
         # Only need response for 0x0000 since 0x0500 is skipped
         reg_0000 = self.frame.dynamic_reg_map[0x0000]
-        self.mock_client.read_holding_registers = AsyncMock(
-            side_effect=[_make_successful_result(len(reg_0000.values))]
-        )
+        self.mock_client.read_holding_registers = AsyncMock(side_effect=[_make_successful_result(len(reg_0000.values))])
         with patch.object(self.master._condition, "notify"):
             result = asyncio.run(self.master.acquire_data())
 
@@ -290,9 +303,7 @@ class TestSkipNRead(unittest.TestCase):
 
         # --- Cycle 3: counter=3, 3%3=0 → read both ---
         self.mock_client.read_holding_registers.reset_mock()
-        self.mock_client.read_holding_registers = AsyncMock(
-            side_effect=self._build_responses_for_all()
-        )
+        self.mock_client.read_holding_registers = AsyncMock(side_effect=self._build_responses_for_all())
         with patch.object(self.master._condition, "notify"):
             result = asyncio.run(self.master.acquire_data())
 
@@ -315,14 +326,10 @@ class TestSkipNRead(unittest.TestCase):
 
             if cycle == 1:
                 # First cycle reads all
-                self.mock_client.read_holding_registers = AsyncMock(
-                    side_effect=self._build_responses_for_all()
-                )
+                self.mock_client.read_holding_registers = AsyncMock(side_effect=self._build_responses_for_all())
             elif cycle % 3 == 0:
                 # Cycles where 0x0500 is also read (counter % 3 == 0)
-                self.mock_client.read_holding_registers = AsyncMock(
-                    side_effect=self._build_responses_for_all()
-                )
+                self.mock_client.read_holding_registers = AsyncMock(side_effect=self._build_responses_for_all())
             else:
                 # Only 0x0000 is read (0x0500 skipped)
                 reg_0000 = self.frame.dynamic_reg_map[0x0000]
@@ -336,13 +343,11 @@ class TestSkipNRead(unittest.TestCase):
             self.assertTrue(result, f"Cycle {cycle} should succeed")
             # 0x0000 (skip_n_read=0) must always be read
             addresses = self._get_read_addresses()
-            self.assertIn(
-                0x0000, addresses, f"Cycle {cycle}: 0x0000 should always be read"
-            )
+            self.assertIn(0x0000, addresses, f"Cycle {cycle}: 0x0000 should always be read")
 
 
-class TestNotifyLoop(unittest.TestCase):
-    """Validates: Requirements 10.2, 10.3, 10.4"""
+class TestListenerWorker(unittest.TestCase):
+    """Validates listener workers and consumer missed-update diagnostics."""
 
     @patch("app.carlo_gavazzi.em540_master.AsyncModbusTcpClient")
     def setUp(self, mock_tcp_cls):
@@ -350,104 +355,78 @@ class TestNotifyLoop(unittest.TestCase):
         self.mock_client.read_holding_registers = AsyncMock()
         self.mock_client.connect = AsyncMock()
         self.mock_client.close = MagicMock()
+        type(self.mock_client).connected = PropertyMock(return_value=True)
         mock_tcp_cls.return_value = self.mock_client
 
         self.config = _make_config()
         self.master = Em540Master(self.config)
         self.master._client = self.mock_client
 
-    # -----------------------------------------------------------------------
-    # Requirement 10.2: notify thread calls update_from_frame then new_data
-    # -----------------------------------------------------------------------
-    def test_notify_calls_update_from_frame_then_new_data(self):
-        """Requirement 10.2 – Notify thread calls update_from_frame then new_data on listeners."""
-        call_order = []
-        done_event = threading.Event()
+    def _build_responses_for_all(self):
+        responses = []
+        for reg_addr in self.master.data.frame.dynamic_reg_map:
+            reg_def = self.master.data.frame.dynamic_reg_map[reg_addr]
+            responses.append(_make_successful_result(len(reg_def.values)))
+        return responses
 
-        self.master._data.update_from_frame = MagicMock(
-            side_effect=lambda: call_order.append("update_from_frame")
-        )
+    def test_listener_worker_receives_latest_snapshot(self):
+        """Listener worker should process new snapshots from successful acquisitions."""
+        self.mock_client.read_holding_registers = AsyncMock(side_effect=self._build_responses_for_all())
+
+        done_event = threading.Event()
 
         listener = MagicMock(spec=MeterDataListener)
 
-        async def _new_data(data):
-            call_order.append("new_data")
+        async def _new_data(_data):
             done_event.set()
 
         listener.new_data = _new_data
+        listener.read_failed = AsyncMock()
         self.master.add_listener(listener)
 
-        # Trigger the notify loop
-        with self.master._condition:
-            self.master._condition.notify()
+        result = asyncio.run(self.master.acquire_data())
+        self.assertTrue(result)
+        self.assertTrue(done_event.wait(timeout=2), "Listener worker did not process data")
 
-        # Wait for the notify thread to process
-        self.assertTrue(done_event.wait(timeout=2), "Notify thread did not process in time")
-        self.assertEqual(call_order, ["update_from_frame", "new_data"])
+    def test_missed_update_stats_increment_for_slow_consumer(self):
+        """Slow consumers should increment missed-update metrics when sequence jumps occur."""
+        # Read all groups in cycle 1, then only 0x0000 in cycles 2 and 3.
+        reg_0000 = self.master.data.frame.dynamic_reg_map[0x0000]
+        self.master.data.frame.dynamic_reg_map[0x0500].skip_n_read = 2
 
-    # -----------------------------------------------------------------------
-    # Requirement 10.3: listener exception increments error counter
-    # -----------------------------------------------------------------------
-    def test_listener_exception_increments_error_counter(self):
-        """Requirement 10.3 – Listener exception increments error counter, loop continues."""
-        error_count_event = threading.Event()
-        success_event = threading.Event()
-        call_count = {"n": 0}
-
-        def _update_side_effect():
-            call_count["n"] += 1
-            if call_count["n"] == 1:
-                raise RuntimeError("simulated failure")
-            # Second call succeeds — proves the loop continued
-            success_event.set()
-
-        self.master._data.update_from_frame = MagicMock(side_effect=_update_side_effect)
-
-        listener = MagicMock(spec=MeterDataListener)
-        listener.new_data = AsyncMock()
-        self.master.add_listener(listener)
-
-        # First notification: triggers exception
-        with self.master._condition:
-            self.master._condition.notify()
-
-        # Give the thread time to process the first notification
-        time.sleep(0.1)
-
-        # Second notification: should succeed, proving loop continued
-        with self.master._condition:
-            self.master._condition.notify()
-
-        self.assertTrue(success_event.wait(timeout=2), "Notify loop did not continue after error")
-        self.assertEqual(call_count["n"], 2)
-
-    # -----------------------------------------------------------------------
-    # Requirement 10.4: 10+ consecutive errors triggers os._exit(2)
-    # -----------------------------------------------------------------------
-    @patch("app.carlo_gavazzi.em540_master.os._exit")
-    def test_consecutive_errors_trigger_exit(self, mock_exit):
-        """Requirement 10.4 – More than 10 consecutive errors triggers os._exit(2)."""
-        exit_event = threading.Event()
-
-        def _exit_side_effect(code):
-            exit_event.set()
-
-        mock_exit.side_effect = _exit_side_effect
-
-        # Make update_from_frame always raise to accumulate errors
-        self.master._data.update_from_frame = MagicMock(
-            side_effect=RuntimeError("persistent failure")
+        responses_cycle_1 = self._build_responses_for_all()
+        responses_cycle_2 = [_make_successful_result(len(reg_0000.values))]
+        responses_cycle_3 = self._build_responses_for_all()
+        self.mock_client.read_holding_registers = AsyncMock(
+            side_effect=[*responses_cycle_1, *responses_cycle_2, *responses_cycle_3]
         )
 
-        # Trigger 11 notifications to exceed the >10 threshold
-        for _ in range(11):
-            with self.master._condition:
-                self.master._condition.notify()
-            # Small delay to let the thread process each notification
-            time.sleep(0.05)
+        stats_updates = []
+        stats_event = threading.Event()
 
-        self.assertTrue(exit_event.wait(timeout=5), "os._exit(2) was not called after 10+ errors")
-        mock_exit.assert_called_with(2)
+        def _on_stats(stats):
+            stats_updates.append((stats.consumer_missed_updates_total, stats.consumer_max_seq_gap))
+            stats_event.set()
+
+        self.master.add_stats_listener(_on_stats)
+
+        listener = MagicMock(spec=MeterDataListener)
+
+        async def _slow_new_data(_data):
+            await asyncio.sleep(0.2)
+
+        listener.new_data = _slow_new_data
+        listener.read_failed = AsyncMock()
+        self.master.add_listener(listener)
+
+        self.assertTrue(asyncio.run(self.master.acquire_data()))
+        self.assertTrue(asyncio.run(self.master.acquire_data()))
+        self.assertTrue(asyncio.run(self.master.acquire_data()))
+
+        self.assertTrue(stats_event.wait(timeout=2), "Expected missed update stats callback")
+        missed_total, max_gap = stats_updates[-1]
+        self.assertGreaterEqual(missed_total, 1)
+        self.assertGreaterEqual(max_gap, 2)
 
 
 if __name__ == "__main__":
