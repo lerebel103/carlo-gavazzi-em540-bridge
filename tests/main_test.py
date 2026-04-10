@@ -106,6 +106,7 @@ def _setup_mocks():
     mock_master = MagicMock()
     type(mock_master).connected = PropertyMock(return_value=True)
     mock_master.connect = AsyncMock()
+    mock_master.disconnect = AsyncMock()
     mock_master.add_listener = MagicMock()
     mock_master.data = MagicMock()
     mock_master.data.frame = MagicMock()
@@ -307,6 +308,42 @@ class TestMainLoopPriority(unittest.TestCase):
 
         mocks["master"].add_listener.assert_any_call(mqtt_bridge)
         self.assertEqual(mocks["master"].acquire_data.await_count, 1)
+
+    def test_process_loop_cleans_up_background_services_on_exit(self):
+        state = _make_state()
+        state.mqtt.enabled = True
+        mocks = _setup_mocks()
+        mock_cm = MagicMock()
+        mock_cm.load.return_value = state
+        mock_cm.start_flush_loop = MagicMock()
+        mock_cm.stop = MagicMock()
+
+        mqtt_bridge = MagicMock()
+        mqtt_bridge.on_em540_master_stats = MagicMock()
+        mqtt_bridge.on_em540_slave_stats = MagicMock()
+        mqtt_bridge.on_ts65a_slave_stats = MagicMock()
+        mqtt_bridge.connect = MagicMock()
+        mqtt_bridge.stop = MagicMock()
+
+        async def _acquire():
+            raise _LoopBreak()
+
+        mocks["master"].acquire_data = AsyncMock(side_effect=_acquire)
+
+        with (
+            patch.object(main, "config_manager", mock_cm),
+            patch.object(main, "pymodbus_apply_logging_config"),
+            patch.object(main, "Em540Master", return_value=mocks["master"]),
+            patch.object(main, "Em540Slave", return_value=mocks["slave"]),
+            patch.object(main, "Ts65aSlaveBridge", return_value=mocks["ts65a"]),
+            patch.object(main, "HABridge", return_value=mqtt_bridge),
+        ):
+            with self.assertRaises(_LoopBreak):
+                asyncio.run(main.process_loop())
+
+        mqtt_bridge.stop.assert_called_once()
+        mocks["master"].disconnect.assert_awaited_once()
+        mock_cm.stop.assert_called_once()
 
     def test_main_logs_version_on_startup(self):
         """Startup log must include app version exactly once (no double 'v')."""

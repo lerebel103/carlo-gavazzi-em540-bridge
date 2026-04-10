@@ -3,6 +3,8 @@ import json
 from app.carlo_gavazzi.meter_data import MeterData
 from app.version import __version__
 
+HA_AVAILABILITY_TOPIC = "lerebel/sensor/em540_energy_meter_bridge/availability"
+
 
 class Sensor:
     def __init__(
@@ -30,6 +32,7 @@ class Sensor:
         self.unique_id = f"em540_bridge_{self.safe_name}"
         self.advertisement_topic = f"homeassistant/sensor/em540_bridge_{self.safe_name}/config"
         self.entity_category = entity_category
+        self.availability_topic = HA_AVAILABILITY_TOPIC
         self.device = {
             "name": "EM540 Energy Meter Bridge",
             "identifiers": ["em540_bridge"],
@@ -66,6 +69,9 @@ class Sensor:
             "device": self.device,
             "entity_category": self.entity_category,
             "enabled_by_default": self.enabled_by_default,
+            "availability_topic": self.availability_topic,
+            "payload_available": "online",
+            "payload_not_available": "offline",
         }
         # Remove device_class, state_class, unit_of_measurement if None
         if self.device_class is None:

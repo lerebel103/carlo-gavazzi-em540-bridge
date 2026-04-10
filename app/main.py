@@ -35,6 +35,7 @@ async def process_loop():
     em540_master = Em540Master(state.em540_master)
     em540_slave = Em540Slave(state.em540_slave, em540_master.data.frame)
     ts65a_slave = Ts65aSlaveBridge(state.ts65a_slave)
+    mqtt_bridge = None
 
     em540_master.add_listener(em540_slave)
     em540_master.add_listener(ts65a_slave)
@@ -61,31 +62,37 @@ async def process_loop():
     max_reconnect_backoff = 5.0
     next_connect_attempt_time = 0.0
 
-    while True:
-        current_time = time.perf_counter()
-        if current_time >= next_call_time:
-            # If we are late, skip missed ticks instead of executing catch-up bursts.
-            lag = current_time - next_call_time
-            if lag >= read_interval:
-                skipped_ticks = int(lag // read_interval)
-                next_call_time += (skipped_ticks + 1) * read_interval
-            else:
-                next_call_time += read_interval
+    try:
+        while True:
+            current_time = time.perf_counter()
+            if current_time >= next_call_time:
+                # If we are late, skip missed ticks instead of executing catch-up bursts.
+                lag = current_time - next_call_time
+                if lag >= read_interval:
+                    skipped_ticks = int(lag // read_interval)
+                    next_call_time += (skipped_ticks + 1) * read_interval
+                else:
+                    next_call_time += read_interval
 
-            if not em540_master.connected:
-                if current_time >= next_connect_attempt_time:
-                    await em540_master.connect()
-                    if em540_master.connected:
-                        reconnect_backoff = read_interval
-                        next_connect_attempt_time = 0.0
-                    else:
-                        next_connect_attempt_time = time.perf_counter() + reconnect_backoff
-                        reconnect_backoff = min(reconnect_backoff * 2, max_reconnect_backoff)
-            await em540_master.acquire_data()
+                if not em540_master.connected:
+                    if current_time >= next_connect_attempt_time:
+                        await em540_master.connect()
+                        if em540_master.connected:
+                            reconnect_backoff = read_interval
+                            next_connect_attempt_time = 0.0
+                        else:
+                            next_connect_attempt_time = time.perf_counter() + reconnect_backoff
+                            reconnect_backoff = min(reconnect_backoff * 2, max_reconnect_backoff)
+                await em540_master.acquire_data()
 
-        sleep_for = max(0, next_call_time - time.perf_counter() - 0.0001)
-        if sleep_for > 0:
-            await asyncio.sleep(sleep_for)
+            sleep_for = max(0, next_call_time - time.perf_counter() - 0.0001)
+            if sleep_for > 0:
+                await asyncio.sleep(sleep_for)
+    finally:
+        if mqtt_bridge is not None:
+            mqtt_bridge.stop()
+        await em540_master.disconnect()
+        config_manager.stop()
 
 
 async def main():

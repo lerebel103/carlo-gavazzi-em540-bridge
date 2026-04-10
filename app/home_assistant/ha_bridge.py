@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import random
 import threading
+from dataclasses import dataclass, field
 from datetime import datetime
 
 from paho.mqtt import client as mqtt_client
@@ -15,12 +16,55 @@ from app.config import AppState, ConfigManager, MqttConfig
 from app.fronius.ts65a_slave_stats import Ts65aSlaveStats
 from app.home_assistant.ha_config_entities import HAConfigEntities
 from app.home_assistant.ha_diagnostics import DIAGNOSTICS_INTERVAL, HADiagnostics
-from app.home_assistant.ha_sensors import EnergyMeterSensor
+from app.home_assistant.ha_sensors import HA_AVAILABILITY_TOPIC, EnergyMeterSensor
 
 FIRST_RECONNECT_DELAY = 1
 MAX_RECONNECT_DELAY = 60
 
 logger = logging.getLogger("ha-bridge")
+
+
+@dataclass(slots=True)
+class _HASnapshotPhase:
+    line_line_voltage: float = 0.0
+    line_neutral_voltage: float = 0.0
+    current: float = 0.0
+    power: float = 0.0
+    apparent_power: float = 0.0
+    reactive_power: float = 0.0
+    power_factor: float = 0.0
+
+
+@dataclass(slots=True)
+class _HASnapshotSystem:
+    line_neutral_voltage: float = 0.0
+    line_line_voltage: float = 0.0
+    power: float = 0.0
+    apparent_power: float = 0.0
+    reactive_power: float = 0.0
+    power_factor: float = 0.0
+    frequency: float = 0.0
+    An: float = 0.0
+
+
+@dataclass(slots=True)
+class _HASnapshotOtherEnergies:
+    kwh_plus_total: float = 0.0
+    kvarh_plus_total: float = 0.0
+    kwh_neg_total: float = 0.0
+    kvarh_neg_total: float = 0.0
+    kvah_total: float = 0.0
+    run_hour_meter: float = 0.0
+
+
+@dataclass(slots=True)
+class _HASnapshot:
+    timestamp: float = 0.0
+    system: _HASnapshotSystem = field(default_factory=_HASnapshotSystem)
+    phases: list[_HASnapshotPhase] = field(
+        default_factory=lambda: [_HASnapshotPhase(), _HASnapshotPhase(), _HASnapshotPhase()]
+    )
+    other_energies: _HASnapshotOtherEnergies = field(default_factory=_HASnapshotOtherEnergies)
 
 
 class HABridge(MeterDataListener):
@@ -35,6 +79,7 @@ class HABridge(MeterDataListener):
         config_manager: ConfigManager | None = None,
     ):
         client_id = f"publish-{random.randint(0, 1000)}"
+        self._mqtt_config = conf
         self.host = conf.host
         self.port = conf.port
         self.client = mqtt_client.Client(CallbackAPIVersion.VERSION2, client_id, userdata=self)
@@ -54,13 +99,23 @@ class HABridge(MeterDataListener):
         self._last_stats_update: float = 0
         self._config_entities: HAConfigEntities | None = None
         self._last_payload_by_topic: dict[str, str] = {}
+        self._stop_event = threading.Event()
+        self._front_snapshot = _HASnapshot()
+        self._back_snapshot = _HASnapshot()
+        self._snapshot_pending = False
+        self._data_available = False
+        self._availability_dirty = False
 
         if state is not None and config_manager is not None:
             self._config_entities = HAConfigEntities(state, self.client, config_manager)
 
         # Background thread to handle updates outside of asyncio loop
         self._condition: threading.Condition = threading.Condition()
-        self._notify_thread: threading.Thread = threading.Thread(target=self._notify_loop, daemon=True)
+        self._notify_thread: threading.Thread = threading.Thread(
+            target=self._notify_loop,
+            daemon=True,
+            name="ha-bridge-notify",
+        )
         self._notify_thread.start()
 
         logger.setLevel(conf.log_level)
@@ -77,6 +132,24 @@ class HABridge(MeterDataListener):
             self.client.connect_async(self.host, self.port)
         except Exception as err:
             logger.warning("Failed to schedule MQTT connection: %s", err)
+
+    def stop(self) -> None:
+        self._stop_event.set()
+        with self._condition:
+            self._condition.notify_all()
+
+        if self._loop_started:
+            try:
+                self.client.disconnect()
+            except Exception:
+                logger.debug("Failed to disconnect MQTT client cleanly", exc_info=True)
+            try:
+                self.client.loop_stop()
+            except Exception:
+                logger.debug("Failed to stop MQTT client loop cleanly", exc_info=True)
+            self._loop_started = False
+
+        self._notify_thread.join(timeout=1)
 
     @staticmethod
     def on_disconnect(client, userdata, flags, rc, props):
@@ -98,6 +171,7 @@ class HABridge(MeterDataListener):
 
             # Great advertise sensors
             userdata.advertise()
+            userdata._publish_availability(client)
 
             # Subscribe config entities and publish current state values
             if userdata._config_entities is not None:
@@ -124,17 +198,20 @@ class HABridge(MeterDataListener):
             self._last_payload_by_topic[topic] = msg_str
 
     async def new_data(self, data: MeterData):
-        self._diagnostics.new_data(data)
+        self._set_data_available(True)
 
         # Update sensor if enough time has passed
         if data.timestamp - self._last_update > self._update_interval:
             self._last_update = data.timestamp
-            self.sensors.update(data)
             with self._condition:
+                self._copy_snapshot(data, self._back_snapshot)
+                self._front_snapshot, self._back_snapshot = self._back_snapshot, self._front_snapshot
+                self._snapshot_pending = True
                 self._condition.notify_all()
 
     async def read_failed(self):
         self._diagnostics.read_failed()
+        self._set_data_available(False)
 
     def advertise(self):
         payloads = self.sensors.advertise_data()
@@ -164,25 +241,89 @@ class HABridge(MeterDataListener):
 
     def _notify_loop(self) -> None:
         """Background thread to publish sensor data when notified of new data"""
-        while True:
+        while not self._stop_event.is_set():
             with self._condition:
-                self._condition.wait()
+                while not self._snapshot_pending and not self._availability_dirty and not self._stop_event.is_set():
+                    self._condition.wait()
 
-                # Only publish sensor data if enable_ha_publish is True
-                if self._state.mqtt.enable_ha_publish:
-                    # Now publish all sensor data
-                    topic, payload = self.sensors.mqtt_data()
+                if self._stop_event.is_set():
+                    return
+
+                snapshot = self._front_snapshot
+                availability_dirty = self._availability_dirty
+                self._snapshot_pending = False
+                self._availability_dirty = False
+
+            if availability_dirty:
+                self._publish_availability()
+
+            if snapshot.timestamp > 0:
+                self._diagnostics.new_data(snapshot)
+                self.sensors.update(snapshot)
+
+            # Only publish sensor data if enable_ha_publish is True and upstream data is available
+            if snapshot.timestamp > 0 and self._mqtt_config.enable_ha_publish and self._data_available:
+                # Now publish all sensor data
+                topic, payload = self.sensors.mqtt_data()
+                try:
+                    self.publish(topic, payload)
+                except Exception as err:
+                    logger.error(f"Failed to publish sensor data on topic {topic}: {err}")
+
+                # Do the same with diagnostics, if we are ready for an update
+                now = datetime.now().timestamp()
+                if self._last_stats_update == 0 or (now - self._last_stats_update) > DIAGNOSTICS_INTERVAL:
+                    self._last_stats_update = now
+                    topic, payload = self._diagnostics.mqtt_data()
                     try:
                         self.publish(topic, payload)
                     except Exception as err:
-                        logger.error(f"Failed to publish sensor data on topic {topic}: {err}")
+                        logger.error(f"Failed to publish diagnostics data on topic {topic}: {err}")
 
-                    # Do the same with diagnostics, if we are ready for an update
-                    now = datetime.now().timestamp()
-                    if self._last_stats_update == 0 or (now - self._last_stats_update) > DIAGNOSTICS_INTERVAL:
-                        self._last_stats_update = now
-                        topic, payload = self._diagnostics.mqtt_data()
-                        try:
-                            self.publish(topic, payload)
-                        except Exception as err:
-                            logger.error(f"Failed to publish diagnostics data on topic {topic}: {err}")
+    def _set_data_available(self, available: bool) -> None:
+        if self._data_available == available:
+            return
+
+        self._data_available = available
+        with self._condition:
+            self._availability_dirty = True
+            self._condition.notify_all()
+
+    def _publish_availability(self, client: mqtt_client.Client | None = None) -> None:
+        payload = "online" if self._data_available else "offline"
+        try:
+            if client is not None:
+                client.publish(HA_AVAILABILITY_TOPIC, payload, retain=True)
+                self._last_payload_by_topic[HA_AVAILABILITY_TOPIC] = payload
+            else:
+                self.publish(HA_AVAILABILITY_TOPIC, payload, retain=True)
+        except Exception as err:
+            logger.error(f"Failed to publish availability on topic {HA_AVAILABILITY_TOPIC}: {err}")
+
+    def _copy_snapshot(self, data: MeterData, target: _HASnapshot) -> None:
+        target.timestamp = data.timestamp
+
+        target.system.line_neutral_voltage = data.system.line_neutral_voltage
+        target.system.line_line_voltage = data.system.line_line_voltage
+        target.system.power = data.system.power
+        target.system.apparent_power = data.system.apparent_power
+        target.system.reactive_power = data.system.reactive_power
+        target.system.power_factor = data.system.power_factor
+        target.system.frequency = data.system.frequency
+        target.system.An = data.system.An
+
+        for source_phase, target_phase in zip(data.phases, target.phases):
+            target_phase.line_line_voltage = source_phase.line_line_voltage
+            target_phase.line_neutral_voltage = source_phase.line_neutral_voltage
+            target_phase.current = source_phase.current
+            target_phase.power = source_phase.power
+            target_phase.apparent_power = source_phase.apparent_power
+            target_phase.reactive_power = source_phase.reactive_power
+            target_phase.power_factor = source_phase.power_factor
+
+        target.other_energies.kwh_plus_total = data.other_energies.kwh_plus_total
+        target.other_energies.kvarh_plus_total = data.other_energies.kvarh_plus_total
+        target.other_energies.kwh_neg_total = data.other_energies.kwh_neg_total
+        target.other_energies.kvarh_neg_total = data.other_energies.kvarh_neg_total
+        target.other_energies.kvah_total = data.other_energies.kvah_total
+        target.other_energies.run_hour_meter = data.other_energies.run_hour_meter
