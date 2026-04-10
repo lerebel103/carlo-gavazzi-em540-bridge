@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import fields as dc_fields
+from unittest.mock import patch
 
 import pytest
 import yaml
@@ -954,13 +955,13 @@ def test_property_debounce_guarantee(num_calls):
     write to disk until at least 5 seconds have elapsed since the most
     recent schedule_persist() call.
 
-    Strategy: we exercise the flush loop's debounce logic without actually
-    waiting 5 real seconds.  We issue N schedule_persist() calls, then
-    verify two invariants:
+    Strategy: we exercise the real flush-loop logic with virtual time and a
+    controlled stop event, so the property test runs fast without real sleep.
+    We issue N schedule_persist() calls, then verify two invariants:
 
-    A) When _last_dirty is recent (< 5s ago), the flush loop does NOT call
-       _write() during a short observation window.
-    B) When _last_dirty is backdated (>= 5s ago), the flush loop DOES call
+     A) When _last_dirty is recent (< 5s ago), the flush loop does NOT call
+         _write() before debounce is reached.
+     B) When _last_dirty is backdated (>= 5s ago), the flush loop DOES call
        _write(), and the write timestamp is at least 5s after _last_dirty.
     """
     import pathlib
@@ -992,53 +993,80 @@ def test_property_debounce_guarantee(num_calls):
         cm = ConfigManager(str(p))
         cm.load()
 
+        # Virtual clock used by app.config.time.monotonic
+        clock = {"t": 1000.0}
+
         # Record timestamps when _write() is called
         write_timestamps: list[float] = []
-        original_write = cm._write
 
-        def recording_write():
-            write_timestamps.append(time.monotonic())
-            original_write()
+        class _ControlledStopEvent:
+            """Minimal event implementation for deterministic _flush_loop runs."""
 
-        cm._write = recording_write
+            def __init__(self, on_wait=None):
+                self._is_set = False
+                self._wait_calls = 0
+                self._on_wait = on_wait
+
+            def is_set(self):
+                return self._is_set
+
+            def wait(self, seconds):
+                self._wait_calls += 1
+                clock["t"] += seconds
+                if self._on_wait is not None:
+                    self._on_wait(self, self._wait_calls, seconds)
+                return self._is_set
+
+            def set(self):
+                self._is_set = True
 
         # Issue N schedule_persist() calls.
         for _ in range(num_calls):
             cm.schedule_persist()
 
         # --- Case A: debounce NOT yet elapsed → _write must NOT fire ---
-        # Set _last_dirty to "just now" so elapsed ≈ 0.
+        # Set _last_dirty to "just now" so elapsed < 5 for the first check.
         cm._dirty = True
-        cm._last_dirty = time.monotonic()
+        cm._last_dirty = clock["t"]
 
-        # Simulate one iteration of the flush loop's decision logic.
-        # The loop checks: elapsed = monotonic() - _last_dirty; if < 5 → skip.
-        elapsed_a = time.monotonic() - cm._last_dirty
-        assert elapsed_a < 5, "Test setup error: elapsed should be < 5s"
-        # The flush loop would not call _write() here — verified by logic.
-        # We also confirm via a short live run (the loop sleeps 1s per tick,
-        # so 1.5s is enough for one tick without reaching the 5s debounce).
-        cm.start_flush_loop()
-        time.sleep(1.2)
-        # Prevent the stop_event from waking the debounce wait and causing
-        # a write: clear dirty before stopping so the loop's post-wait
-        # dirty check sees False.
-        cm._dirty = False
-        cm.stop()
+        def _on_wait_case_a(event, wait_calls, _seconds):
+            # First wait is the periodic 1s tick. Second wait is debounce
+            # remaining time. Before continuing, clear dirty and stop to model
+            # shutdown during debounce without allowing a write.
+            if wait_calls == 2:
+                cm._dirty = False
+                event.set()
+
+        cm._stop_event = _ControlledStopEvent(on_wait=_on_wait_case_a)
+
+        def _recording_write_case_a():
+            write_timestamps.append(clock["t"])
+
+        cm._write = _recording_write_case_a
+
+        with patch("app.config.time.monotonic", side_effect=lambda: clock["t"]):
+            cm._flush_loop()
 
         assert len(write_timestamps) == 0, (
-            f"_write() was called {len(write_timestamps)} time(s) within 1.2s "
-            f"of schedule_persist(), violating the 5s debounce guarantee"
+            f"_write() was called {len(write_timestamps)} time(s) before debounce elapsed, "
+            f"violating the 5s debounce guarantee"
         )
 
         # --- Case B: debounce elapsed → _write should fire ---
         write_timestamps.clear()
         cm._dirty = True
-        cm._last_dirty = time.monotonic() - 10  # 10s ago → well past debounce
+        cm._last_dirty = clock["t"] - 10  # 10s ago → well past debounce
 
-        cm.start_flush_loop()
-        time.sleep(2)
-        cm.stop()
+        cm._stop_event = _ControlledStopEvent()
+
+        def _recording_write_case_b():
+            write_timestamps.append(clock["t"])
+            cm._stop_event.set()
+
+        cm._write = _recording_write_case_b
+
+        with patch("app.config.time.monotonic", side_effect=lambda: clock["t"]):
+            cm._flush_loop()
 
         assert len(write_timestamps) >= 1, "_write() was never called even though debounce period had elapsed"
 

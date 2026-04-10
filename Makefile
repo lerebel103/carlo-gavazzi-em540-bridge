@@ -3,6 +3,7 @@ VERSION := $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev
 IMAGE_NAME = em540-bridge
 DOCKER_USER = lerebel103
 PYTHON ?= python3
+PYTEST_XDIST_AVAILABLE := $(shell $(PYTHON) -c "import importlib.util,sys; sys.stdout.write('1' if importlib.util.find_spec('xdist') else '0')")
 
 .PHONY: help
 help:
@@ -12,7 +13,9 @@ help:
 	@echo "  up/start    - Start with docker-compose"
 	@echo "  down/stop   - Stop with docker-compose"
 	@echo "  logs        - View application logs"
-	@echo "  test        - Run all tests"
+	@echo "  test        - Run tests (parallel when pytest-xdist is available)"
+	@echo "  test-serial - Run all tests in serial"
+	@echo "  test-parallel - Run all tests in parallel (-n auto)"
 	@echo "  lint        - Run linting checks"
 	@echo "  format      - Format code"
 	@echo "  clean       - Clean up Docker resources"
@@ -48,7 +51,21 @@ logs:
 
 .PHONY: test
 test:
+	@if [ "$(PYTEST_XDIST_AVAILABLE)" = "1" ]; then \
+		echo "Running tests in parallel (-n auto)"; \
+		$(PYTHON) -m pytest tests/ -v -n auto; \
+	else \
+		echo "pytest-xdist not installed; running tests in serial"; \
+		$(PYTHON) -m pytest tests/ -v; \
+	fi
+
+.PHONY: test-serial
+test-serial:
 	$(PYTHON) -m pytest tests/ -v
+
+.PHONY: test-parallel
+test-parallel:
+	$(PYTHON) -m pytest tests/ -v -n auto
 
 .PHONY: lint
 lint:

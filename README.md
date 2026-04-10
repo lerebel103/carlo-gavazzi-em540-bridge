@@ -42,6 +42,13 @@ readings (see `config-default.yaml`).
 5. Run the bridge: `python -m app` (or `make up` for Docker).
 6. For Home Assistant, point the bridge at the MQTT broker used by HA — see the `mqtt` section in the config file.
 
+## Development
+
+- Install development dependencies: `pip install -r requirements-dev.txt`
+- Run tests (auto parallel when available): `make test`
+- Force serial tests: `make test-serial`
+- Force parallel tests: `make test-parallel`
+
 ## Home Assistant Integration
 
 The following measurement sensors are published to Home Assistant and refreshed at the interval configured in the config file:
