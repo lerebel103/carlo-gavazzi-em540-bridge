@@ -1,6 +1,8 @@
 # Carlo Gavazzi EM540 Energy Meter Modbus Bridge
 
-## Overview
+[![GitHub](https://img.shields.io/badge/GitHub-lerebel103%2Fcarlo--gavazzi--em540--bridge-blue?logo=github)](https://github.com/lerebel103/carlo-gavazzi-em540-bridge)
+[![Docker](https://img.shields.io/badge/Docker-lerebel103%2Fcarlo--gavazzi--em540--bridge-blue?logo=docker)](https://hub.docker.com/r/lerebel103/carlo-gavazzi-em540-bridge)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 Bridges a single Carlo Gavazzi EM540/EM530 energy meter to multiple downstream consumers simultaneously.
 
@@ -48,6 +50,10 @@ readings (see `config-default.yaml`).
 - Run tests (auto parallel when available): `make test`
 - Force serial tests: `make test-serial`
 - Force parallel tests: `make test-parallel`
+
+## Changelog
+
+See [CHANGELOG.md](CHANGELOG.md) for version history and detailed release notes.
 
 ## Home Assistant Integration
 
@@ -123,7 +129,10 @@ The following diagnostic sensors are also published (entity category: `diagnosti
 | TS65A Stale Data Age               | ms   | duration     | measurement | 1         |
 | TS65A Dropped Stale Requests       |      |              | measurement | 0         |
 
-<img src="./media/HA%20Diagnostics.png" width=200>
+<imGitHub Repository](https://github.com/lerebel103/carlo-gavazzi-em540-bridge)
+- [Docker Hub Image](https://hub.docker.com/r/lerebel103/carlo-gavazzi-em540-bridge)
+- [Changelog](CHANGELOG.md)
+- [g src="./media/HA%20Diagnostics.png" width=200>
 
 ## References
 

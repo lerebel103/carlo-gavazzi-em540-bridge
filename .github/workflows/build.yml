@@ -113,29 +113,47 @@ jobs:
       - name: Generate changelog
         id: changelog
         run: |
-          PREV_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
-          if [ -z "$PREV_TAG" ]; then
-            CHANGES=$(git log --oneline --no-decorate)
+          TAG="${GITHUB_REF_NAME}"
+          
+          # Extract changelog section for this release from CHANGELOG.md
+          if grep -q "## \[$TAG\]" CHANGELOG.md; then
+            # Extract from the release section header to the next major section
+            CHANGELOG_SECTION=$(sed -n "/^## \[$TAG\]/,/^## \[/p" CHANGELOG.md | sed '$ d')
+            echo "section_found=true" >> "$GITHUB_OUTPUT"
+            echo "changelog<<EOF" >> "$GITHUB_OUTPUT"
+            echo "$CHANGELOG_SECTION" >> "$GITHUB_OUTPUT"
+            echo "EOF" >> "$GITHUB_OUTPUT"
           else
-            CHANGES=$(git log --oneline --no-decorate ${PREV_TAG}..HEAD)
+            # Fallback to git log if CHANGELOG.md entry not found
+            echo "section_found=false" >> "$GITHUB_OUTPUT"
+            PREV_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
+            if [ -z "$PREV_TAG" ]; then
+              CHANGES=$(git log --oneline --no-decorate)
+            else
+              CHANGES=$(git log --oneline --no-decorate ${PREV_TAG}..HEAD)
+            fi
+            echo "changelog<<EOF" >> "$GITHUB_OUTPUT"
+            echo "## Git Commits" >> "$GITHUB_OUTPUT"
+            echo "$CHANGES" >> "$GITHUB_OUTPUT"
+            echo "EOF" >> "$GITHUB_OUTPUT"
           fi
-          echo "changes<<EOF" >> "$GITHUB_OUTPUT"
-          echo "$CHANGES" >> "$GITHUB_OUTPUT"
-          echo "EOF" >> "$GITHUB_OUTPUT"
 
       - name: Create or update GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           BODY=$(cat <<'BODY_EOF'
-          ## Changes
-          ${{ steps.changelog.outputs.changes }}
+          ${{ steps.changelog.outputs.changelog }}
 
           ## Docker Images
           ```
           docker pull lerebel103/carlo-gavazzi-em540-bridge:${{ github.ref_name }}
           docker pull lerebel103/carlo-gavazzi-em540-bridge:latest
           ```
+
+          ---
+
+          For more details, see [CHANGELOG.md](https://github.com/lerebel103/carlo-gavazzi-em540-bridge/blob/${{ github.ref_name }}/CHANGELOG.md) or the repository's [releases page](https://github.com/lerebel103/carlo-gavazzi-em540-bridge/releases).
           BODY_EOF
           )
 

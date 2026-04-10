@@ -4,6 +4,15 @@ FROM python:3.14-slim
 # Set working directory
 WORKDIR /app
 
+# Metadata labels for Docker Hub
+LABEL org.opencontainers.image.title="Carlo Gavazzi EM540 Energy Meter Modbus Bridge"
+LABEL org.opencontainers.image.description="Bridges a Carlo Gavazzi EM540/EM530 meter to Modbus, MQTT Home Assistant, and Fronius TS-65-A emulation"
+LABEL org.opencontainers.image.url="https://github.com/lerebel103/carlo-gavazzi-em540-bridge"
+LABEL org.opencontainers.image.source="https://github.com/lerebel103/carlo-gavazzi-em540-bridge"
+LABEL org.opencontainers.image.documentation="https://github.com/lerebel103/carlo-gavazzi-em540-bridge#readme"
+LABEL org.opencontainers.image.vendor="lerebel103"
+LABEL org.opencontainers.image.licenses="MIT"
+
 # Set Python to unbuffered mode for real-time logging in containers
 ENV PYTHONUNBUFFERED=1
 
