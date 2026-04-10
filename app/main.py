@@ -11,6 +11,7 @@ from app.carlo_gavazzi.em540_slave_bridge import Em540Slave
 from app.config import ConfigManager
 from app.fronius.ts65a_slave_bridge import Ts65aSlaveBridge
 from app.home_assistant.ha_bridge import HABridge
+from app.version import version_for_display
 
 logger = logging.getLogger()
 config_manager = None
@@ -93,5 +94,5 @@ async def main():
     config_manager = ConfigManager(args.config)
     state = config_manager.load()
     logging.basicConfig(level=state.root_log_level)
-    logger.info("Starting EM540 Energy Meter Bridge")
+    logger.info("Starting EM540 Energy Meter Bridge (%s)", version_for_display())
     await process_loop()

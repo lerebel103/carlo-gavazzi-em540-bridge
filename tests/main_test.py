@@ -308,6 +308,26 @@ class TestMainLoopPriority(unittest.TestCase):
         mocks["master"].add_listener.assert_any_call(mqtt_bridge)
         self.assertEqual(mocks["master"].acquire_data.await_count, 1)
 
+    def test_main_logs_version_on_startup(self):
+        """Startup log must include app version exactly once (no double 'v')."""
+        state = _make_state()
+
+        with (
+            patch.object(main, "parse_args", return_value=SimpleNamespace(config="config.yaml")),
+            patch.object(main, "ConfigManager") as mock_cm_cls,
+            patch.object(main.logging, "basicConfig"),
+            patch.object(main, "process_loop", new_callable=AsyncMock),
+            patch.object(main, "version_for_display", return_value="v1.2.3"),
+            patch.object(main.logger, "info") as mock_logger_info,
+        ):
+            mock_cm = MagicMock()
+            mock_cm.load.return_value = state
+            mock_cm_cls.return_value = mock_cm
+
+            asyncio.run(main.main())
+
+        mock_logger_info.assert_any_call("Starting EM540 Energy Meter Bridge (%s)", "v1.2.3")
+
 
 if __name__ == "__main__":
     unittest.main()
