@@ -4,6 +4,9 @@ FROM python:3.14-slim
 # Set working directory
 WORKDIR /app
 
+# Set Python to unbuffered mode for real-time logging in containers
+ENV PYTHONUNBUFFERED=1
+
 # Create non-root user for security
 RUN groupadd -r lerebel103 && useradd -r -g lerebel103 lerebel103
 
@@ -18,10 +21,17 @@ COPY app/ ./app/
 
 # Inject version from build arg (set by Makefile / CI from git tag)
 ARG VERSION=dev
-RUN printf '"""Version of the EM540 bridge integration."""\n\n__version__ = "%s"\n' "$VERSION" > app/version.py
+ENV EM540_BRIDGE_VERSION=${VERSION}
 
 # Set permissions
 RUN chown -R lerebel103:lerebel103 /app
+
+# Expose Modbus and emulation ports
+EXPOSE 5001 5002 5003
+
+# Define healthcheck: ensure app process is running
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+  CMD ps aux | grep -v grep | grep -q 'python -m app' || exit 1
 
 # Switch to non-root user
 USER lerebel103

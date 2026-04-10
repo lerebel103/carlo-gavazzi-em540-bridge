@@ -6,18 +6,40 @@ services:
       args:
         VERSION: ${VERSION:-dev}
     container_name: em540-bridge
-    stdin_open: true
-    privileged: false
-    tty: true
     restart: unless-stopped
     volumes:
       - ./config.yaml:/etc/em540-bridge/config.yaml
     environment:
-      - TZ="Australia/Perth"
+      TZ: Australia/Perth
     ports:
-      - 5002:5002
-      - 5003:5003
-      - 5004:5004
+      - 5001:5001  # Modbus TCP
+      - 5002:5002  # Modbus RTU-over-TCP
+      - 5003:5003  # Fronius TS-65-A emulation
+    # Resource limits (adjust based on your hardware)
+    deploy:
+      resources:
+        limits:
+          cpus: '1'
+          memory: 256M
+        reservations:
+          cpus: '0.5'
+          memory: 128M
+    # Container logging (limit log file size to prevent disk bloat)
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: 3
+    # Healthcheck with process monitoring (Docker will restart if unhealthy)
+    healthcheck:
+      test: ps aux | grep -v grep | grep -q 'python -m app' || exit 1
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    # Uncomment the following for development/debugging (interactive shell access)
+    # stdin_open: true
+    # tty: true
     #devices:
         # Adjust according to your setup, if using a USB to RS485 adapter
         #- /dev/ttyUSB0:/dev/ttyUSB0
