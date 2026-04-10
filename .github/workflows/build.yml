@@ -11,7 +11,7 @@ permissions:
   contents: write
 
 env:
-  IMAGE_NAME: lerebel103/em540-bridge
+  IMAGE_NAME: lerebel103/carlo-gavazzi-em540-bridge
 
 jobs:
   build:
@@ -133,8 +133,8 @@ jobs:
 
           ## Docker Images
           ```
-          docker pull lerebel103/em540-bridge:${{ github.ref_name }}
-          docker pull lerebel103/em540-bridge:latest
+          docker pull lerebel103/carlo-gavazzi-em540-bridge:${{ github.ref_name }}
+          docker pull lerebel103/carlo-gavazzi-em540-bridge:latest
           ```
           BODY_EOF
           )

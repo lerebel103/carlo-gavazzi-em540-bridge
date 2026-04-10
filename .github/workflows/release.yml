@@ -37,7 +37,8 @@ jobs:
 
           ## Docker Image
           ```
-          docker pull lerebel103/em540-bridge:${{ github.ref_name }}
+          docker pull lerebel103/carlo-gavazzi-em540-bridge:${{ github.ref_name }}
+          docker pull lerebel103/carlo-gavazzi-em540-bridge:latest
           ```
           BODY_EOF
           )

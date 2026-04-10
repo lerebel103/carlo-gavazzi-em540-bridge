@@ -1,6 +1,6 @@
 services:
   em540-bridge:
-    image: lerebel103/em540-bridge:latest
+    image: lerebel103/carlo-gavazzi-em540-bridge:latest
     build:
       context: .
       args:

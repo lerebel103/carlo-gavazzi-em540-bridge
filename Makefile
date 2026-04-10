@@ -1,6 +1,6 @@
 # Variables
 VERSION := $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
-IMAGE_NAME = em540-bridge
+IMAGE_NAME = carlo-gavazzi-em540-bridge
 DOCKER_USER = lerebel103
 PYTHON ?= python3
 PYTEST_XDIST_AVAILABLE := $(shell $(PYTHON) -c "import importlib.util,sys; sys.stdout.write('1' if importlib.util.find_spec('xdist') else '0')")
