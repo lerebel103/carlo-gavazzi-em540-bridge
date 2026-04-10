@@ -155,7 +155,7 @@ The following diagnostic sensors are also published (entity category: `diagnosti
 
 ## Home Assistant Diagnostics Screenshot
 
-![Home Assistant diagnostics](media/HA%20Diagnostics.png)
+<img src="media/HA%20Diagnostics.png" alt="Home Assistant diagnostics" width="420" />
 
 ## References
 
