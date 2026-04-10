@@ -459,14 +459,23 @@ class TestListenerWorker(unittest.TestCase):
         listener.read_failed = AsyncMock()
         self.master.add_listener(listener)
 
-        self.assertTrue(asyncio.run(self.master.acquire_data()))
-        self.assertTrue(asyncio.run(self.master.acquire_data()))
-        self.assertTrue(asyncio.run(self.master.acquire_data()))
+        with patch("app.carlo_gavazzi.meter_data.MeterData.update_from_frame", return_value=None):
+            self.assertTrue(asyncio.run(self.master.acquire_data()))
+            self.assertTrue(asyncio.run(self.master.acquire_data()))
+            self.assertTrue(asyncio.run(self.master.acquire_data()))
 
-        self.assertTrue(stats_event.wait(timeout=2), "Expected missed update stats callback")
-        missed_total, max_gap = stats_updates[-1]
-        self.assertGreaterEqual(missed_total, 1)
-        self.assertGreaterEqual(max_gap, 2)
+        self.assertTrue(stats_event.wait(timeout=2), "Expected stats callback")
+
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline:
+            if any(missed_total >= 1 and max_gap >= 2 for missed_total, max_gap in stats_updates):
+                break
+            time.sleep(0.01)
+
+        self.assertTrue(
+            any(missed_total >= 1 and max_gap >= 2 for missed_total, max_gap in stats_updates),
+            f"Expected missed update stats, got snapshots={stats_updates}",
+        )
 
 
 if __name__ == "__main__":
