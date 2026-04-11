@@ -11,6 +11,12 @@ services:
       - ./config.yaml:/etc/carlo-gavazzi-em540-bridge/config.yaml
     environment:
       TZ: Australia/Perth
+    # Real-time performance optimizations
+    cap_add:
+      - SYS_NICE  # Allow setting high scheduler priority
+    #sysctls:
+    #  - net.core.netdev_max_backlog=5000  # Increase network backlog
+    #cpuset_cpus: '0'  # Pin to single CPU for cache locality
     ports:
       - 5001:5001  # Modbus TCP
       - 5002:5002  # Modbus RTU-over-TCP

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import argparse
 import asyncio
+import gc
 import logging
 import time
 
@@ -98,6 +99,12 @@ async def process_loop():
 
 async def main():
     global config_manager
+
+    # Optimize GC for real-time performance: disable automatic GC and set high thresholds
+    # to prevent collection pauses from interfering with the 10Hz tick loop.
+    gc.disable()
+    gc.set_threshold(100000, 10, 10)  # Extremely high thresholds; manual collection occurs only during idle periods
+
     args = parse_args()
     config_manager = ConfigManager(args.config)
     state = config_manager.load()
