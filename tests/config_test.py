@@ -18,6 +18,7 @@ from app.config import (
     ConfigManager,
     Em540MasterConfig,
     Em540SlaveConfig,
+    GoodweGm3000SlaveConfig,
     MqttConfig,
     Ts65aSlaveConfig,
 )
@@ -30,6 +31,7 @@ def valid_yaml(tmp_path):
         "em540_master": {"mode": "tcp", "host": "10.0.0.1", "port": 502},
         "em540_slave": {"host": "0.0.0.0"},
         "ts65a_slave": {"port": 5003},
+        "goodwe_gm3000_slave": {"socket_port": 5012, "rtu_port": 5013},
         "mqtt": {"host": "broker.local", "port": 1883},
         "pymodbus": {"log_level": "DEBUG"},
         "root": {"log_level": "WARNING"},
@@ -88,6 +90,7 @@ def test_missing_optional_fields_get_defaults(tmp_path):
         "em540_master": {},
         "em540_slave": {},
         "ts65a_slave": {},
+        "goodwe_gm3000_slave": {},
         "mqtt": {},
     }
     p = tmp_path / "config.yaml"
@@ -98,6 +101,8 @@ def test_missing_optional_fields_get_defaults(tmp_path):
     assert state.em540_master.retries == 0
     assert state.em540_slave.rtu_port == 5002
     assert state.ts65a_slave.grid_feed_in_hard_limit == -5000.0
+    assert state.goodwe_gm3000_slave.socket_port == 5012
+    assert state.goodwe_gm3000_slave.rtu_port == 5013
     assert state.mqtt.enabled is True
     assert state.pymodbus_log_level == "INFO"
     assert state.root_log_level == "INFO"
@@ -112,6 +117,7 @@ def test_missing_optional_fields_get_defaults(tmp_path):
         "em540_master",
         "em540_slave",
         "ts65a_slave",
+        "goodwe_gm3000_slave",
         "mqtt",
     ],
 )
@@ -120,6 +126,7 @@ def test_missing_required_section_raises_config_error(tmp_path, missing):
         "em540_master": {},
         "em540_slave": {},
         "ts65a_slave": {},
+        "goodwe_gm3000_slave": {},
         "mqtt": {},
     }
     del data[missing]
@@ -188,6 +195,13 @@ def _make_config(tmp_path, overrides: dict | None = None):
             "grid_feed_in_hard_limit": -5000,
             "smoothing_num_points": 20,
         },
+        "goodwe_gm3000_slave": {
+            "host": "0.0.0.0",
+            "socket_port": 5012,
+            "rtu_port": 5013,
+            "slave_id": 3,
+            "log_level": "INFO",
+        },
         "mqtt": {"host": "broker.local", "port": 1883, "log_level": "INFO"},
         "pymodbus": {"log_level": "INFO"},
         "root": {"log_level": "INFO"},
@@ -234,6 +248,8 @@ def test_invalid_mode_raises(tmp_path, mode):
         "em540_slave.rtu_port",
         "em540_slave.tcp_port",
         "ts65a_slave.port",
+        "goodwe_gm3000_slave.socket_port",
+        "goodwe_gm3000_slave.rtu_port",
         "mqtt.port",
     ],
 )
@@ -251,6 +267,8 @@ def test_invalid_port_raises(tmp_path, field, bad_value):
         "em540_slave.rtu_port",
         "em540_slave.tcp_port",
         "ts65a_slave.port",
+        "goodwe_gm3000_slave.socket_port",
+        "goodwe_gm3000_slave.rtu_port",
         "mqtt.port",
     ],
 )
@@ -270,6 +288,7 @@ def test_valid_port_accepted(tmp_path, field):
         "em540_master.slave_id",
         "em540_slave.slave_id",
         "ts65a_slave.slave_id",
+        "goodwe_gm3000_slave.slave_id",
     ],
 )
 @pytest.mark.parametrize("bad_value", [0, -1, 256, 999])
@@ -285,6 +304,7 @@ def test_invalid_slave_id_raises(tmp_path, field, bad_value):
         "em540_master.slave_id",
         "em540_slave.slave_id",
         "ts65a_slave.slave_id",
+        "goodwe_gm3000_slave.slave_id",
     ],
 )
 def test_valid_slave_id_accepted(tmp_path, field):
@@ -302,6 +322,7 @@ def test_valid_slave_id_accepted(tmp_path, field):
         "em540_master.log_level",
         "em540_slave.log_level",
         "ts65a_slave.log_level",
+        "goodwe_gm3000_slave.log_level",
         "mqtt.log_level",
     ],
 )
@@ -318,6 +339,7 @@ def test_invalid_log_level_raises(tmp_path, field, bad_value):
         "em540_master.log_level",
         "em540_slave.log_level",
         "ts65a_slave.log_level",
+        "goodwe_gm3000_slave.log_level",
         "mqtt.log_level",
     ],
 )
@@ -432,6 +454,7 @@ def test_write_updates_persisted_fields(tmp_path):
             "smoothing_num_points": 20,
             "update_timeout": 0.5,
         },
+        "goodwe_gm3000_slave": {"host": "0.0.0.0", "socket_port": 5012, "rtu_port": 5013, "update_timeout": 0.5},
         "mqtt": {"host": "broker.local", "port": 1883, "update_interval": 0.5},
     }
     p = tmp_path / "config.yaml"
@@ -470,6 +493,7 @@ def test_write_preserves_non_persisted_fields(tmp_path):
             "smoothing_num_points": 20,
             "update_timeout": 0.5,
         },
+        "goodwe_gm3000_slave": {"host": "0.0.0.0", "socket_port": 5012, "rtu_port": 5013, "update_timeout": 0.5},
         "mqtt": {"host": "broker.local", "port": 1883, "update_interval": 0.5},
     }
     p = tmp_path / "config.yaml"
@@ -508,6 +532,7 @@ def test_write_clears_dirty_after_flush(tmp_path):
             "smoothing_num_points": 20,
             "update_timeout": 0.5,
         },
+        "goodwe_gm3000_slave": {"host": "0.0.0.0", "socket_port": 5012, "rtu_port": 5013, "update_timeout": 0.5},
         "mqtt": {"host": "broker.local", "port": 1883, "update_interval": 0.5},
     }
     p = tmp_path / "config.yaml"
@@ -541,6 +566,7 @@ def test_flush_loop_writes_after_debounce(tmp_path):
             "smoothing_num_points": 20,
             "update_timeout": 0.5,
         },
+        "goodwe_gm3000_slave": {"host": "0.0.0.0", "socket_port": 5012, "rtu_port": 5013, "update_timeout": 0.5},
         "mqtt": {"host": "broker.local", "port": 1883, "update_interval": 0.5},
     }
     p = tmp_path / "config.yaml"
@@ -600,6 +626,7 @@ def test_write_failure_keeps_dirty_flag(tmp_path, monkeypatch):
             "smoothing_num_points": 20,
             "update_timeout": 0.5,
         },
+        "goodwe_gm3000_slave": {"host": "0.0.0.0", "socket_port": 5012, "rtu_port": 5013, "update_timeout": 0.5},
         "mqtt": {"host": "broker.local", "port": 1883, "update_interval": 0.5},
     }
     p = tmp_path / "config.yaml"
@@ -711,6 +738,7 @@ def test_property_config_persistence_round_trip(field_and_value):
             "smoothing_num_points": 20,
             "update_timeout": 0.5,
         },
+        "goodwe_gm3000_slave": {"host": "0.0.0.0", "socket_port": 5012, "rtu_port": 5013, "update_timeout": 0.5},
         "mqtt": {"host": "broker.local", "port": 1883, "update_interval": 0.5},
     }
     with tempfile.TemporaryDirectory() as tmp_dir:
@@ -746,6 +774,7 @@ _SECTION_DATACLASSES: dict[str, type] = {
     "em540_master": Em540MasterConfig,
     "em540_slave": Em540SlaveConfig,
     "ts65a_slave": Ts65aSlaveConfig,
+    "goodwe_gm3000_slave": GoodweGm3000SlaveConfig,
     "mqtt": MqttConfig,
 }
 
@@ -807,7 +836,7 @@ def test_property_defaults_applied_for_missing_optional_fields(included):
 # Property-based test: Missing required section raises error (Task 2.7)
 # ---------------------------------------------------------------------------
 
-REQUIRED_SECTIONS = ("em540_master", "em540_slave", "ts65a_slave", "mqtt")
+REQUIRED_SECTIONS = ("em540_master", "em540_slave", "ts65a_slave", "goodwe_gm3000_slave", "mqtt")
 
 
 @given(omitted=st.sets(st.sampled_from(REQUIRED_SECTIONS), min_size=1, max_size=len(REQUIRED_SECTIONS)))
@@ -828,6 +857,7 @@ def test_property_missing_required_section_raises_error(omitted):
         "em540_master": {"mode": "tcp", "host": "10.0.0.1", "port": 502},
         "em540_slave": {"host": "0.0.0.0"},
         "ts65a_slave": {"port": 5003},
+        "goodwe_gm3000_slave": {"socket_port": 5012, "rtu_port": 5013},
         "mqtt": {"host": "broker.local", "port": 1883},
     }
     for section in omitted:
@@ -894,6 +924,8 @@ _invalid_field_and_value = st.one_of(
             "em540_slave.rtu_port",
             "em540_slave.tcp_port",
             "ts65a_slave.port",
+            "goodwe_gm3000_slave.socket_port",
+            "goodwe_gm3000_slave.rtu_port",
             "mqtt.port",
         ]
     ).flatmap(lambda f: _invalid_port.map(lambda v: (f, v))),
@@ -902,6 +934,7 @@ _invalid_field_and_value = st.one_of(
             "em540_master.slave_id",
             "em540_slave.slave_id",
             "ts65a_slave.slave_id",
+            "goodwe_gm3000_slave.slave_id",
         ]
     ).flatmap(lambda f: _invalid_slave_id.map(lambda v: (f, v))),
     st.sampled_from(
@@ -909,6 +942,7 @@ _invalid_field_and_value = st.one_of(
             "em540_master.log_level",
             "em540_slave.log_level",
             "ts65a_slave.log_level",
+            "goodwe_gm3000_slave.log_level",
             "mqtt.log_level",
         ]
     ).flatmap(lambda f: _invalid_log_level.map(lambda v: (f, v))),
@@ -983,6 +1017,7 @@ def test_property_debounce_guarantee(num_calls):
             "smoothing_num_points": 20,
             "update_timeout": 0.5,
         },
+        "goodwe_gm3000_slave": {"socket_port": 5012, "rtu_port": 5013, "update_timeout": 0.5},
         "mqtt": {"host": "broker.local", "port": 1883, "update_interval": 0.5},
     }
 
@@ -1122,6 +1157,18 @@ _NON_PERSISTED_STRATEGIES["ts65a_slave.port"] = st.integers(min_value=1, max_val
 _NON_PERSISTED_STRATEGIES["ts65a_slave.slave_id"] = st.integers(min_value=1, max_value=255)
 _NON_PERSISTED_STRATEGIES["ts65a_slave.log_level"] = st.sampled_from(["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"])
 
+# goodwe_gm3000_slave non-persisted fields
+_NON_PERSISTED_STRATEGIES["goodwe_gm3000_slave.host"] = st.from_regex(
+    r"[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}",
+    fullmatch=True,
+)
+_NON_PERSISTED_STRATEGIES["goodwe_gm3000_slave.socket_port"] = st.integers(min_value=1, max_value=65534)
+_NON_PERSISTED_STRATEGIES["goodwe_gm3000_slave.rtu_port"] = st.integers(min_value=1, max_value=65534)
+_NON_PERSISTED_STRATEGIES["goodwe_gm3000_slave.slave_id"] = st.integers(min_value=1, max_value=255)
+_NON_PERSISTED_STRATEGIES["goodwe_gm3000_slave.log_level"] = st.sampled_from(
+    ["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
+)
+
 # mqtt non-persisted fields
 _NON_PERSISTED_STRATEGIES["mqtt.enabled"] = st.booleans()
 _NON_PERSISTED_STRATEGIES["mqtt.host"] = st.from_regex(
@@ -1176,6 +1223,7 @@ def test_property_non_persisted_fields_preserved_on_write(non_persisted_values):
             "smoothing_num_points": 20,
             "update_timeout": 0.5,
         },
+        "goodwe_gm3000_slave": {"update_timeout": 0.5},
         "mqtt": {"update_interval": 0.5},
     }
 

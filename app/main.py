@@ -11,6 +11,7 @@ from app.carlo_gavazzi.em540_master import Em540Master
 from app.carlo_gavazzi.em540_slave_bridge import Em540Slave
 from app.config import ConfigManager
 from app.fronius.ts65a_slave_bridge import Ts65aSlaveBridge
+from app.goodwe.gm3000_slave_bridge import GoodweGm3000SlaveBridge
 from app.home_assistant.ha_bridge import HABridge
 from app.version import version_for_display
 
@@ -36,10 +37,12 @@ async def process_loop():
     em540_master = Em540Master(state.em540_master)
     em540_slave = Em540Slave(state.em540_slave, em540_master.data.frame)
     ts65a_slave = Ts65aSlaveBridge(state.ts65a_slave)
+    goodwe_gm3000_slave = GoodweGm3000SlaveBridge(state.goodwe_gm3000_slave)
     mqtt_bridge = None
 
     em540_master.add_listener(em540_slave)
     em540_master.add_listener(ts65a_slave)
+    em540_master.add_listener(goodwe_gm3000_slave)
 
     if state.mqtt.enabled:
         mqtt_bridge = HABridge(state.mqtt, state=state, config_manager=config_manager)
@@ -55,6 +58,7 @@ async def process_loop():
     config_manager.start_flush_loop()
     await em540_slave.start()
     await ts65a_slave.start()
+    await goodwe_gm3000_slave.start()
 
     initial_interval = state.em540_master.update_interval
     start_time = time.perf_counter()

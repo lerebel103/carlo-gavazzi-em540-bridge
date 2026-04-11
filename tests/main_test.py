@@ -83,6 +83,14 @@ def _make_state():
             smoothing_num_points=10,
             log_level="CRITICAL",
         ),
+        goodwe_gm3000_slave=SimpleNamespace(
+            host="0.0.0.0",
+            socket_port=5012,
+            rtu_port=5013,
+            slave_id=3,
+            update_timeout=5.0,
+            log_level="CRITICAL",
+        ),
         mqtt=SimpleNamespace(
             enabled=False,
             host="localhost",
@@ -119,7 +127,11 @@ def _setup_mocks():
     mock_ts65a.start = AsyncMock()
     mock_ts65a.add_stats_listener = MagicMock()
 
-    return {"master": mock_master, "slave": mock_slave, "ts65a": mock_ts65a}
+    mock_goodwe = MagicMock()
+    mock_goodwe.start = AsyncMock()
+    mock_goodwe.add_stats_listener = MagicMock()
+
+    return {"master": mock_master, "slave": mock_slave, "ts65a": mock_ts65a, "goodwe": mock_goodwe}
 
 
 def _patch_config_manager(state):
@@ -156,6 +168,7 @@ class TestMainLoopPriority(unittest.TestCase):
             patch.object(main, "Em540Master", return_value=mocks["master"]),
             patch.object(main, "Em540Slave", return_value=mocks["slave"]),
             patch.object(main, "Ts65aSlaveBridge", return_value=mocks["ts65a"]),
+            patch.object(main, "GoodweGm3000SlaveBridge", return_value=mocks["goodwe"]),
             patch.object(main, "HABridge"),
         ):
             with self.assertRaises(_LoopBreak):
@@ -183,6 +196,7 @@ class TestMainLoopPriority(unittest.TestCase):
             patch.object(main, "Em540Master", return_value=mocks["master"]),
             patch.object(main, "Em540Slave", return_value=mocks["slave"]),
             patch.object(main, "Ts65aSlaveBridge", return_value=mocks["ts65a"]),
+            patch.object(main, "GoodweGm3000SlaveBridge", return_value=mocks["goodwe"]),
             patch.object(main, "HABridge"),
         ):
             with self.assertRaises(_LoopBreak):
@@ -224,6 +238,7 @@ class TestMainLoopPriority(unittest.TestCase):
             patch.object(main, "Em540Master", return_value=mocks["master"]),
             patch.object(main, "Em540Slave", return_value=mocks["slave"]),
             patch.object(main, "Ts65aSlaveBridge", return_value=mocks["ts65a"]),
+            patch.object(main, "GoodweGm3000SlaveBridge", return_value=mocks["goodwe"]),
             patch.object(main, "HABridge"),
             patch.object(main.time, "perf_counter", side_effect=_perf_counter) as mock_perf,
             patch.object(main.asyncio, "sleep", new_callable=AsyncMock),
@@ -265,6 +280,7 @@ class TestMainLoopPriority(unittest.TestCase):
             patch.object(main, "Em540Master", return_value=mocks["master"]),
             patch.object(main, "Em540Slave", return_value=mocks["slave"]),
             patch.object(main, "Ts65aSlaveBridge", return_value=mocks["ts65a"]),
+            patch.object(main, "GoodweGm3000SlaveBridge", return_value=mocks["goodwe"]),
             patch.object(main, "HABridge"),
         ):
             with self.assertRaises(_LoopBreak):
@@ -301,6 +317,7 @@ class TestMainLoopPriority(unittest.TestCase):
             patch.object(main, "Em540Master", return_value=mocks["master"]),
             patch.object(main, "Em540Slave", return_value=mocks["slave"]),
             patch.object(main, "Ts65aSlaveBridge", return_value=mocks["ts65a"]),
+            patch.object(main, "GoodweGm3000SlaveBridge", return_value=mocks["goodwe"]),
             patch.object(main, "HABridge", return_value=mqtt_bridge),
         ):
             with self.assertRaises(_LoopBreak):
@@ -336,6 +353,7 @@ class TestMainLoopPriority(unittest.TestCase):
             patch.object(main, "Em540Master", return_value=mocks["master"]),
             patch.object(main, "Em540Slave", return_value=mocks["slave"]),
             patch.object(main, "Ts65aSlaveBridge", return_value=mocks["ts65a"]),
+            patch.object(main, "GoodweGm3000SlaveBridge", return_value=mocks["goodwe"]),
             patch.object(main, "HABridge", return_value=mqtt_bridge),
         ):
             with self.assertRaises(_LoopBreak):

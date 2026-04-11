@@ -71,6 +71,16 @@ class Ts65aSlaveConfig:
 
 
 @dataclass
+class GoodweGm3000SlaveConfig:
+    host: str = "0.0.0.0"
+    socket_port: int = 5012
+    rtu_port: int = 5013
+    slave_id: int = 3
+    update_timeout: float = 0.5
+    log_level: str = "INFO"
+
+
+@dataclass
 class MqttConfig:
     enabled: bool = True
     ha_topic_prefix: str = ""
@@ -92,6 +102,7 @@ class AppState:
     em540_master: Em540MasterConfig = field(default_factory=Em540MasterConfig)
     em540_slave: Em540SlaveConfig = field(default_factory=Em540SlaveConfig)
     ts65a_slave: Ts65aSlaveConfig = field(default_factory=Ts65aSlaveConfig)
+    goodwe_gm3000_slave: GoodweGm3000SlaveConfig = field(default_factory=GoodweGm3000SlaveConfig)
     mqtt: MqttConfig = field(default_factory=MqttConfig)
     pymodbus_log_level: str = "INFO"
     root_log_level: str = "INFO"
@@ -120,6 +131,7 @@ REQUIRED_SECTIONS: tuple[str, ...] = (
     "em540_master",
     "em540_slave",
     "ts65a_slave",
+    "goodwe_gm3000_slave",
     "mqtt",
 )
 
@@ -219,6 +231,8 @@ class ConfigManager:
             ("em540_slave.rtu_port", state.em540_slave.rtu_port),
             ("em540_slave.tcp_port", state.em540_slave.tcp_port),
             ("ts65a_slave.port", state.ts65a_slave.port),
+            ("goodwe_gm3000_slave.socket_port", state.goodwe_gm3000_slave.socket_port),
+            ("goodwe_gm3000_slave.rtu_port", state.goodwe_gm3000_slave.rtu_port),
             ("mqtt.port", state.mqtt.port),
         ]
         for name, value in port_fields:
@@ -230,6 +244,7 @@ class ConfigManager:
             ("em540_master.slave_id", state.em540_master.slave_id),
             ("em540_slave.slave_id", state.em540_slave.slave_id),
             ("ts65a_slave.slave_id", state.ts65a_slave.slave_id),
+            ("goodwe_gm3000_slave.slave_id", state.goodwe_gm3000_slave.slave_id),
         ]
         for name, value in slave_id_fields:
             if not (0 < value < 256):
@@ -240,6 +255,7 @@ class ConfigManager:
             ("em540_master.log_level", state.em540_master.log_level),
             ("em540_slave.log_level", state.em540_slave.log_level),
             ("ts65a_slave.log_level", state.ts65a_slave.log_level),
+            ("goodwe_gm3000_slave.log_level", state.goodwe_gm3000_slave.log_level),
             ("mqtt.log_level", state.mqtt.log_level),
             ("pymodbus_log_level", state.pymodbus_log_level),
             ("root_log_level", state.root_log_level),

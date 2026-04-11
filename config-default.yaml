@@ -58,6 +58,20 @@ ts65a_slave:
   # Log level info for this component
   log_level: INFO
 
+goodwe_gm3000_slave:
+  # IP on which the data is proxied out by this application
+  host: 0.0.0.0
+  # Port for Modbus TCP (FramerType.SOCKET)
+  socket_port: 5012
+  # Port for Modbus RTU over TCP (FramerType.RTU)
+  rtu_port: 5013
+  # Slave ID expected by the inverter for GM3000 emulation
+  slave_id: 3
+  # Timeout for client requests
+  update_timeout: 0.5
+  # Log level for this component
+  log_level: INFO
+
 mqtt:
   # Whether to enable MQTT integration from the top level.
   enabled: true
