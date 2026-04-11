@@ -11,6 +11,9 @@ services:
       - ./config.yaml:/etc/carlo-gavazzi-em540-bridge/config.yaml
     environment:
       TZ: Australia/Perth
+    # Real-time performance optimizations
+    cap_add:
+      - SYS_NICE  # Allow setting high scheduler priority
     ports:
       - 5001:5001  # Modbus TCP
       - 5002:5002  # Modbus RTU-over-TCP

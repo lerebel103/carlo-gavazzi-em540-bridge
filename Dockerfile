@@ -16,6 +16,9 @@ LABEL org.opencontainers.image.licenses="MIT"
 # Set Python to unbuffered mode for real-time logging in containers
 ENV PYTHONUNBUFFERED=1
 
+# Disable .pyc bytecode writing to avoid I/O delays in real-time tick loop
+ENV PYTHONDONTWRITEBYTECODE=1
+
 # Create non-root user for security
 RUN groupadd -r lerebel103 && useradd -r -g lerebel103 lerebel103
 
