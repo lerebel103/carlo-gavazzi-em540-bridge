@@ -199,6 +199,21 @@ class TestEm540Slave(unittest.TestCase):
         self.assertIn(first_static_addr + REG_OFFSET, calls)
         self.assertEqual(calls[first_static_addr + REG_OFFSET], frame.static_reg_map[first_static_addr].values)
 
+    def test_new_data_preserves_overlapped_static_device_type_register(self):
+        frame = Em540Frame()
+        frame.static_reg_map[0x000B].values = [1744]
+        slave, mock_datablock = self._build_slave(frame)
+
+        meter_data = MeterData()
+        meter_data.frame = frame
+        meter_data._timestamp = 123.0
+        meter_data.frame.dynamic_reg_map[0x0000].values = [0] * 0x34
+
+        asyncio.run(slave.new_data(meter_data))
+
+        calls = [c[0] for c in mock_datablock.setValues.call_args_list]
+        self.assertIn((0x000B + REG_OFFSET, [1744]), calls)
+
     def test_new_data_keeps_circuit_open_until_static_sync(self):
         frame = Em540Frame()
         slave, _ = self._build_slave(frame)

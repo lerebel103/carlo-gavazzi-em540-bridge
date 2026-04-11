@@ -16,6 +16,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 - (Fixes in development)
 
+## [0.1.1] - 2026-04-11
+
+### Fixed
+- EM540 static device metadata propagation in slave bridge: preserved overlapped static registers (including device type register `0x000B`) after dynamic/remapped datastore updates so downstream Victron-compatible clients no longer read `Unknown` device type.
+- Added regression coverage to ensure overlapped static registers remain visible after dynamic refresh cycles.
+
 ## [0.1.0] - 2026-04-10
 
 ### Added
@@ -53,5 +59,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-[Unreleased]: https://github.com/lerebel103/carlo-gavazzi-em540-bridge/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/lerebel103/carlo-gavazzi-em540-bridge/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/lerebel103/carlo-gavazzi-em540-bridge/releases/tag/v0.1.1
 [0.1.0]: https://github.com/lerebel103/carlo-gavazzi-em540-bridge/releases/tag/v0.1.0

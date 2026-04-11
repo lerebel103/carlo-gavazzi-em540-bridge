@@ -21,6 +21,13 @@ _COMPATIBILITY_RANGES: tuple[tuple[int, int], ...] = ((0x0000, 0x0160),)
 logger = logging.getLogger("em540-slave")
 
 
+def _expanded_addresses(reg_map: dict[int, object]) -> set[int]:
+    addrs: set[int] = set()
+    for addr, reg in reg_map.items():
+        addrs.update(range(addr, addr + len(reg.values)))
+    return addrs
+
+
 class Em540Slave(MeterDataListener):
     """Represents a Modbus slave that serves data read from an EM540 master."""
 
@@ -58,6 +65,11 @@ class Em540Slave(MeterDataListener):
         self._static_addrs = tuple(frame.static_reg_map.keys())
         self._dynamic_addrs = tuple(frame.dynamic_reg_map.keys())
         self._remapped_addrs = tuple(frame.remapped_reg_map.keys())
+        dynamic_written_addrs = _expanded_addresses(frame.dynamic_reg_map)
+        remapped_written_addrs = _expanded_addresses(frame.remapped_reg_map)
+        self._overlapped_static_addrs: tuple[int, ...] = tuple(
+            addr for addr in self._static_addrs if addr in dynamic_written_addrs or addr in remapped_written_addrs
+        )
         self._last_static_value_ids: dict[int, int] = {
             addr: id(frame.static_reg_map[addr].values) for addr in self._static_addrs
         }
@@ -147,6 +159,10 @@ class Em540Slave(MeterDataListener):
         self._static_synced = True
         return True
 
+    def _refresh_overlapped_static_registers(self, frame: Em540Frame) -> None:
+        for addr in self._overlapped_static_addrs:
+            self.datablock.setValues(addr + REG_OFFSET, frame.static_reg_map[addr].values)
+
     async def new_data(self, data: MeterData) -> None:
         """Handle new data from the master.
 
@@ -156,8 +172,6 @@ class Em540Slave(MeterDataListener):
         """
         frame = data.frame
 
-        self._sync_static_registers_if_changed(frame)
-
         # Update dynamic registers in the datablock
         for addr in self._dynamic_addrs:
             self.datablock.setValues(addr + REG_OFFSET, frame.dynamic_reg_map[addr].values)
@@ -165,6 +179,13 @@ class Em540Slave(MeterDataListener):
         # Update remapped values
         for addr in self._remapped_addrs:
             self.datablock.setValues(addr + REG_OFFSET, frame.remapped_reg_map[addr].values)
+
+        static_synced_this_cycle = self._sync_static_registers_if_changed(frame)
+
+        # Some static registers (e.g. 0x000B device type) overlap dynamic ranges.
+        # Re-apply them after dynamic writes so downstream clients always see static metadata.
+        if self._static_synced and not static_synced_this_cycle:
+            self._refresh_overlapped_static_registers(frame)
 
         # Keep the circuit open until static registers have been synced at least once.
         # This prevents downstream consumers from receiving partially initialized data.
