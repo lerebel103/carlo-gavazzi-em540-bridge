@@ -21,8 +21,8 @@ em540_master:
 
   # Master read interval in seconds, 10Hz max supported rate by EM540/EM530
   update_interval: 0.1
-  # Read timeout in seconds
-  timeout: 0.15
+  # Read timeout in seconds (keep below update_interval for best 10Hz stability)
+  timeout: 0.08
   # Number of retries on read failure
   retries: 0
   # Log level for the master component
@@ -59,15 +59,18 @@ ts65a_slave:
   log_level: INFO
 
 mqtt:
-  # Whether to enable MQTT publishing of the read values
+  # Whether to enable MQTT integration from the top level.
   enabled: true
+  # Optional prefix added to all Home Assistant MQTT topics for test isolation.
+  # Leave blank for normal production topics.
+  ha_topic_prefix: ""
   # MQTT broker connection parameters
   host: localhost
   port: 1883
   username: ""
   password: ""
   # Update interval in seconds for publishing the values to MQTT
-  update_interval: 0.5
+  update_interval: 1.0
   # Log level for the MQTT component
   log_level: INFO
 

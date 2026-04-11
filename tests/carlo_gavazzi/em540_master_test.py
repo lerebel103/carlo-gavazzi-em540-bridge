@@ -1,0 +1,482 @@
+import asyncio
+import threading
+import time
+import unittest
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock, PropertyMock, patch
+
+from pymodbus import ModbusException
+from pymodbus.exceptions import ModbusIOException
+
+from app.carlo_gavazzi.em540_master import Em540Master, MeterDataListener
+
+
+def _make_config(**overrides):
+    """Build a minimal TCP config namespace for Em540Master."""
+    defaults = dict(
+        mode="tcp",
+        host="127.0.0.1",
+        port=502,
+        slave_id=1,
+        timeout=1.0,
+        retries=0,
+        log_level="CRITICAL",
+        baudrate=115200,
+        parity="N",
+        stopbits=1,
+        serial_port="/dev/null",
+    )
+    defaults.update(overrides)
+    return SimpleNamespace(**defaults)
+
+
+def _make_successful_result(num_registers):
+    """Return a mock Modbus response with the expected number of registers."""
+    result = MagicMock()
+    result.isError.return_value = False
+    result.registers = [0] * num_registers
+    return result
+
+
+class TestEm540Master(unittest.TestCase):
+    """Validates: Requirements 9.1, 9.2, 9.3, 9.4, 9.5, 10.1, 10.2"""
+
+    @patch("app.carlo_gavazzi.em540_master.AsyncModbusTcpClient")
+    def setUp(self, mock_tcp_cls):
+        """Patch the TCP client class so the constructor doesn't create a real connection."""
+        self.mock_client = MagicMock()
+        self.mock_client.read_holding_registers = AsyncMock()
+        self.mock_client.connect = AsyncMock()
+        self.mock_client.close = MagicMock()
+        mock_tcp_cls.return_value = self.mock_client
+
+        self.config = _make_config()
+        self.master = Em540Master(self.config)
+        # Replace the client created by the constructor with our mock
+        self.master._client = self.mock_client
+
+    # -----------------------------------------------------------------------
+    # Requirement 9.1: disconnected → returns False, calls read_failed
+    # -----------------------------------------------------------------------
+    def test_acquire_data_returns_false_when_disconnected(self):
+        """Requirement 9.1 – acquire_data returns False and calls read_failed when disconnected."""
+        type(self.mock_client).connected = PropertyMock(return_value=False)
+
+        listener = MagicMock(spec=MeterDataListener)
+        listener.read_failed = AsyncMock()
+        self.master.add_listener(listener)
+
+        result = asyncio.run(self.master.acquire_data())
+
+        self.assertFalse(result)
+        listener.read_failed.assert_awaited_once()
+
+    # -----------------------------------------------------------------------
+    # Requirement 9.2: Modbus read error → returns False, calls read_failed
+    # -----------------------------------------------------------------------
+    def test_modbus_read_error_returns_false_and_calls_read_failed(self):
+        """Requirement 9.2 – Modbus read error returns False and calls read_failed on listeners."""
+        type(self.mock_client).connected = PropertyMock(return_value=True)
+
+        error_result = MagicMock()
+        error_result.isError.return_value = True
+        self.mock_client.read_holding_registers = AsyncMock(return_value=error_result)
+
+        listener = MagicMock(spec=MeterDataListener)
+        listener.read_failed = AsyncMock()
+        self.master.add_listener(listener)
+
+        result = asyncio.run(self.master.acquire_data())
+
+        self.assertFalse(result)
+        listener.read_failed.assert_awaited_once()
+
+    # -----------------------------------------------------------------------
+    # Requirement 9.3: register count mismatch → os._exit(1)
+    # -----------------------------------------------------------------------
+    @patch("app.carlo_gavazzi.em540_master.os._exit", side_effect=SystemExit(1))
+    def test_register_count_mismatch_exits(self, mock_exit):
+        """Requirement 9.3 – register count mismatch calls os._exit(1)."""
+        type(self.mock_client).connected = PropertyMock(return_value=True)
+
+        # Return fewer registers than expected for the first register group
+        bad_result = MagicMock()
+        bad_result.isError.return_value = False
+        bad_result.registers = [0]  # Only 1 register instead of expected count
+        self.mock_client.read_holding_registers = AsyncMock(return_value=bad_result)
+
+        with self.assertRaises(SystemExit):
+            asyncio.run(self.master.acquire_data())
+
+        mock_exit.assert_called_once_with(1)
+
+    # -----------------------------------------------------------------------
+    # Requirement 9.4: ModbusIOException → returns False
+    # -----------------------------------------------------------------------
+    def test_modbus_io_exception_returns_false(self):
+        """Requirement 9.4 – ModbusIOException returns False."""
+        type(self.mock_client).connected = PropertyMock(return_value=True)
+
+        self.mock_client.read_holding_registers = AsyncMock(side_effect=ModbusIOException("IO error"))
+
+        result = asyncio.run(self.master.acquire_data())
+
+        self.assertFalse(result)
+
+    # -----------------------------------------------------------------------
+    # Requirement 9.5: ModbusException → closes client, returns False
+    # -----------------------------------------------------------------------
+    def test_modbus_exception_closes_client_and_returns_false(self):
+        """Requirement 9.5 – ModbusException closes client and returns False."""
+        type(self.mock_client).connected = PropertyMock(return_value=True)
+
+        self.mock_client.read_holding_registers = AsyncMock(side_effect=ModbusException("connection lost"))
+
+        result = asyncio.run(self.master.acquire_data())
+
+        self.assertFalse(result)
+        self.mock_client.close.assert_called_once()
+
+    # -----------------------------------------------------------------------
+    # Requirement 10.1: successful acquire notifies via Condition
+    # -----------------------------------------------------------------------
+    def test_acquire_data_notifies_condition_on_success(self):
+        """Requirement 10.1 – acquire_data notifies Condition on success."""
+        type(self.mock_client).connected = PropertyMock(return_value=True)
+
+        # Build responses that match the expected register counts for each
+        # dynamic register group
+        frame = self.master.data.frame
+        responses = []
+        for reg_addr in frame.dynamic_reg_map:
+            reg_def = frame.dynamic_reg_map[reg_addr]
+            responses.append(_make_successful_result(len(reg_def.values)))
+
+        self.mock_client.read_holding_registers = AsyncMock(side_effect=responses)
+
+        with patch.object(self.master._condition, "notify") as mock_notify:
+            result = asyncio.run(self.master.acquire_data())
+
+        self.assertTrue(result)
+        mock_notify.assert_called_once()
+
+    # -----------------------------------------------------------------------
+    # Requirement 10.2: successful acquire reads dynamic registers
+    # -----------------------------------------------------------------------
+    def test_acquire_data_reads_dynamic_registers(self):
+        """Requirement 10.2 – acquire_data reads all dynamic register groups."""
+        type(self.mock_client).connected = PropertyMock(return_value=True)
+
+        frame = self.master.data.frame
+        responses = []
+        for reg_addr in frame.dynamic_reg_map:
+            reg_def = frame.dynamic_reg_map[reg_addr]
+            responses.append(_make_successful_result(len(reg_def.values)))
+
+        self.mock_client.read_holding_registers = AsyncMock(side_effect=responses)
+
+        with patch.object(self.master._condition, "notify"):
+            result = asyncio.run(self.master.acquire_data())
+
+        self.assertTrue(result)
+        # Should have been called once per dynamic register group
+        expected_calls = len(frame.dynamic_reg_map)
+        self.assertEqual(self.mock_client.read_holding_registers.await_count, expected_calls)
+        # Counter should have been incremented
+        self.assertEqual(self.master._dyn_reg_read_counter, 1)
+
+    def test_connect_failure_does_not_raise_and_closes_client(self):
+        """Transport connect failures should not escape connect() and should close the client."""
+        self.mock_client.connect = AsyncMock(side_effect=RuntimeError("dial failed"))
+
+        asyncio.run(self.master.connect())
+
+        self.mock_client.close.assert_called_once()
+
+    def test_static_read_is_retried_until_success(self):
+        """Static register reads should retry on later connects until they succeed."""
+        type(self.mock_client).connected = PropertyMock(return_value=True)
+        bad_result = MagicMock()
+        bad_result.isError.return_value = True
+
+        good_results = []
+        for reg_addr in self.master._static_read_plan:
+            static_reg = self.master.data.frame.static_reg_map[reg_addr]
+            good_results.append(_make_successful_result(len(static_reg.values)))
+
+        self.mock_client.read_holding_registers = AsyncMock(side_effect=[bad_result, *good_results])
+
+        asyncio.run(self.master.connect())
+        self.assertFalse(self.master._static_data_valid)
+
+        asyncio.run(self.master.connect())
+        self.assertTrue(self.master._static_data_valid)
+
+    def test_timing_stats_notifies_listeners_each_cycle(self):
+        """Timing stats should be pushed every cycle for diagnostics consumers."""
+        observed = []
+
+        def _on_stats(stats):
+            observed.append(
+                (
+                    stats.modbus_read_duration_ms_last,
+                    stats.post_read_processing_ms_last,
+                    stats.non_read_processing_ms_last,
+                )
+            )
+
+        self.master.add_stats_listener(_on_stats)
+
+        cycle_start = time.perf_counter() - 0.02
+        self.master._update_timing_stats(
+            cycle_start=cycle_start,
+            modbus_read_ms=12.0,
+            post_read_processing_ms=3.0,
+        )
+
+        self.assertTrue(observed)
+        modbus_ms, post_ms, non_read_ms = observed[-1]
+        self.assertEqual(modbus_ms, 12.0)
+        self.assertEqual(post_ms, 3.0)
+        self.assertGreaterEqual(non_read_ms, 0.0)
+
+    def test_refresh_client_runtime_config_uses_live_shared_config_values(self):
+        self.mock_client.timeout = 1.0
+        self.mock_client.retries = 0
+
+        self.config.timeout = 0.25
+        self.config.retries = 3
+        self.master._refresh_client_runtime_config()
+
+        self.assertEqual(self.mock_client.timeout, 0.25)
+        self.assertEqual(self.mock_client.retries, 3)
+
+
+class TestSkipNRead(unittest.TestCase):
+    """Validates: Requirements 8.1, 8.2, 8.3"""
+
+    @patch("app.carlo_gavazzi.em540_master.AsyncModbusTcpClient")
+    def setUp(self, mock_tcp_cls):
+        """Set up master with mock client. Modify one register to have skip_n_read=2."""
+        self.mock_client = MagicMock()
+        self.mock_client.read_holding_registers = AsyncMock()
+        self.mock_client.connect = AsyncMock()
+        self.mock_client.close = MagicMock()
+        type(self.mock_client).connected = PropertyMock(return_value=True)
+        mock_tcp_cls.return_value = self.mock_client
+
+        self.config = _make_config()
+        self.master = Em540Master(self.config)
+        self.master._client = self.mock_client
+
+        self.frame = self.master.data.frame
+
+        # Set 0x0500 register to skip_n_read=2 (read every 3rd cycle)
+        self.frame.dynamic_reg_map[0x0500].skip_n_read = 2
+
+    def _build_responses_for_all(self):
+        """Build successful responses for all dynamic register groups."""
+        responses = []
+        for reg_addr in self.frame.dynamic_reg_map:
+            reg_def = self.frame.dynamic_reg_map[reg_addr]
+            responses.append(_make_successful_result(len(reg_def.values)))
+        return responses
+
+    def _get_read_addresses(self):
+        """Extract the register addresses from read_holding_registers calls."""
+        return [
+            call.kwargs.get("address", call.args[0] if call.args else None)
+            for call in self.mock_client.read_holding_registers.call_args_list
+        ]
+
+    # -----------------------------------------------------------------------
+    # Requirement 8.1: first cycle reads all registers regardless of skip_n_read
+    # -----------------------------------------------------------------------
+    def test_first_cycle_reads_all_registers(self):
+        """Requirement 8.1 – First cycle (counter=1) reads all registers."""
+        self.mock_client.read_holding_registers = AsyncMock(side_effect=self._build_responses_for_all())
+
+        with patch.object(self.master._condition, "notify"):
+            result = asyncio.run(self.master.acquire_data())
+
+        self.assertTrue(result)
+        self.assertEqual(self.master._dyn_reg_read_counter, 1)
+        # Both 0x0000 and 0x0500 should be read
+        self.assertEqual(
+            self.mock_client.read_holding_registers.await_count,
+            len(self.frame.dynamic_reg_map),
+        )
+        addresses = self._get_read_addresses()
+        self.assertIn(0x0000, addresses)
+        self.assertIn(0x0500, addresses)
+
+    # -----------------------------------------------------------------------
+    # Requirement 8.2: subsequent cycles skip based on counter % (S+1) != 0
+    # -----------------------------------------------------------------------
+    def test_subsequent_cycles_skip_registers(self):
+        """Requirement 8.2 – Register with skip_n_read=2 is skipped when counter%(2+1)!=0."""
+        # 0x0500 has skip_n_read=2, so it reads when counter % 3 == 0
+        # Cycle 1: counter=1, reads all (first cycle exception)
+        # Cycle 2: counter=2, 2%3=2!=0 → skip 0x0500, only read 0x0000
+        # Cycle 3: counter=3, 3%3=0 → read both
+
+        # --- Cycle 1: reads all ---
+        self.mock_client.read_holding_registers = AsyncMock(side_effect=self._build_responses_for_all())
+        with patch.object(self.master._condition, "notify"):
+            asyncio.run(self.master.acquire_data())
+        self.assertEqual(self.master._dyn_reg_read_counter, 1)
+
+        # --- Cycle 2: should skip 0x0500 ---
+        self.mock_client.read_holding_registers.reset_mock()
+        # Only need response for 0x0000 since 0x0500 is skipped
+        reg_0000 = self.frame.dynamic_reg_map[0x0000]
+        self.mock_client.read_holding_registers = AsyncMock(side_effect=[_make_successful_result(len(reg_0000.values))])
+        with patch.object(self.master._condition, "notify"):
+            result = asyncio.run(self.master.acquire_data())
+
+        self.assertTrue(result)
+        self.assertEqual(self.master._dyn_reg_read_counter, 2)
+        self.assertEqual(self.mock_client.read_holding_registers.await_count, 1)
+        addresses = self._get_read_addresses()
+        self.assertIn(0x0000, addresses)
+        self.assertNotIn(0x0500, addresses)
+
+        # --- Cycle 3: counter=3, 3%3=0 → read both ---
+        self.mock_client.read_holding_registers.reset_mock()
+        self.mock_client.read_holding_registers = AsyncMock(side_effect=self._build_responses_for_all())
+        with patch.object(self.master._condition, "notify"):
+            result = asyncio.run(self.master.acquire_data())
+
+        self.assertTrue(result)
+        self.assertEqual(self.master._dyn_reg_read_counter, 3)
+        self.assertEqual(self.mock_client.read_holding_registers.await_count, 2)
+        addresses = self._get_read_addresses()
+        self.assertIn(0x0000, addresses)
+        self.assertIn(0x0500, addresses)
+
+    # -----------------------------------------------------------------------
+    # Requirement 8.3: registers with skip_n_read=0 are read every cycle
+    # -----------------------------------------------------------------------
+    def test_skip_n_read_zero_reads_every_cycle(self):
+        """Requirement 8.3 – Register with skip_n_read=0 is read on every cycle."""
+        # 0x0000 has skip_n_read=0 (default), should be read every cycle
+        # Run 4 cycles and verify 0x0000 is always read
+        for cycle in range(1, 5):
+            self.mock_client.read_holding_registers.reset_mock()
+
+            if cycle == 1:
+                # First cycle reads all
+                self.mock_client.read_holding_registers = AsyncMock(side_effect=self._build_responses_for_all())
+            elif cycle % 3 == 0:
+                # Cycles where 0x0500 is also read (counter % 3 == 0)
+                self.mock_client.read_holding_registers = AsyncMock(side_effect=self._build_responses_for_all())
+            else:
+                # Only 0x0000 is read (0x0500 skipped)
+                reg_0000 = self.frame.dynamic_reg_map[0x0000]
+                self.mock_client.read_holding_registers = AsyncMock(
+                    side_effect=[_make_successful_result(len(reg_0000.values))]
+                )
+
+            with patch.object(self.master._condition, "notify"):
+                result = asyncio.run(self.master.acquire_data())
+
+            self.assertTrue(result, f"Cycle {cycle} should succeed")
+            # 0x0000 (skip_n_read=0) must always be read
+            addresses = self._get_read_addresses()
+            self.assertIn(0x0000, addresses, f"Cycle {cycle}: 0x0000 should always be read")
+
+
+class TestListenerWorker(unittest.TestCase):
+    """Validates listener workers and consumer missed-update diagnostics."""
+
+    @patch("app.carlo_gavazzi.em540_master.AsyncModbusTcpClient")
+    def setUp(self, mock_tcp_cls):
+        self.mock_client = MagicMock()
+        self.mock_client.read_holding_registers = AsyncMock()
+        self.mock_client.connect = AsyncMock()
+        self.mock_client.close = MagicMock()
+        type(self.mock_client).connected = PropertyMock(return_value=True)
+        mock_tcp_cls.return_value = self.mock_client
+
+        self.config = _make_config()
+        self.master = Em540Master(self.config)
+        self.master._client = self.mock_client
+
+    def _build_responses_for_all(self):
+        responses = []
+        for reg_addr in self.master.data.frame.dynamic_reg_map:
+            reg_def = self.master.data.frame.dynamic_reg_map[reg_addr]
+            responses.append(_make_successful_result(len(reg_def.values)))
+        return responses
+
+    def test_listener_worker_receives_latest_snapshot(self):
+        """Listener worker should process new snapshots from successful acquisitions."""
+        self.mock_client.read_holding_registers = AsyncMock(side_effect=self._build_responses_for_all())
+
+        done_event = threading.Event()
+
+        listener = MagicMock(spec=MeterDataListener)
+
+        async def _new_data(_data):
+            done_event.set()
+
+        listener.new_data = _new_data
+        listener.read_failed = AsyncMock()
+        self.master.add_listener(listener)
+
+        result = asyncio.run(self.master.acquire_data())
+        self.assertTrue(result)
+        self.assertTrue(done_event.wait(timeout=2), "Listener worker did not process data")
+
+    def test_missed_update_stats_increment_for_slow_consumer(self):
+        """Slow consumers should increment missed-update metrics when sequence jumps occur."""
+        # Read all groups in cycle 1, then only 0x0000 in cycles 2 and 3.
+        reg_0000 = self.master.data.frame.dynamic_reg_map[0x0000]
+        self.master.data.frame.dynamic_reg_map[0x0500].skip_n_read = 2
+
+        responses_cycle_1 = self._build_responses_for_all()
+        responses_cycle_2 = [_make_successful_result(len(reg_0000.values))]
+        responses_cycle_3 = self._build_responses_for_all()
+        self.mock_client.read_holding_registers = AsyncMock(
+            side_effect=[*responses_cycle_1, *responses_cycle_2, *responses_cycle_3]
+        )
+
+        stats_updates = []
+        stats_event = threading.Event()
+
+        def _on_stats(stats):
+            stats_updates.append((stats.consumer_missed_updates_total, stats.consumer_max_seq_gap))
+            stats_event.set()
+
+        self.master.add_stats_listener(_on_stats)
+
+        listener = MagicMock(spec=MeterDataListener)
+
+        async def _slow_new_data(_data):
+            await asyncio.sleep(0.2)
+
+        listener.new_data = _slow_new_data
+        listener.read_failed = AsyncMock()
+        self.master.add_listener(listener)
+
+        with patch("app.carlo_gavazzi.meter_data.MeterData.update_from_frame", return_value=None):
+            self.assertTrue(asyncio.run(self.master.acquire_data()))
+            self.assertTrue(asyncio.run(self.master.acquire_data()))
+            self.assertTrue(asyncio.run(self.master.acquire_data()))
+
+        self.assertTrue(stats_event.wait(timeout=2), "Expected stats callback")
+
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline:
+            if any(missed_total >= 1 and max_gap >= 2 for missed_total, max_gap in stats_updates):
+                break
+            time.sleep(0.01)
+
+        self.assertTrue(
+            any(missed_total >= 1 and max_gap >= 2 for missed_total, max_gap in stats_updates),
+            f"Expected missed update stats, got snapshots={stats_updates}",
+        )
+
+
+if __name__ == "__main__":
+    unittest.main()
