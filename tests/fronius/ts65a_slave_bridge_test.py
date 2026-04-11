@@ -96,7 +96,7 @@ class TestTs65aSlaveBridge(unittest.TestCase):
         ]
         data.phases = phase_values
 
-        def _fake_convert_to_registers(value, _datatype, _word_order):
+        def _fake_convert_to_registers(value, _datatype):
             encoded = int(abs(value)) % 65536
             return [encoded, encoded]
 
@@ -154,7 +154,7 @@ class TestTs65aSlaveBridge(unittest.TestCase):
             ),
         ]
 
-        def _fake_convert_to_registers(value, _datatype, _word_order):
+        def _fake_convert_to_registers(value, _datatype):
             encoded = int(value)
             return [encoded, encoded + 1]
 

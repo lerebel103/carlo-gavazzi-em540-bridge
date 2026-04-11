@@ -24,10 +24,22 @@ from pymodbus.client import ModbusTcpClient
 logger = logging.getLogger()
 
 ZERO_FILL = -1
-
-_LITTLE_ENDIAN = "little"
 _DYNAMIC_PRIMARY_BLOCK_ADDR = 0x0000
 _ENERGY_BLOCK_ADDR = 0x0500
+
+
+def _convert_from_registers_little(registers: list[int], data_type: ModbusTcpClient.DATATYPE) -> int | float | str:
+    if len(registers) > 1:
+        registers = list(reversed(registers))
+    return ModbusTcpClient.convert_from_registers(registers, data_type)
+
+
+def _convert_to_registers_little(value: int | float | str, data_type: ModbusTcpClient.DATATYPE) -> list[int]:
+    registers = ModbusTcpClient.convert_to_registers(value, data_type)
+    if len(registers) > 1:
+        registers = list(reversed(registers))
+    return registers
+
 
 _STATIC_REGISTER_SPECS = (
     (0x0302, "Firmware Version and revision code", 1, 0),
@@ -286,17 +298,15 @@ class Em540Frame:
         energy_values = self.dynamic_reg_map[_ENERGY_BLOCK_ADDR].values
         remapped = self.remapped_reg_map
 
-        energy_converted = ModbusTcpClient.convert_from_registers(
-            energy_values[: len(_ENERGY_INT64_REMAPS) * 4],
-            ModbusTcpClient.DATATYPE.INT64,
-            _LITTLE_ENDIAN,
-        )
-
         for source_index, target_addr, alias_addr, divisor in _ENERGY_INT64_REMAPS:
-            converted_value = ModbusTcpClient.convert_to_registers(
-                int(energy_converted[source_index] / divisor),
+            offset = source_index * 4
+            source_value = _convert_from_registers_little(
+                energy_values[offset : offset + 4],
+                ModbusTcpClient.DATATYPE.INT64,
+            )
+            converted_value = _convert_to_registers_little(
+                int(source_value / divisor),
                 ModbusTcpClient.DATATYPE.INT32,
-                _LITTLE_ENDIAN,
             )
             remapped[target_addr].values = converted_value
             remapped[alias_addr].values = converted_value
@@ -307,17 +317,15 @@ class Em540Frame:
             if alias_addr is not None:
                 remapped[alias_addr].values = copied_value
 
-        frequency_value = ModbusTcpClient.convert_to_registers(
+        frequency_value = _convert_to_registers_little(
             int(
-                ModbusTcpClient.convert_from_registers(
+                _convert_from_registers_little(
                     energy_values[0x3C:0x3E],
                     ModbusTcpClient.DATATYPE.INT32,
-                    _LITTLE_ENDIAN,
                 )
                 / 100
             ),
             ModbusTcpClient.DATATYPE.INT16,
-            _LITTLE_ENDIAN,
         )
         remapped[0x0033].values = frequency_value
         remapped[0x0110].values = [frequency_value[0], 0]

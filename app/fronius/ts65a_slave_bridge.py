@@ -312,7 +312,7 @@ class Ts65aSlaveBridge(MeterDataListener):
         values = self._dynamic_values()
 
         for value in values:
-            reg_pair = ModbusTcpClient.convert_to_registers(value, ModbusTcpClient.DATATYPE.FLOAT32, "big")
+            reg_pair = ModbusTcpClient.convert_to_registers(value, ModbusTcpClient.DATATYPE.FLOAT32)
             registers[index] = reg_pair[0]
             registers[index + 1] = reg_pair[1]
             index += 2

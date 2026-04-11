@@ -5,6 +5,14 @@ from pymodbus.client import ModbusTcpClient
 from app.carlo_gavazzi.em540_data import Em540Frame
 
 
+def _convert_from_registers_little(registers: list[int], data_type: ModbusTcpClient.DATATYPE) -> int | float | str:
+    # Pymodbus >=3.8 removed word_order, so we reverse multi-word register groups
+    # to preserve the existing little-endian word-order behavior.
+    if len(registers) > 1:
+        registers = list(reversed(registers))
+    return ModbusTcpClient.convert_from_registers(registers, data_type)
+
+
 class SystemData:
     def __init__(self):
         self.line_neutral_voltage: float = 0.0
@@ -23,46 +31,23 @@ class SystemData:
         # An is computed separately
 
         self.line_neutral_voltage = (
-            ModbusTcpClient.convert_from_registers(
-                registers[0x024 : 0x024 + 2], ModbusTcpClient.DATATYPE.INT32, "little"
-            )
-            / 10
+            _convert_from_registers_little(registers[0x024 : 0x024 + 2], ModbusTcpClient.DATATYPE.INT32) / 10
         )
         self.line_line_voltage = (
-            ModbusTcpClient.convert_from_registers(
-                registers[0x026 : 0x026 + 2], ModbusTcpClient.DATATYPE.INT32, "little"
-            )
-            / 10
+            _convert_from_registers_little(registers[0x026 : 0x026 + 2], ModbusTcpClient.DATATYPE.INT32) / 10
         )
-        self.power = (
-            ModbusTcpClient.convert_from_registers(
-                registers[0x028 : 0x028 + 2], ModbusTcpClient.DATATYPE.INT32, "little"
-            )
-            / 10
-        )
+        self.power = _convert_from_registers_little(registers[0x028 : 0x028 + 2], ModbusTcpClient.DATATYPE.INT32) / 10
         self.apparent_power = (
-            ModbusTcpClient.convert_from_registers(
-                registers[0x02A : 0x02A + 2], ModbusTcpClient.DATATYPE.INT32, "little"
-            )
-            / 10
+            _convert_from_registers_little(registers[0x02A : 0x02A + 2], ModbusTcpClient.DATATYPE.INT32) / 10
         )
         self.reactive_power = (
-            ModbusTcpClient.convert_from_registers(
-                registers[0x02C : 0x02C + 2], ModbusTcpClient.DATATYPE.INT32, "little"
-            )
-            / 10
+            _convert_from_registers_little(registers[0x02C : 0x02C + 2], ModbusTcpClient.DATATYPE.INT32) / 10
         )
         self.power_factor = (
-            ModbusTcpClient.convert_from_registers(
-                registers[0x031 : 0x031 + 1], ModbusTcpClient.DATATYPE.INT16, "little"
-            )
-            / 1000
+            _convert_from_registers_little(registers[0x031 : 0x031 + 1], ModbusTcpClient.DATATYPE.INT16) / 1000
         )
         self.frequency = (
-            ModbusTcpClient.convert_from_registers(
-                registers[0x033 : 0x033 + 1], ModbusTcpClient.DATATYPE.INT16, "little"
-            )
-            / 10
+            _convert_from_registers_little(registers[0x033 : 0x033 + 1], ModbusTcpClient.DATATYPE.INT16) / 10
         )
 
         # print all above values
@@ -107,96 +92,77 @@ class OtherEnergies:
 
     def parse(self, registers):
         self.kwh_plus_total = (
-            ModbusTcpClient.convert_from_registers(registers[0x00 : 0x00 + 4], ModbusTcpClient.DATATYPE.INT64, "little")
-            / 1000.0
+            _convert_from_registers_little(registers[0x00 : 0x00 + 4], ModbusTcpClient.DATATYPE.INT64) / 1000.0
         )
 
         self.kvarh_plus_total = (
-            ModbusTcpClient.convert_from_registers(registers[0x04 : 0x04 + 4], ModbusTcpClient.DATATYPE.INT64, "little")
-            / 1000.0
+            _convert_from_registers_little(registers[0x04 : 0x04 + 4], ModbusTcpClient.DATATYPE.INT64) / 1000.0
         )
 
         self.kwh_plus_l1 = (
-            ModbusTcpClient.convert_from_registers(registers[0x10 : 0x10 + 4], ModbusTcpClient.DATATYPE.INT64, "little")
-            / 1000.0
+            _convert_from_registers_little(registers[0x10 : 0x10 + 4], ModbusTcpClient.DATATYPE.INT64) / 1000.0
         )
         self.kwh_plus_l2 = (
-            ModbusTcpClient.convert_from_registers(registers[0x14 : 0x14 + 4], ModbusTcpClient.DATATYPE.INT64, "little")
-            / 1000.0
+            _convert_from_registers_little(registers[0x14 : 0x14 + 4], ModbusTcpClient.DATATYPE.INT64) / 1000.0
         )
         self.kwh_plus_l3 = (
-            ModbusTcpClient.convert_from_registers(registers[0x18 : 0x18 + 4], ModbusTcpClient.DATATYPE.INT64, "little")
-            / 1000.0
+            _convert_from_registers_little(registers[0x18 : 0x18 + 4], ModbusTcpClient.DATATYPE.INT64) / 1000.0
         )
 
         self.kwh_neg_total = (
-            ModbusTcpClient.convert_from_registers(registers[0x1C : 0x1C + 4], ModbusTcpClient.DATATYPE.INT64, "little")
-            / 1000.0
+            _convert_from_registers_little(registers[0x1C : 0x1C + 4], ModbusTcpClient.DATATYPE.INT64) / 1000.0
         )
 
         self.kvarh_neg_total = (
-            ModbusTcpClient.convert_from_registers(registers[0x24 : 0x24 + 4], ModbusTcpClient.DATATYPE.INT64, "little")
-            / 1000.0
+            _convert_from_registers_little(registers[0x24 : 0x24 + 4], ModbusTcpClient.DATATYPE.INT64) / 1000.0
         )
 
         self.kvah_total = (
-            ModbusTcpClient.convert_from_registers(registers[0x2C : 0x2C + 4], ModbusTcpClient.DATATYPE.INT64, "little")
-            / 1000.0
+            _convert_from_registers_little(registers[0x2C : 0x2C + 4], ModbusTcpClient.DATATYPE.INT64) / 1000.0
         )
 
         self.run_hour_meter = (
-            ModbusTcpClient.convert_from_registers(registers[0x34 : 0x34 + 2], ModbusTcpClient.DATATYPE.INT32, "little")
-            / 100.0
+            _convert_from_registers_little(registers[0x34 : 0x34 + 2], ModbusTcpClient.DATATYPE.INT32) / 100.0
         )
 
         self.run_hour_meter_neg_kwh = (
-            ModbusTcpClient.convert_from_registers(registers[0x36 : 0x36 + 2], ModbusTcpClient.DATATYPE.INT32, "little")
-            / 100.0
+            _convert_from_registers_little(registers[0x36 : 0x36 + 2], ModbusTcpClient.DATATYPE.INT32) / 100.0
         )
 
         self.frequency = (
-            ModbusTcpClient.convert_from_registers(registers[0x3C : 0x3C + 2], ModbusTcpClient.DATATYPE.INT32, "little")
-            / 1000.0
+            _convert_from_registers_little(registers[0x3C : 0x3C + 2], ModbusTcpClient.DATATYPE.INT32) / 1000.0
         )
 
         self.kwh_plus_partial = (
-            ModbusTcpClient.convert_from_registers(registers[0x08 : 0x08 + 4], ModbusTcpClient.DATATYPE.INT64, "little")
-            / 1000.0
+            _convert_from_registers_little(registers[0x08 : 0x08 + 4], ModbusTcpClient.DATATYPE.INT64) / 1000.0
         )
 
         self.kvarh_plus_partial = (
-            ModbusTcpClient.convert_from_registers(registers[0x0C : 0x0C + 4], ModbusTcpClient.DATATYPE.INT64, "little")
-            / 1000.0
+            _convert_from_registers_little(registers[0x0C : 0x0C + 4], ModbusTcpClient.DATATYPE.INT64) / 1000.0
         )
 
         self.kwh_neg_partial = (
-            ModbusTcpClient.convert_from_registers(registers[0x20 : 0x20 + 4], ModbusTcpClient.DATATYPE.INT64, "little")
-            / 1000.0
+            _convert_from_registers_little(registers[0x20 : 0x20 + 4], ModbusTcpClient.DATATYPE.INT64) / 1000.0
         )
 
         self.kvarh_neg_partial = (
-            ModbusTcpClient.convert_from_registers(registers[0x28 : 0x28 + 4], ModbusTcpClient.DATATYPE.INT64, "little")
-            / 1000.0
+            _convert_from_registers_little(registers[0x28 : 0x28 + 4], ModbusTcpClient.DATATYPE.INT64) / 1000.0
         )
 
         self.kvah_partial = (
-            ModbusTcpClient.convert_from_registers(registers[0x30 : 0x30 + 4], ModbusTcpClient.DATATYPE.INT64, "little")
-            / 1000.0
+            _convert_from_registers_little(registers[0x30 : 0x30 + 4], ModbusTcpClient.DATATYPE.INT64) / 1000.0
         )
 
         self.run_hour_meter_partial = (
-            ModbusTcpClient.convert_from_registers(registers[0x38 : 0x38 + 2], ModbusTcpClient.DATATYPE.INT32, "little")
-            / 100.0
+            _convert_from_registers_little(registers[0x38 : 0x38 + 2], ModbusTcpClient.DATATYPE.INT32) / 100.0
         )
 
         self.run_hour_meter_neg_kwh_partial = (
-            ModbusTcpClient.convert_from_registers(registers[0x3A : 0x3A + 2], ModbusTcpClient.DATATYPE.INT32, "little")
-            / 100.0
+            _convert_from_registers_little(registers[0x3A : 0x3A + 2], ModbusTcpClient.DATATYPE.INT32) / 100.0
         )
 
         self.run_hour_life_counter = (
-            ModbusTcpClient.convert_from_registers(registers[0x3E : 0x3E + 2], ModbusTcpClient.DATATYPE.INT32, "little")
-            / 100.0
+            _convert_from_registers_little(registers[0x3E : 0x3E + 2], ModbusTcpClient.DATATYPE.INT32) / 100.0
         )
 
         # print(self)
@@ -224,44 +190,33 @@ class PhaseData:
     def parse(self, phase_idx, registers):  # Each block of 7 registers corresponds to a phase:
         i = phase_idx * 2 + 0x0000
         self.line_neutral_voltage = (
-            ModbusTcpClient.convert_from_registers(registers[i : i + 2], ModbusTcpClient.DATATYPE.INT32, "little")
-            / 10.0
+            _convert_from_registers_little(registers[i : i + 2], ModbusTcpClient.DATATYPE.INT32) / 10.0
         )
 
         i = phase_idx * 2 + 0x0006
         self.line_line_voltage = (
-            ModbusTcpClient.convert_from_registers(registers[i : i + 2], ModbusTcpClient.DATATYPE.INT32, "little")
-            / 10.0
+            _convert_from_registers_little(registers[i : i + 2], ModbusTcpClient.DATATYPE.INT32) / 10.0
         )
 
         i = phase_idx * 2 + 0x000C
-        self.current = (
-            ModbusTcpClient.convert_from_registers(registers[i : i + 2], ModbusTcpClient.DATATYPE.INT32, "little")
-            / 1000.0
-        )
+        self.current = _convert_from_registers_little(registers[i : i + 2], ModbusTcpClient.DATATYPE.INT32) / 1000.0
 
         i = phase_idx * 2 + 0x0012
-        self.power = (
-            ModbusTcpClient.convert_from_registers(registers[i : i + 2], ModbusTcpClient.DATATYPE.INT32, "little")
-            / 10.0
-        )
+        self.power = _convert_from_registers_little(registers[i : i + 2], ModbusTcpClient.DATATYPE.INT32) / 10.0
 
         i = phase_idx * 2 + 0x0018
         self.apparent_power = (
-            ModbusTcpClient.convert_from_registers(registers[i : i + 2], ModbusTcpClient.DATATYPE.INT32, "little")
-            / 10.0
+            _convert_from_registers_little(registers[i : i + 2], ModbusTcpClient.DATATYPE.INT32) / 10.0
         )
 
         i = phase_idx * 2 + 0x001E
         self.reactive_power = (
-            ModbusTcpClient.convert_from_registers(registers[i : i + 2], ModbusTcpClient.DATATYPE.INT32, "little")
-            / 10.0
+            _convert_from_registers_little(registers[i : i + 2], ModbusTcpClient.DATATYPE.INT32) / 10.0
         )
 
         i = phase_idx + 0x002E
         self.power_factor = (
-            ModbusTcpClient.convert_from_registers(registers[i : i + 1], ModbusTcpClient.DATATYPE.INT16, "little")
-            / 1000.0
+            _convert_from_registers_little(registers[i : i + 1], ModbusTcpClient.DATATYPE.INT16) / 1000.0
         )
 
         # print(self)
@@ -289,6 +244,77 @@ class MeterData:
     @property
     def timestamp(self) -> float:
         return self._timestamp
+
+    @property
+    def serial_number(self) -> str:
+        """Extract serial number from static registers 0x5000 (8 registers).
+
+        Decodes ASCII characters from register values, filtering out non-printable
+        characters (following Victron's decoding strategy).
+        """
+        serial_reg = self.frame.static_reg_map.get(0x5000)
+        if serial_reg is None:
+            return ""
+
+        # Try both byte orders (high-byte-first and low-byte-first)
+        def decode_ascii(regs, low_byte_first):
+            raw_bytes = bytearray()
+            for reg in regs:
+                high = (reg >> 8) & 0xFF
+                low = reg & 0xFF
+                if low_byte_first:
+                    raw_bytes.extend((low, high))
+                else:
+                    raw_bytes.extend((high, low))
+
+            # Extract only printable ASCII characters
+            printable = []
+            for b in raw_bytes:
+                if b == 0:  # Stop at null terminator
+                    break
+                if 32 <= b <= 126:  # Printable ASCII range
+                    printable.append(chr(b))
+                else:
+                    break  # Stop at first non-printable character
+            return "".join(printable)
+
+        serial_be = decode_ascii(serial_reg.values, low_byte_first=False)
+        serial_le = decode_ascii(serial_reg.values, low_byte_first=True)
+
+        # Prefer encoding that produces valid alphanumeric/hyphen strings
+        def score(candidate):
+            if not candidate:
+                return -1
+            valid_chars = sum(c.isalnum() or c in "-_" for c in candidate)
+            return valid_chars * 100 + len(candidate)
+
+        return serial_be if score(serial_be) >= score(serial_le) else serial_le
+
+    @property
+    def model_number(self) -> str:
+        """Extract model number from static registers 0x000B (Device Type).
+
+        Maps device type IDs to model names:
+        - 1744-1763: EM540
+        - 2096, 1956: EM530
+        """
+        device_type_reg = self.frame.static_reg_map.get(0x000B)
+        if device_type_reg is None or not device_type_reg.values:
+            return ""
+
+        device_type_id = device_type_reg.values[0]
+        if 1744 <= device_type_id <= 1763:
+            return "EM540"
+        elif device_type_id in [2096, 1956]:
+            return "EM530"
+        else:
+            return ""
+
+    @property
+    def static_data_valid(self) -> bool:
+        """Check if static data has been read (serial number is not all zeros)."""
+        serial_number = self.serial_number
+        return len(serial_number) > 0 and serial_number != "\x00" * 16
 
     def update_from_frame(self):
         # Kee last update timestamp

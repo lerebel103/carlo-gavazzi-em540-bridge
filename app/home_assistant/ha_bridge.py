@@ -105,6 +105,7 @@ class HABridge(MeterDataListener):
         self._snapshot_pending = False
         self._data_available = False
         self._availability_dirty = False
+        self._static_data_set = False
 
         if state is not None and config_manager is not None:
             self._config_entities = HAConfigEntities(
@@ -203,7 +204,15 @@ class HABridge(MeterDataListener):
             self._last_payload_by_topic[topic] = msg_str
 
     async def new_data(self, data: MeterData):
-        self._set_data_available(True)
+        # Only set static device info if static registers have been read
+        if data.static_data_valid and not self._static_data_set:
+            if data.serial_number:
+                self.sensors.set_device_serial_number(data.serial_number)
+            if data.model_number:
+                self.sensors.set_device_model_number(data.model_number)
+            self._static_data_set = True
+
+        self._set_data_available(data.static_data_valid)
         with self._condition:
             self._copy_snapshot(data, self._back_snapshot)
             self._front_snapshot, self._back_snapshot = self._back_snapshot, self._front_snapshot

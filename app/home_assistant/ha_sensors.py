@@ -13,6 +13,7 @@ def configure_sensor_topic_metadata(
     namespace: str,
     topic_prefix: str,
     availability_topic: str,
+    serial_number: str = "",
 ) -> None:
     for sensor in sensors:
         sensor.unique_id = f"{namespace}_{sensor.safe_name}"
@@ -21,6 +22,8 @@ def configure_sensor_topic_metadata(
         sensor.availability_topic = availability_topic
         sensor.device["identifiers"] = [namespace]
         sensor.device["model"] = discovery_model_name(topic_prefix)
+        if serial_number:
+            sensor.device["serial_number"] = serial_number
 
 
 class Sensor:
@@ -53,7 +56,7 @@ class Sensor:
         self.device = {
             "name": "EM540 Energy Meter Bridge",
             "identifiers": ["em540_bridge"],
-            "manufacturer": "LeRebel",
+            "manufacturer": "lerebel103",
             "model": "EM540 Bridge",
             "sw_version": __version__,
         }
@@ -335,6 +338,54 @@ class EnergyMeterSensor:
             topic_prefix=self._topic_prefix,
             availability_topic=self.availability_topic,
         )
+
+    def set_device_serial_number(self, serial_number: str) -> None:
+        """Update device serial number in all sensors when static data becomes available."""
+        if not serial_number:
+            return
+        sensors = (
+            [self.frequency]
+            + self.voltage_sensors
+            + self.current_sensors
+            + self.power_sensors
+            + self.reactive_power_sensors
+            + self.apparent_power_sensors
+            + self.power_factor_sensors
+            + [
+                self.energy_import,
+                self.energy_export,
+                self.kvarh_neg_total,
+                self.kvarh_plus_total,
+                self.run_hour_meter,
+                self.kvah_total,
+            ]
+        )
+        for sensor in sensors:
+            sensor.device["serial_number"] = serial_number
+
+    def set_device_model_number(self, model_number: str) -> None:
+        """Update device model number in all sensors when static data becomes available."""
+        if not model_number:
+            return
+        sensors = (
+            [self.frequency]
+            + self.voltage_sensors
+            + self.current_sensors
+            + self.power_sensors
+            + self.reactive_power_sensors
+            + self.apparent_power_sensors
+            + self.power_factor_sensors
+            + [
+                self.energy_import,
+                self.energy_export,
+                self.kvarh_neg_total,
+                self.kvarh_plus_total,
+                self.run_hour_meter,
+                self.kvah_total,
+            ]
+        )
+        for sensor in sensors:
+            sensor.device["model"] = model_number
 
     def update(self, data: MeterData):
         self.frequency.update_value(data.system.frequency)

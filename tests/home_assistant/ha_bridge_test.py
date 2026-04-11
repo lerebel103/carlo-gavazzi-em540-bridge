@@ -102,6 +102,8 @@ class TestHABridge(unittest.TestCase):
         data.system.power = 1234.0
         data.phases[0].current = 1.2
         data.other_energies.kwh_plus_total = 12.3
+        # Set valid serial number to make static_data_valid return True
+        data.frame.static_reg_map[0x5000].values = [0x3142, 0x3344, 0x3546, 0x3748, 0x3949, 0x4141, 0x4242, 0x4343]
         self.bridge.sensors.update = MagicMock()
         self.bridge._diagnostics.new_data = MagicMock()
         self.bridge._condition = MagicMock()

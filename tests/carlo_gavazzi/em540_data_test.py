@@ -11,17 +11,17 @@ from app.carlo_gavazzi.em540_data import ZERO_FILL, Em540Frame, RegisterDefiniti
 
 def encode_int32_le(value: int) -> list:
     """Encode a signed 32-bit integer as two 16-bit registers in little-endian word order."""
-    return ModbusTcpClient.convert_to_registers(value, ModbusTcpClient.DATATYPE.INT32, "little")
+    return list(reversed(ModbusTcpClient.convert_to_registers(value, ModbusTcpClient.DATATYPE.INT32)))
 
 
 def encode_int16_le(value: int) -> list:
     """Encode a signed 16-bit integer as one 16-bit register."""
-    return ModbusTcpClient.convert_to_registers(value, ModbusTcpClient.DATATYPE.INT16, "little")
+    return ModbusTcpClient.convert_to_registers(value, ModbusTcpClient.DATATYPE.INT16)
 
 
 def encode_int64_le(value: int) -> list:
     """Encode a signed 64-bit integer as four 16-bit registers in little-endian word order."""
-    return ModbusTcpClient.convert_to_registers(value, ModbusTcpClient.DATATYPE.INT64, "little")
+    return list(reversed(ModbusTcpClient.convert_to_registers(value, ModbusTcpClient.DATATYPE.INT64)))
 
 
 def build_dynamic_registers(
@@ -342,7 +342,7 @@ class TestEm540Frame(unittest.TestCase):
         self.frame.remap_registers()
 
         # Expected: INT32 encoding of kwh_wh / 100
-        expected = ModbusTcpClient.convert_to_registers(int(kwh_wh / 100), ModbusTcpClient.DATATYPE.INT32, "little")
+        expected = encode_int32_le(int(kwh_wh / 100))
         self.assertEqual(self.frame.remapped_reg_map[0x0034].values, expected)
 
     # --- Requirement 5.4: frequency INT32 Hz*1000 → INT16 Hz*10 ---
@@ -355,9 +355,7 @@ class TestEm540Frame(unittest.TestCase):
         self.frame.remap_registers()
 
         # Expected: INT16 encoding of 50000 / 100 = 500 (Hz*10)
-        expected = ModbusTcpClient.convert_to_registers(
-            int(freq_hz1000 / 100), ModbusTcpClient.DATATYPE.INT16, "little"
-        )
+        expected = encode_int16_le(int(freq_hz1000 / 100))
         self.assertEqual(self.frame.remapped_reg_map[0x0033].values, expected)
 
     # --- Requirement 5.5: dual-mapped registers contain identical values ---
