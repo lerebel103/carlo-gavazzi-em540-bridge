@@ -50,6 +50,7 @@ async def process_loop():
         em540_master.add_stats_listener(mqtt_bridge.on_em540_master_stats)
         em540_slave.add_stats_listener(mqtt_bridge.on_em540_slave_stats)
         ts65a_slave.add_stats_listener(mqtt_bridge.on_ts65a_slave_stats)
+        goodwe_gm3000_slave.add_stats_listener(mqtt_bridge.on_goodwe_slave_stats)
         try:
             mqtt_bridge.connect()
         except Exception:

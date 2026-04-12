@@ -299,6 +299,7 @@ class TestMainLoopPriority(unittest.TestCase):
         mqtt_bridge.on_em540_master_stats = MagicMock()
         mqtt_bridge.on_em540_slave_stats = MagicMock()
         mqtt_bridge.on_ts65a_slave_stats = MagicMock()
+        mqtt_bridge.on_goodwe_slave_stats = MagicMock()
         mqtt_bridge.connect = MagicMock(side_effect=RuntimeError("should not escape"))
 
         call_count = {"n": 0}
@@ -339,6 +340,7 @@ class TestMainLoopPriority(unittest.TestCase):
         mqtt_bridge.on_em540_master_stats = MagicMock()
         mqtt_bridge.on_em540_slave_stats = MagicMock()
         mqtt_bridge.on_ts65a_slave_stats = MagicMock()
+        mqtt_bridge.on_goodwe_slave_stats = MagicMock()
         mqtt_bridge.connect = MagicMock()
         mqtt_bridge.stop = MagicMock()
 

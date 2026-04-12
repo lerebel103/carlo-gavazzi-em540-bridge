@@ -27,6 +27,43 @@ def test_em540_tcp_client_stats_are_published_in_diagnostics_payload():
     assert payload_obj["em540_tcp_client_disconnect_count"] == 11
 
 
+def test_goodwe_client_and_circuit_stats_are_published_in_diagnostics_payload():
+    diagnostics = HADiagnostics(topic_prefix="test")
+
+    goodwe_stats = SimpleNamespace(
+        rtu_client_count=0,
+        rtu_client_disconnect_count=0,
+        tcp_client_count=0,
+        tcp_client_disconnect_count=0,
+        circuit_breaker_open=False,
+        circuit_breaker_open_count=0,
+        stale_data_age_ms=0.0,
+        dropped_stale_request_count=0,
+    )
+    goodwe_stats.rtu_client_count = 2
+    goodwe_stats.rtu_client_disconnect_count = 5
+    goodwe_stats.tcp_client_count = 4
+    goodwe_stats.tcp_client_disconnect_count = 9
+    goodwe_stats.circuit_breaker_open = True
+    goodwe_stats.circuit_breaker_open_count = 7
+    goodwe_stats.stale_data_age_ms = 345.6
+    goodwe_stats.dropped_stale_request_count = 12
+    diagnostics.set_goodwe_slave_stats(goodwe_stats)
+
+    with patch.dict("sys.modules", {"uptime": SimpleNamespace(uptime=lambda: 1)}):
+        _, payload = diagnostics.mqtt_data()
+    payload_obj = json.loads(payload)
+
+    assert payload_obj["goodwe_rtu_client_count"] == 2
+    assert payload_obj["goodwe_rtu_client_disconnect_count"] == 5
+    assert payload_obj["goodwe_tcp_client_count"] == 4
+    assert payload_obj["goodwe_tcp_client_disconnect_count"] == 9
+    assert payload_obj["goodwe_circuit_breaker_open"] == 1
+    assert payload_obj["goodwe_circuit_breaker_open_count"] == 7
+    assert payload_obj["goodwe_stale_data_age"] == 345.6
+    assert payload_obj["goodwe_dropped_stale_requests"] == 12
+
+
 def test_diagnostics_payload_contains_all_declared_sensor_keys():
     diagnostics = HADiagnostics(topic_prefix="test")
 
@@ -84,3 +121,11 @@ def test_only_selected_diagnostics_are_enabled_by_default():
         "ts65a_stale_data_age",
         "ts65a_dropped_stale_requests",
     }
+
+    # Goodwe diagnostics should be exposed but disabled by default.
+    goodwe_enabled = {
+        sensor.safe_name
+        for sensor in diagnostics._all_sensors()
+        if sensor.enabled_by_default and sensor.safe_name.startswith("goodwe_")
+    }
+    assert goodwe_enabled == set()

@@ -243,6 +243,9 @@ class HABridge(MeterDataListener):
     def on_ts65a_slave_stats(self, stats: Ts65aSlaveStats):
         self._diagnostics.set_ts_65a_slave_stats(stats)
 
+    def on_goodwe_slave_stats(self, stats):
+        self._diagnostics.set_goodwe_slave_stats(stats)
+
     def on_em540_slave_stats(self, stats: EM540SlaveStats):
         self._diagnostics.set_em540_slave_stats(stats)
 

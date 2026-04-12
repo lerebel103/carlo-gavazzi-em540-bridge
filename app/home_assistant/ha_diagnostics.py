@@ -16,6 +16,7 @@ class HADiagnostics:
         self._em540_slave_stats = None
         self._em540_master_stats = None
         self._ts65a_slave_stats = None
+        self._goodwe_slave_stats = None
 
         self._last_master_rate_timestamp = 0.0
         self._last_master_counter = 0
@@ -315,6 +316,88 @@ class HADiagnostics:
             enabled_by_default=True,
         )
 
+        # Goodwe specific diagnostics (disabled by default)
+        self.goodwe_rtu_client_count = Sensor(
+            "Goodwe RTU Client Count",
+            None,
+            None,
+            "measurement",
+            self.state_topic,
+            precision=0,
+            entity_category="diagnostic",
+            enabled_by_default=False,
+        )
+        self.goodwe_rtu_client_disconnect_count = Sensor(
+            "Goodwe RTU Client Disconnect Count",
+            None,
+            None,
+            "measurement",
+            self.state_topic,
+            precision=0,
+            entity_category="diagnostic",
+            enabled_by_default=False,
+        )
+        self.goodwe_tcp_client_count = Sensor(
+            "Goodwe TCP Client Count",
+            None,
+            None,
+            "measurement",
+            self.state_topic,
+            precision=0,
+            entity_category="diagnostic",
+            enabled_by_default=False,
+        )
+        self.goodwe_tcp_client_disconnect_count = Sensor(
+            "Goodwe TCP Client Disconnect Count",
+            None,
+            None,
+            "measurement",
+            self.state_topic,
+            precision=0,
+            entity_category="diagnostic",
+            enabled_by_default=False,
+        )
+        self.goodwe_circuit_breaker_open = Sensor(
+            "Goodwe Circuit Breaker Open",
+            None,
+            None,
+            "measurement",
+            self.state_topic,
+            precision=0,
+            entity_category="diagnostic",
+            enabled_by_default=False,
+        )
+        self.goodwe_circuit_breaker_open_count = Sensor(
+            "Goodwe Circuit Breaker Open Count",
+            None,
+            None,
+            "measurement",
+            self.state_topic,
+            precision=0,
+            entity_category="diagnostic",
+            enabled_by_default=False,
+        )
+        self.goodwe_stale_data_age_ms = Sensor(
+            "Goodwe Stale Data Age",
+            "ms",
+            "duration",
+            "measurement",
+            self.state_topic,
+            precision=1,
+            entity_category="diagnostic",
+            enabled_by_default=False,
+        )
+        self.goodwe_dropped_stale_request_count = Sensor(
+            "Goodwe Dropped Stale Requests",
+            None,
+            None,
+            "measurement",
+            self.state_topic,
+            precision=0,
+            entity_category="diagnostic",
+            enabled_by_default=False,
+        )
+
         self.em540_rtu_client_count = Sensor(
             "EM540 RTU Client Count",
             None,
@@ -441,6 +524,14 @@ class HADiagnostics:
             self.ts65a_circuit_breaker_open_count,
             self.ts65a_stale_data_age_ms,
             self.ts65a_dropped_stale_request_count,
+            self.goodwe_rtu_client_count,
+            self.goodwe_rtu_client_disconnect_count,
+            self.goodwe_tcp_client_count,
+            self.goodwe_tcp_client_disconnect_count,
+            self.goodwe_circuit_breaker_open,
+            self.goodwe_circuit_breaker_open_count,
+            self.goodwe_stale_data_age_ms,
+            self.goodwe_dropped_stale_request_count,
         ]
 
     def new_data(self, data: MeterData):
@@ -520,6 +611,15 @@ class HADiagnostics:
             self.ts65a_circuit_breaker_open_count.update_value(self._ts65a_slave_stats.circuit_breaker_open_count)
             self.ts65a_stale_data_age_ms.update_value(self._ts65a_slave_stats.stale_data_age_ms)
             self.ts65a_dropped_stale_request_count.update_value(self._ts65a_slave_stats.dropped_stale_request_count)
+        if self._goodwe_slave_stats is not None:
+            self.goodwe_rtu_client_count.update_value(self._goodwe_slave_stats.rtu_client_count)
+            self.goodwe_rtu_client_disconnect_count.update_value(self._goodwe_slave_stats.rtu_client_disconnect_count)
+            self.goodwe_tcp_client_count.update_value(self._goodwe_slave_stats.tcp_client_count)
+            self.goodwe_tcp_client_disconnect_count.update_value(self._goodwe_slave_stats.tcp_client_disconnect_count)
+            self.goodwe_circuit_breaker_open.update_value(1 if self._goodwe_slave_stats.circuit_breaker_open else 0)
+            self.goodwe_circuit_breaker_open_count.update_value(self._goodwe_slave_stats.circuit_breaker_open_count)
+            self.goodwe_stale_data_age_ms.update_value(self._goodwe_slave_stats.stale_data_age_ms)
+            self.goodwe_dropped_stale_request_count.update_value(self._goodwe_slave_stats.dropped_stale_request_count)
 
         sensors = self._all_sensors()
 
@@ -546,3 +646,6 @@ class HADiagnostics:
 
     def set_ts_65a_slave_stats(self, stats: Ts65aSlaveStats):
         self._ts65a_slave_stats = stats
+
+    def set_goodwe_slave_stats(self, stats):
+        self._goodwe_slave_stats = stats
