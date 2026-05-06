@@ -243,7 +243,7 @@ class HAConfigEntities:
 
         try:
             value = entity.parse_value(message.payload.decode())
-        except (ValueError, TypeError):
+        except ValueError, TypeError:
             logger.warning("Invalid value for %s: %s", entity.name, message.payload)
             return
 

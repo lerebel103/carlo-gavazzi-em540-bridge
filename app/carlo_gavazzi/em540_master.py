@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import os
+import struct
 import threading
 import time
 from threading import Thread
@@ -240,13 +241,20 @@ class Em540Master:
         modbus_read_ms = (time.perf_counter() - read_start) * 1000.0
         if is_ok:
             process_start = time.perf_counter()
-            self._back_data.update_from_frame()
+            try:
+                self._back_data.update_from_frame()
+            except (struct.error, ValueError, OverflowError) as e:
+                logger.warning("Corrupt frame data, dropping cycle: %s", e)
+                is_ok = False
+                for listener in self._listeners:
+                    await listener.read_failed()
 
-            # Atomic swap so listeners always read a coherent, latest snapshot.
-            with self._condition:
-                self._front_data, self._back_data = self._back_data, self._front_data
-                self._data_seq += 1
-                self._condition.notify_all()
+            if is_ok:
+                # Atomic swap so listeners always read a coherent, latest snapshot.
+                with self._condition:
+                    self._front_data, self._back_data = self._back_data, self._front_data
+                    self._data_seq += 1
+                    self._condition.notify_all()
             post_read_processing_ms = (time.perf_counter() - process_start) * 1000.0
         else:
             # Now notify listeners

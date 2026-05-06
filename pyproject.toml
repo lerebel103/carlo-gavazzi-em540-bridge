@@ -5,7 +5,7 @@ requires-python = ">=3.14"
 
 [tool.ruff]
 line-length = 120
-target-version = "py312"
+target-version = "py314"
 exclude = [
     ".venv",
     "__pycache__",

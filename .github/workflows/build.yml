@@ -80,7 +80,23 @@ jobs:
             exit 0
           fi
 
-          # Pull requests and non-publish events: build only, no push.
+          # Pull requests: push with pr-<number> tag so the image is available for testing.
+          if [[ "${GITHUB_EVENT_NAME}" == "pull_request" ]]; then
+            PR_NUMBER="${{ github.event.pull_request.number }}"
+            SHORT_SHA="${{ github.event.pull_request.head.sha }}"
+            SHORT_SHA="${SHORT_SHA::12}"
+            echo "push=true" >> "$GITHUB_OUTPUT"
+            echo "version_tag=" >> "$GITHUB_OUTPUT"
+            {
+              echo "tags<<EOF"
+              echo "${IMAGE_NAME}:pr-${PR_NUMBER}"
+              echo "${IMAGE_NAME}:pr-${PR_NUMBER}-${SHORT_SHA}"
+              echo "EOF"
+            } >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Other non-publish events: build only, no push.
           echo "push=false" >> "$GITHUB_OUTPUT"
           echo "version_tag=" >> "$GITHUB_OUTPUT"
           {
