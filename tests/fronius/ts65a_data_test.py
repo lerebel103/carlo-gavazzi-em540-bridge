@@ -118,7 +118,7 @@ class TestTs65aMeterData(unittest.TestCase):
         self.meter.update(self.data)
         self.meter.update(self.data)
         self.meter.update(self.data)
-        self.logger.warn.assert_not_called()
+        self.logger.debug.assert_not_called()
         self.assertEqual(len(self.meter._power.values), 3)
 
         # Now go above the limit, and we should see a reset and the latest values stored
@@ -126,7 +126,7 @@ class TestTs65aMeterData(unittest.TestCase):
         self.data.system.power = -1001
         self.meter.update(self.data)
 
-        self.logger.warn.assert_called()
+        self.logger.debug.assert_called()
         # After reset, running averages should be reset to only the latest value
         self.assertEqual(len(self.meter._power.values), 1)
         self.assertEqual(self.meter._power.values[0], -1001)
