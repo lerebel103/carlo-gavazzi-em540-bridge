@@ -273,7 +273,7 @@ def entity_index_and_invalid_value(draw):
         from hypothesis import assume
 
         assume(False)
-    except (ValueError, TypeError):
+    except ValueError, TypeError:
         pass
 
     return idx, value
