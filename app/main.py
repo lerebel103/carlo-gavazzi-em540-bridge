@@ -78,7 +78,15 @@ async def process_loop():
 
                 if not em540_master.connected:
                     if current_time >= next_connect_attempt_time:
-                        await em540_master.connect()
+                        # Suppress pymodbus transport warnings during reconnect to avoid log spam.
+                        _pymodbus_logger = logging.getLogger("pymodbus")
+                        _prev_level = _pymodbus_logger.level
+                        _pymodbus_logger.setLevel(logging.ERROR)
+                        try:
+                            await em540_master.connect()
+                        finally:
+                            _pymodbus_logger.setLevel(_prev_level)
+
                         if em540_master.connected:
                             reconnect_backoff = read_interval
                             next_connect_attempt_time = 0.0

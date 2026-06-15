@@ -63,6 +63,9 @@ class Em540Master:
     in a separate thread.
     """
 
+    # Interval between repeated "still disconnected" log messages (seconds).
+    _RECONNECT_LOG_INTERVAL: float = 30.0
+
     def __init__(self, config) -> None:
         self._config = config
         self._front_data: MeterData = MeterData()
@@ -82,6 +85,11 @@ class Em540Master:
         self._dynamic_read_plan: tuple[int, ...] = tuple(self._front_data.frame.dynamic_reg_map.keys())
         logger.setLevel(config.log_level)
         self._client: ModbusBaseClient
+
+        # Reconnect log-spam suppression state
+        self._consecutive_connect_failures: int = 0
+        self._first_failure_time: float = 0.0
+        self._last_reconnect_log_time: float = 0.0
 
         if config.mode == "serial":
             # Create serial client
@@ -138,24 +146,45 @@ class Em540Master:
 
     async def connect(self) -> None:
         self._refresh_client_runtime_config()
-        # Simulate connecting to the EM540 device
-        if self._config.mode == "serial":
-            logger.info("Connecting to EM540 via serial port " + self._config.serial_port + "...")
-        else:
-            logger.info("Connecting to EM540 at " + self._config.host + ":" + str(self._config.port) + "...")
+
+        # Only log the first attempt and periodic reminders to avoid spam during outages.
+        now = time.perf_counter()
+        is_first_attempt = self._consecutive_connect_failures == 0
+
+        if is_first_attempt:
+            if self._config.mode == "serial":
+                logger.info("Connecting to EM540 via serial port %s...", self._config.serial_port)
+            else:
+                logger.info("Connecting to EM540 at %s:%s...", self._config.host, self._config.port)
 
         try:
             await self._client.connect()
         except Exception as ex:
-            logger.warning("Failed to connect to EM540 transport: %s", ex)
+            if is_first_attempt:
+                logger.warning("Failed to connect to EM540 transport: %s", ex)
+            else:
+                logger.debug("Failed to connect to EM540 transport: %s", ex)
             try:
                 self._client.close()
             except Exception:
                 logger.debug("Failed to close EM540 client after connect failure", exc_info=True)
+            self._record_connect_failure(now)
             return
 
         if self._client.connected:
-            logger.info("Connected to EM540.")
+            # Successful connection — log recovery summary if we had prior failures.
+            if self._consecutive_connect_failures > 0:
+                outage_duration = now - self._first_failure_time
+                logger.info(
+                    "Connected to EM540 after %.1fs (%d failed attempt%s).",
+                    outage_duration,
+                    self._consecutive_connect_failures,
+                    "s" if self._consecutive_connect_failures != 1 else "",
+                )
+            else:
+                logger.info("Connected to EM540.")
+            self._consecutive_connect_failures = 0
+
             if not self._static_data_valid:
                 logger.debug("Reading static registers from EM540...")
                 frame = self._front_data.frame
@@ -170,7 +199,27 @@ class Em540Master:
                     # Keep both buffers aligned so skipped reads in dynamic maps keep prior values.
                     self._copy_meter_data(self._front_data, self._back_data)
         else:
-            logger.info("Failed to connect to EM540.")
+            if is_first_attempt:
+                logger.warning("Failed to connect to EM540.")
+            self._record_connect_failure(now)
+
+    def _record_connect_failure(self, now: float) -> None:
+        """Track consecutive connection failures and emit periodic summary logs."""
+        if self._consecutive_connect_failures == 0:
+            self._first_failure_time = now
+            self._last_reconnect_log_time = now
+        self._consecutive_connect_failures += 1
+
+        # Emit a periodic "still trying" message so operators know the service is alive.
+        elapsed_since_last_log = now - self._last_reconnect_log_time
+        if elapsed_since_last_log >= self._RECONNECT_LOG_INTERVAL:
+            outage_duration = now - self._first_failure_time
+            logger.warning(
+                "Still unable to reach EM540 (%d attempts over %.0fs).",
+                self._consecutive_connect_failures,
+                outage_duration,
+            )
+            self._last_reconnect_log_time = now
 
     @property
     def data(self) -> MeterData:
@@ -438,11 +487,11 @@ class Em540Master:
                 # Store the read values
                 reg_map[reg_addr].values = result.registers
         except ModbusIOException as ex:
-            logger.error("Modbus IO error reading registers from EM540: %s", ex)
+            logger.debug("Modbus IO error reading registers from EM540: %s", ex)
             self._client.close()
             return False
         except ModbusException as ex:
-            logger.error("Could not read dynamic registers from EM540: %s", ex)
+            logger.debug("Modbus error reading registers from EM540: %s", ex)
             self._client.close()
             return False
 
