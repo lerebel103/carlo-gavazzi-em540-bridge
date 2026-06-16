@@ -161,7 +161,7 @@ class TestEm540Slave(unittest.TestCase):
     # --- Requirement 12.3: new_data updates remapped registers ---
 
     def test_new_data_updates_remapped_registers(self):
-        """Requirement 12.3 – async_setValues called for every remapped register with +1 offset."""
+        """Requirement 12.3 – async_setValues called for all remapped registers (batched by contiguous runs)."""
         frame = Em540Frame()
         slave, mock_server = self._build_slave(frame)
 
@@ -172,15 +172,25 @@ class TestEm540Slave(unittest.TestCase):
 
         asyncio.run(slave.new_data(meter_data))
 
-        calls = {
-            c.args[2]: c.args[3]
-            for c in mock_server.async_setValues.call_args_list
-            if c.args[1] == _FC_HOLDING_REGISTER
-        }
+        # Rebuild the full address→value map from batched writes
+        written: dict[int, int] = {}
+        for call in mock_server.async_setValues.call_args_list:
+            if call.args[1] == _FC_HOLDING_REGISTER:
+                start_addr = call.args[2]
+                values = call.args[3]
+                for i, v in enumerate(values):
+                    written[start_addr + i] = v
+
         for addr in frame.remapped_reg_map:
             expected_addr = addr + REG_OFFSET
-            self.assertIn(expected_addr, calls, f"Remapped {hex(addr)} not updated at {hex(expected_addr)}")
-            self.assertEqual(calls[expected_addr], meter_data.frame.remapped_reg_map[addr].values)
+            reg_values = frame.remapped_reg_map[addr].values
+            for i, expected_val in enumerate(reg_values):
+                actual = written.get(expected_addr + i)
+                self.assertEqual(
+                    actual,
+                    expected_val,
+                    f"Remapped {hex(addr)}+{i} not updated at {hex(expected_addr + i)}",
+                )
 
     def test_new_data_resyncs_static_registers_when_source_static_changes(self):
         frame = Em540Frame()

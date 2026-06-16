@@ -66,6 +66,35 @@ def _build_simdata(frame: Em540Frame) -> list[SimData]:
     return [SimData(addr, values=[val], datatype=DataType.UINT16) for addr, val in sorted(values.items())]
 
 
+def _build_contiguous_runs(reg_map: dict[int, object]) -> list[tuple[int, list[int]]]:
+    """Group register map entries into contiguous address runs.
+
+    Returns a list of (start_address, list_of_addr_keys) tuples where each group
+    represents registers that can be written in a single async_setValues call.
+    """
+    if not reg_map:
+        return []
+
+    sorted_addrs = sorted(reg_map.keys())
+    runs: list[tuple[int, list[int]]] = []
+    current_start = sorted_addrs[0]
+    current_keys = [current_start]
+    current_end = current_start + len(reg_map[current_start].values) - 1
+
+    for addr in sorted_addrs[1:]:
+        if addr == current_end + 1:
+            current_keys.append(addr)
+            current_end = addr + len(reg_map[addr].values) - 1
+        else:
+            runs.append((current_start, current_keys))
+            current_start = addr
+            current_keys = [addr]
+            current_end = addr + len(reg_map[addr].values) - 1
+
+    runs.append((current_start, current_keys))
+    return runs
+
+
 class Em540Slave(MeterDataListener):
     """Represents a Modbus slave that serves data read from an EM540 master."""
 
@@ -86,6 +115,7 @@ class Em540Slave(MeterDataListener):
         self._static_addrs = tuple(frame.static_reg_map.keys())
         self._dynamic_addrs = tuple(frame.dynamic_reg_map.keys())
         self._remapped_addrs = tuple(frame.remapped_reg_map.keys())
+        self._remapped_runs = _build_contiguous_runs(frame.remapped_reg_map)
         dynamic_written_addrs = _expanded_addresses(frame.dynamic_reg_map)
         remapped_written_addrs = _expanded_addresses(frame.remapped_reg_map)
         self._overlapped_static_addrs: tuple[int, ...] = tuple(
@@ -195,13 +225,16 @@ class Em540Slave(MeterDataListener):
         """
         frame = data.frame
 
-        # Update dynamic registers in the datablock
+        # Update dynamic registers — already contiguous blocks, one call each
         for addr in self._dynamic_addrs:
             await self._set_values(addr + REG_OFFSET, frame.dynamic_reg_map[addr].values)
 
-        # Update remapped values
-        for addr in self._remapped_addrs:
-            await self._set_values(addr + REG_OFFSET, frame.remapped_reg_map[addr].values)
+        # Update remapped values — batched into contiguous runs to minimize async calls
+        for run_start, run_keys in self._remapped_runs:
+            batch: list[int] = []
+            for key in run_keys:
+                batch.extend(frame.remapped_reg_map[key].values)
+            await self._set_values(run_start + REG_OFFSET, batch)
 
         static_synced_this_cycle = await self._sync_static_registers_if_changed(frame)
 
