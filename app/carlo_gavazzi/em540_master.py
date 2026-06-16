@@ -192,7 +192,10 @@ class Em540Master:
                     reg_addrs=self._static_read_plan,
                 ):
                     logger.error("Failed to read device info from EM540.")
-                    self._client.close()
+                    try:
+                        self._client.close()
+                    except Exception:
+                        logger.debug("Failed to close EM540 client after static read failure", exc_info=True)
                 else:
                     self._static_data_valid = True
                     # Keep both buffers aligned so skipped reads in dynamic maps keep prior values.
