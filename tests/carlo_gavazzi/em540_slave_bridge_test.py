@@ -54,16 +54,39 @@ class TestEm540Slave(unittest.TestCase):
 
         return slave, mock_server
 
-    # --- Requirement 12.4: REG_OFFSET is 1 ---
+    def test_rtu_and_tcp_servers_share_context(self):
+        """RTU and TCP servers must share the same SimCore context for coherent register state."""
+        frame = Em540Frame()
+        config = self._make_config()
+
+        with (
+            patch("app.carlo_gavazzi.em540_slave_bridge.ModbusTcpServer") as mock_server_cls,
+            patch("app.carlo_gavazzi.em540_slave_bridge.SimDevice"),
+        ):
+            rtu_server = MagicMock()
+            rtu_server.async_setValues = AsyncMock()
+            rtu_server.context = MagicMock(name="rtu_context")
+
+            tcp_server = MagicMock()
+            tcp_server.async_setValues = AsyncMock()
+            tcp_server.context = MagicMock(name="tcp_context")
+
+            mock_server_cls.side_effect = [rtu_server, tcp_server]
+            slave = Em540Slave(config, frame)
+
+        # The constructor assigns rtu_server.context to tcp_server.context
+        self.assertIs(slave._tcp_server.context, slave._rtu_server.context)
+
+    # --- Requirement 12.4: REG_OFFSET is 0 ---
 
     def test_reg_offset_is_zero(self):
         """Requirement 12.4 – REG_OFFSET constant equals 0 (SimDevice uses 0-based addresses)."""
         self.assertEqual(REG_OFFSET, 0)
 
-    # --- Requirement 12.4: constructor builds simdata with +1 offset ---
+    # --- Requirement 12.4: constructor builds simdata with REG_OFFSET applied ---
 
-    def test_simdata_built_with_plus_one_offset(self):
-        """Requirement 12.4 – all register addresses in SimData entries use +1 offset."""
+    def test_simdata_built_with_reg_offset(self):
+        """Requirement 12.4 – all register addresses in SimData entries use REG_OFFSET (0-based protocol addresses)."""
         frame = Em540Frame()
         simdata = _build_simdata(frame)
         addresses = {entry.address for entry in simdata}

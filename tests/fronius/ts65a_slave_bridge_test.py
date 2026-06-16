@@ -97,7 +97,7 @@ class TestTs65aSlaveBridge(unittest.TestCase):
         ):
             asyncio.run(bridge.new_data(data))
 
-        mock_server.async_setValues.assert_called_once()
+        mock_server.async_setValues.assert_awaited_once()
         call_args = mock_server.async_setValues.call_args
         # async_setValues(device_id, func_code, address, values)
         device_id, func_code, start_address, registers = call_args.args

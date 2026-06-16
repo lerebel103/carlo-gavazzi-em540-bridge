@@ -147,8 +147,8 @@ def _build_ts65a_simdata(slave_id: int) -> SimDevice:
     """Build a SimDevice for the TS65A register layout.
 
     The layout is flattened to individual register entries to avoid address
-    overlap issues (e.g. the 50-register scale factor block at 40162 spans
-    into the Event/End Block addresses at 40194/40196).
+    overlap issues (e.g. the 50-register scale factor block at 40161 spans
+    into the Event/End Block addresses at 40193/40195).
     """
     values: dict[int, int] = {}
     for addr, vals in _TS65A_STATIC_REGISTERS:
