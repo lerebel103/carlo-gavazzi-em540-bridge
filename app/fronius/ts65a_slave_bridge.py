@@ -307,14 +307,7 @@ class Ts65aSlaveBridge(MeterDataListener):
             registers[index + 1] = reg_pair[1]
             index += 2
 
-        coro = self._server.async_setValues(
-            self._slave_id, _FC_HOLDING_REGISTER, self._dynamic_start_address, registers
-        )
-        if self._server_loop is not None and self._server_loop.is_running():
-            future = asyncio.run_coroutine_threadsafe(coro, self._server_loop)
-            future.result()
-        else:
-            await coro
+        await self._server.async_setValues(self._slave_id, _FC_HOLDING_REGISTER, self._dynamic_start_address, registers)
 
         # Notify the PDU helper that we have new data
         self._pdu_helper.data_received(data.timestamp)
