@@ -1,4 +1,6 @@
+import asyncio
 import logging
+from threading import Thread
 from typing import Callable
 
 from pymodbus import FramerType
@@ -187,6 +189,7 @@ class Ts65aSlaveBridge(MeterDataListener):
         )
         self._dynamic_start_address: int = 40071
         self._dynamic_register_buffer: list[int] = [0] * (len(self._dynamic_values()) * 2)
+        self._server_loop: asyncio.AbstractEventLoop | None = None
 
     def _trace_connect(self, connect):
         logger.debug("Client connection to TCP server: %s", connect)
@@ -203,7 +206,26 @@ class Ts65aSlaveBridge(MeterDataListener):
         self._stats.add_listener(listener)
 
     async def start(self):
-        await self._server.serve_forever(background=True)
+        """Start the downstream TS65A Modbus server on a dedicated event loop.
+
+        Isolates downstream server I/O from the main event loop where upstream reads run.
+        """
+        self._server_loop = asyncio.new_event_loop()
+
+        async def _run_server():
+            await self._server.serve_forever(background=True)
+            while True:
+                await asyncio.sleep(3600)
+
+        def _server_thread():
+            asyncio.set_event_loop(self._server_loop)
+            self._server_loop.run_until_complete(_run_server())
+
+        thread = Thread(target=_server_thread, daemon=True, name="ts65a-slave-server")
+        thread.start()
+
+        # Wait briefly for server to bind
+        await asyncio.sleep(0.05)
 
     def stop(self):
         pass
@@ -285,7 +307,14 @@ class Ts65aSlaveBridge(MeterDataListener):
             registers[index + 1] = reg_pair[1]
             index += 2
 
-        await self._server.async_setValues(self._slave_id, _FC_HOLDING_REGISTER, self._dynamic_start_address, registers)
+        coro = self._server.async_setValues(
+            self._slave_id, _FC_HOLDING_REGISTER, self._dynamic_start_address, registers
+        )
+        if self._server_loop is not None and self._server_loop.is_running():
+            future = asyncio.run_coroutine_threadsafe(coro, self._server_loop)
+            future.result()
+        else:
+            await coro
 
         # Notify the PDU helper that we have new data
         self._pdu_helper.data_received(data.timestamp)

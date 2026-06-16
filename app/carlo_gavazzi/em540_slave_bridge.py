@@ -1,4 +1,6 @@
+import asyncio
 import logging
+from threading import Thread
 from typing import Callable
 
 from pymodbus import FramerType
@@ -148,6 +150,7 @@ class Em540Slave(MeterDataListener):
             trace_connect=self._tcp_trace_connect,
         )
         self._tcp_server.context = self._rtu_server.context
+        self._server_loop: asyncio.AbstractEventLoop | None = None
 
     def _rtu_trace_connect(self, connect: bool) -> None:
         logger.debug("Client connection to RTU server: %s", connect)
@@ -175,8 +178,30 @@ class Em540Slave(MeterDataListener):
         self._stats.add_listener(listener)
 
     async def start(self) -> None:
-        await self._rtu_server.serve_forever(background=True)
-        await self._tcp_server.serve_forever(background=True)
+        """Start downstream Modbus servers on a dedicated event loop.
+
+        This isolates downstream server I/O (client connections, request handling)
+        from the main event loop where the upstream master reads run at 10Hz.
+        Prevents downstream activity from starving the upstream read path.
+        """
+        self._server_loop = asyncio.new_event_loop()
+
+        async def _run_servers():
+            await self._rtu_server.serve_forever(background=True)
+            await self._tcp_server.serve_forever(background=True)
+            # Keep the loop alive
+            while True:
+                await asyncio.sleep(3600)
+
+        def _server_thread():
+            asyncio.set_event_loop(self._server_loop)
+            self._server_loop.run_until_complete(_run_servers())
+
+        thread = Thread(target=_server_thread, daemon=True, name="em540-slave-servers")
+        thread.start()
+
+        # Wait briefly for servers to bind
+        await asyncio.sleep(0.05)
 
     def _sync_pdu_stats(self) -> None:
         stale_age = self._pdu_helper.stale_age_seconds()
@@ -187,8 +212,18 @@ class Em540Slave(MeterDataListener):
         self._stats.changed()
 
     async def _set_values(self, address: int, values: list[int]) -> None:
-        """Write register values to the shared SimCore context."""
-        await self._rtu_server.async_setValues(self._slave_id, _FC_HOLDING_REGISTER, address, values)
+        """Write register values to the shared SimCore context via the server's event loop.
+
+        If the server loop is running (normal operation), schedules the write on it
+        to avoid contending with the main event loop. Falls back to a direct await
+        if start() hasn't been called yet (e.g. in tests).
+        """
+        coro = self._rtu_server.async_setValues(self._slave_id, _FC_HOLDING_REGISTER, address, values)
+        if self._server_loop is not None and self._server_loop.is_running():
+            future = asyncio.run_coroutine_threadsafe(coro, self._server_loop)
+            future.result()
+        else:
+            await coro
 
     async def _sync_static_registers_if_changed(self, frame: Em540Frame) -> bool:
         if self._static_synced:
