@@ -474,7 +474,10 @@ class Em540Master:
                         num_registers,
                         result,
                     )
-                    self._client.close()
+                    try:
+                        self._client.close()
+                    except Exception:
+                        logger.debug("Failed to close EM540 client after read error", exc_info=True)
                     return False
 
                 # Check if we received the expected number of registers
@@ -493,11 +496,17 @@ class Em540Master:
                 reg_map[reg_addr].values = result.registers
         except ModbusIOException as ex:
             logger.debug("Modbus IO error reading registers from EM540: %s", ex)
-            self._client.close()
+            try:
+                self._client.close()
+            except Exception:
+                logger.debug("Failed to close EM540 client after ModbusIOException", exc_info=True)
             return False
         except ModbusException as ex:
             logger.debug("Modbus error reading registers from EM540: %s", ex)
-            self._client.close()
+            try:
+                self._client.close()
+            except Exception:
+                logger.debug("Failed to close EM540 client after ModbusException", exc_info=True)
             return False
 
         return True

@@ -223,7 +223,7 @@ class Ts65aSlaveBridge(MeterDataListener):
         self._dynamic_register_buffer: list[int] = [0] * (len(self._dynamic_values()) * 2)
 
     def _trace_connect(self, connect):
-        logger.debug(f"Client connection to TCP server: {connect}")
+        logger.debug("Client connection to TCP server: %s", connect)
         if connect:
             self._stats.tcp_client_count += 1
             logger.info("Downstream TS65A client connected (total: %d).", self._stats.tcp_client_count)

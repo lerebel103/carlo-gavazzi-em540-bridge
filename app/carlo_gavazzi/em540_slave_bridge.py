@@ -106,7 +106,7 @@ class Em540Slave(MeterDataListener):
         )
 
     def _rtu_trace_connect(self, connect: bool) -> None:
-        logger.debug(f"Client connection to RTU server: {connect}")
+        logger.debug("Client connection to RTU server: %s", connect)
         if connect:
             self._stats.rtu_client_count += 1
             logger.info("Downstream RTU client connected (total: %d).", self._stats.rtu_client_count)
@@ -117,7 +117,7 @@ class Em540Slave(MeterDataListener):
         self._stats.changed()
 
     def _tcp_trace_connect(self, connect: bool) -> None:
-        logger.debug(f"Client connection to TCP server: {connect}")
+        logger.debug("Client connection to TCP server: %s", connect)
         if connect:
             self._stats.tcp_client_count += 1
             logger.info("Downstream TCP client connected (total: %d).", self._stats.tcp_client_count)
