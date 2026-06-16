@@ -4,7 +4,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from app.carlo_gavazzi.meter_data import MeterData
-from app.fronius.ts65a_slave_bridge import Ts65aSlaveBridge
+from app.fronius.ts65a_slave_bridge import Ts65aSlaveBridge, _build_ts65a_simdata
 
 
 class TestTs65aSlaveBridge(unittest.TestCase):
@@ -169,3 +169,55 @@ class TestTs65aSlaveBridge(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestBuildTs65aSimdata(unittest.TestCase):
+    """Validates that _build_ts65a_simdata produces a valid, non-overlapping SimDevice."""
+
+    def test_simdevice_creates_without_overlap_errors(self):
+        """SimDevice construction must not raise TypeError for overlapping addresses."""
+        device = _build_ts65a_simdata(slave_id=1)
+        self.assertEqual(device.id, 1)
+
+    def test_key_addresses_are_present(self):
+        """Critical SunSpec addresses must be present in the flattened register map."""
+        device = _build_ts65a_simdata(slave_id=1)
+        # simdata is a flat list when passed as a list; after build it's in simdata tuple
+        # Access the raw simdata from the device
+        all_simdata = device.simdata
+        # For a list-based SimDevice, simdata is the list we passed
+        addresses = set()
+        if isinstance(all_simdata, list):
+            for entry in all_simdata:
+                addresses.add(entry.address)
+        elif isinstance(all_simdata, tuple):
+            for block in all_simdata:
+                if isinstance(block, list):
+                    for entry in block:
+                        addresses.add(entry.address)
+
+        # SunSpec marker (0-based): register 769 → address 768
+        self.assertIn(768, addresses)
+        # SunSpec Well-Known: register 1707 → address 1706
+        self.assertIn(1706, addresses)
+        # SunSpec ID: register 40001 → address 40000
+        self.assertIn(40000, addresses)
+        # Event: register 40194 → address 40193
+        self.assertIn(40193, addresses)
+        # End Block: register 40196 → address 40195
+        self.assertIn(40195, addresses)
+        # Scale factors start: register 40162 → address 40161
+        self.assertIn(40161, addresses)
+
+    def test_no_duplicate_addresses(self):
+        """Flattened entries must have unique addresses (no overlaps)."""
+        device = _build_ts65a_simdata(slave_id=1)
+        all_simdata = device.simdata
+        addresses = []
+        if isinstance(all_simdata, list):
+            addresses = [entry.address for entry in all_simdata]
+        elif isinstance(all_simdata, tuple):
+            for block in all_simdata:
+                if isinstance(block, list):
+                    addresses.extend(entry.address for entry in block)
+        self.assertEqual(len(addresses), len(set(addresses)), "Duplicate addresses found")
