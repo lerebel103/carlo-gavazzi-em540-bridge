@@ -4,6 +4,7 @@ import asyncio
 import gc
 import logging
 import time
+from contextlib import contextmanager
 
 from pymodbus import pymodbus_apply_logging_config
 
@@ -16,6 +17,26 @@ from app.version import version_for_display
 
 logger = logging.getLogger()
 config_manager = None
+
+
+class _PymodbusReconnectWarningFilter(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        return not (
+            record.name == "pymodbus.logging"
+            and record.levelno == logging.WARNING
+            and record.getMessage().startswith("Failed to connect ")
+        )
+
+
+@contextmanager
+def _suppress_pymodbus_reconnect_warning():
+    reconnect_warning_filter = _PymodbusReconnectWarningFilter()
+    pymodbus_logger = logging.getLogger("pymodbus.logging")
+    pymodbus_logger.addFilter(reconnect_warning_filter)
+    try:
+        yield
+    finally:
+        pymodbus_logger.removeFilter(reconnect_warning_filter)
 
 
 def parse_args():
@@ -79,13 +100,8 @@ async def process_loop():
                 if not em540_master.connected:
                     if current_time >= next_connect_attempt_time:
                         # Suppress pymodbus transport warnings during reconnect to avoid log spam.
-                        _pymodbus_logger = logging.getLogger("pymodbus")
-                        _prev_level = _pymodbus_logger.level
-                        _pymodbus_logger.setLevel(logging.ERROR)
-                        try:
+                        with _suppress_pymodbus_reconnect_warning():
                             await em540_master.connect()
-                        finally:
-                            _pymodbus_logger.setLevel(_prev_level)
 
                         if em540_master.connected:
                             reconnect_backoff = read_interval

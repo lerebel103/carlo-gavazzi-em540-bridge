@@ -148,7 +148,6 @@ class Em540Master:
         self._refresh_client_runtime_config()
 
         # Only log the first attempt and periodic reminders to avoid spam during outages.
-        now = time.perf_counter()
         is_first_attempt = self._consecutive_connect_failures == 0
 
         if is_first_attempt:
@@ -168,13 +167,13 @@ class Em540Master:
                 self._client.close()
             except Exception:
                 logger.debug("Failed to close EM540 client after connect failure", exc_info=True)
-            self._record_connect_failure(now)
+            self._record_connect_failure(time.perf_counter())
             return
 
         if self._client.connected:
             # Successful connection — log recovery summary if we had prior failures.
             if self._consecutive_connect_failures > 0:
-                outage_duration = now - self._first_failure_time
+                outage_duration = time.perf_counter() - self._first_failure_time
                 logger.info(
                     "Connected to EM540 after %.1fs (%d failed attempt%s).",
                     outage_duration,
@@ -201,7 +200,7 @@ class Em540Master:
         else:
             if is_first_attempt:
                 logger.warning("Failed to connect to EM540.")
-            self._record_connect_failure(now)
+            self._record_connect_failure(time.perf_counter())
 
     def _record_connect_failure(self, now: float) -> None:
         """Track consecutive connection failures and emit periodic summary logs."""
@@ -469,7 +468,13 @@ class Em540Master:
                 )
 
                 if result.isError():
-                    logger.error(f"Error reading register {hex(reg_addr)}, count={num_registers}")
+                    logger.debug(
+                        "Modbus error reading register %s, count=%s: %s",
+                        hex(reg_addr),
+                        num_registers,
+                        result,
+                    )
+                    self._client.close()
                     return False
 
                 # Check if we received the expected number of registers
