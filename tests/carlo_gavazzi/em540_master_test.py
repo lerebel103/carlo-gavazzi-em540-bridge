@@ -89,6 +89,7 @@ class TestEm540Master(unittest.TestCase):
         result = asyncio.run(self.master.acquire_data())
 
         self.assertFalse(result)
+        self.mock_client.close.assert_called_once()
         listener.read_failed.assert_awaited_once()
 
     # -----------------------------------------------------------------------
@@ -192,6 +193,51 @@ class TestEm540Master(unittest.TestCase):
         asyncio.run(self.master.connect())
 
         self.mock_client.close.assert_called_once()
+
+    def test_connect_failure_records_failure_time_after_connect_attempt(self):
+        """Failure timestamps should be captured after the awaited connect attempt completes."""
+        import app.carlo_gavazzi.em540_master as _master_mod
+
+        async def _connect():
+            _master_mod.time.perf_counter()
+            raise RuntimeError("dial failed")
+
+        self.mock_client.connect = AsyncMock(side_effect=_connect)
+
+        with (
+            patch.object(self.master, "_record_connect_failure") as mock_record_failure,
+            patch("app.carlo_gavazzi.em540_master.time.perf_counter", side_effect=[1.0, 4.5]),
+        ):
+            asyncio.run(self.master.connect())
+
+        mock_record_failure.assert_called_once_with(4.5)
+
+    def test_connect_success_logs_current_outage_duration(self):
+        """Recovery logging should use the current time after connect completes."""
+        import app.carlo_gavazzi.em540_master as _master_mod
+
+        self.master._consecutive_connect_failures = 2
+        self.master._first_failure_time = 1.0
+        self.master._static_data_valid = True
+        type(self.mock_client).connected = PropertyMock(return_value=True)
+
+        async def _connect():
+            _master_mod.time.perf_counter()
+
+        self.mock_client.connect = AsyncMock(side_effect=_connect)
+
+        with (
+            patch("app.carlo_gavazzi.em540_master.logger.info") as mock_logger_info,
+            patch("app.carlo_gavazzi.em540_master.time.perf_counter", side_effect=[2.0, 5.5]),
+        ):
+            asyncio.run(self.master.connect())
+
+        mock_logger_info.assert_any_call(
+            "Connected to EM540 after %.1fs (%d failed attempt%s).",
+            4.5,
+            2,
+            "s",
+        )
 
     def test_static_read_is_retried_until_success(self):
         """Static register reads should retry on later connects until they succeed."""

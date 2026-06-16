@@ -2,9 +2,9 @@
 -r requirements.txt
 
 # Development tools
-ruff==0.15.10
+ruff==0.15.17
 
 # Testing
-pytest==9.0.3
+pytest==9.1.0
 pytest-xdist==3.8.0
-hypothesis==6.151.12
+hypothesis==6.155.2

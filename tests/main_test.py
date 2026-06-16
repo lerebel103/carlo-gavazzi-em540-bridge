@@ -37,6 +37,7 @@ _ha_mock = MagicMock()
 for mod_name in [
     "home_assistant.ha_sensors",
     "home_assistant.ha_diagnostics",
+    "app.home_assistant.ha_bridge",
     "app.home_assistant.ha_sensors",
     "app.home_assistant.ha_diagnostics",
 ]:
@@ -189,6 +190,34 @@ class TestMainLoopPriority(unittest.TestCase):
                 asyncio.run(main.process_loop())
 
         mocks["master"].connect.assert_awaited_once()
+
+    def test_reconnect_only_filters_duplicate_pymodbus_connect_warning(self):
+        state = _make_state()
+        mocks = _setup_mocks()
+        type(mocks["master"]).connected = PropertyMock(return_value=False)
+        pymodbus_logger = MagicMock()
+
+        async def _acquire():
+            raise _LoopBreak()
+
+        mocks["master"].acquire_data = AsyncMock(side_effect=_acquire)
+
+        with (
+            _patch_config_manager(state),
+            patch.object(main, "pymodbus_apply_logging_config"),
+            patch.object(main, "Em540Master", return_value=mocks["master"]),
+            patch.object(main, "Em540Slave", return_value=mocks["slave"]),
+            patch.object(main, "Ts65aSlaveBridge", return_value=mocks["ts65a"]),
+            patch.object(main, "HABridge"),
+            patch.object(main.logging, "getLogger", return_value=pymodbus_logger) as mock_get_logger,
+        ):
+            with self.assertRaises(_LoopBreak):
+                asyncio.run(main.process_loop())
+
+        mock_get_logger.assert_called_with("pymodbus.logging")
+        pymodbus_logger.addFilter.assert_called_once()
+        pymodbus_logger.removeFilter.assert_called_once_with(pymodbus_logger.addFilter.call_args.args[0])
+        pymodbus_logger.setLevel.assert_not_called()
 
     # ------------------------------------------------------------------
     # Requirement 11.1/11.2: loop sleeps between intervals using mocked time

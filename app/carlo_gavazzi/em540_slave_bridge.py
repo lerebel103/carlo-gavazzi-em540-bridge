@@ -77,7 +77,7 @@ class Em540Slave(MeterDataListener):
             any(value != 0 for value in frame.static_reg_map[addr].values) for addr in self._static_addrs
         )
 
-        self.datablock: ModbusSparseDataBlock = ModbusSparseDataBlock.create(values)
+        self.datablock: ModbusSparseDataBlock = ModbusSparseDataBlock(values)
 
         self._context: ModbusDeviceContext = ModbusDeviceContext(
             di=self.datablock,
@@ -106,21 +106,25 @@ class Em540Slave(MeterDataListener):
         )
 
     def _rtu_trace_connect(self, connect: bool) -> None:
-        logger.info(f"Client connection to RTU server: {connect}")
+        logger.debug("Client connection to RTU server: %s", connect)
         if connect:
             self._stats.rtu_client_count += 1
+            logger.info("Downstream RTU client connected (total: %d).", self._stats.rtu_client_count)
         else:
             self._stats.rtu_client_count -= 1
             self._stats.rtu_client_disconnect_count += 1
+            logger.info("Downstream RTU client disconnected (total: %d).", self._stats.rtu_client_count)
         self._stats.changed()
 
     def _tcp_trace_connect(self, connect: bool) -> None:
-        logger.info(f"Client connection to TCP server: {connect}")
+        logger.debug("Client connection to TCP server: %s", connect)
         if connect:
             self._stats.tcp_client_count += 1
+            logger.info("Downstream TCP client connected (total: %d).", self._stats.tcp_client_count)
         else:
             self._stats.tcp_client_count -= 1
             self._stats.tcp_client_disconnect_count += 1
+            logger.info("Downstream TCP client disconnected (total: %d).", self._stats.tcp_client_count)
         self._stats.changed()
 
     def add_stats_listener(self, listener: Callable[[EM540SlaveStats], None]) -> None:
