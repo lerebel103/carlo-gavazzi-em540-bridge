@@ -1,17 +1,7 @@
 import asyncio
 import unittest
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
-
-import pymodbus.datastore as _ds
-
-if not hasattr(_ds, "ModbusDeviceContext"):
-    _ds.ModbusDeviceContext = getattr(_ds, "ModbusSlaveContext", MagicMock())
-
-import pymodbus.constants as _const
-
-if not hasattr(_const, "ExcCodes"):
-    _const.ExcCodes = SimpleNamespace(DEVICE_BUSY=6)
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from app.carlo_gavazzi.meter_data import MeterData
 from app.fronius.ts65a_slave_bridge import Ts65aSlaveBridge
@@ -31,15 +21,16 @@ class TestTs65aSlaveBridge(unittest.TestCase):
 
     def _build_bridge(self):
         with (
-            patch("app.fronius.ts65a_slave_bridge.ModbusTcpServer"),
-            patch("app.fronius.ts65a_slave_bridge.ModbusServerContext"),
-            patch("app.fronius.ts65a_slave_bridge.ModbusSparseDataBlock") as mock_block_cls,
+            patch("app.fronius.ts65a_slave_bridge.ModbusTcpServer") as mock_server_cls,
+            patch("app.fronius.ts65a_slave_bridge._build_ts65a_simdata"),
         ):
-            mock_datablock = MagicMock()
-            mock_block_cls.return_value = mock_datablock
+            mock_server = MagicMock()
+            mock_server.async_setValues = AsyncMock()
+            mock_server.context = MagicMock()
+            mock_server_cls.return_value = mock_server
             bridge = Ts65aSlaveBridge(self._make_config())
 
-        return bridge, mock_datablock
+        return bridge, mock_server
 
     def test_dynamic_register_buffer_matches_payload_size(self):
         bridge, _ = self._build_bridge()
@@ -48,7 +39,7 @@ class TestTs65aSlaveBridge(unittest.TestCase):
         self.assertEqual(len(bridge._dynamic_register_buffer), 90)
 
     def test_new_data_updates_full_dynamic_register_range(self):
-        bridge, mock_datablock = self._build_bridge()
+        bridge, mock_server = self._build_bridge()
         data = MeterData()
         data._timestamp = 123.0
         data.system.An = 12.3
@@ -106,13 +97,17 @@ class TestTs65aSlaveBridge(unittest.TestCase):
         ):
             asyncio.run(bridge.new_data(data))
 
-        mock_datablock.setValues.assert_called_once()
-        start_address, registers = mock_datablock.setValues.call_args.args
+        mock_server.async_setValues.assert_called_once()
+        call_args = mock_server.async_setValues.call_args
+        # async_setValues(device_id, func_code, address, values)
+        device_id, func_code, start_address, registers = call_args.args
+        self.assertEqual(device_id, 1)
+        self.assertEqual(func_code, 3)
         self.assertEqual(start_address, 40072)
         self.assertEqual(len(registers), len(bridge._dynamic_values()) * 2)
 
     def test_voltage_phase_ca_uses_phase_c_line_line_voltage(self):
-        bridge, mock_datablock = self._build_bridge()
+        bridge, mock_server = self._build_bridge()
         data = MeterData()
         data._timestamp = 123.0
         data.system.An = 12.3
@@ -164,7 +159,8 @@ class TestTs65aSlaveBridge(unittest.TestCase):
         ):
             asyncio.run(bridge.new_data(data))
 
-        start_address, registers = mock_datablock.setValues.call_args.args
+        call_args = mock_server.async_setValues.call_args
+        _, _, start_address, registers = call_args.args
         self.assertEqual(start_address, 40072)
 
         phase_ca_index = 22

@@ -2,8 +2,9 @@ import logging
 from typing import Callable
 
 from pymodbus import FramerType
-from pymodbus.datastore import ModbusDeviceContext, ModbusServerContext, ModbusSparseDataBlock
 from pymodbus.server import ModbusTcpServer
+from pymodbus.simulator.simdata import DataType, SimData
+from pymodbus.simulator.simdevice import SimDevice
 
 from app.carlo_gavazzi.em540_data import Em540Frame
 from app.carlo_gavazzi.em540_master import MeterDataListener
@@ -12,6 +13,9 @@ from app.carlo_gavazzi.meter_data import MeterData
 from app.utils.pdu_helper import PduHelper
 
 REG_OFFSET = 1  # Modbus addresses are 1-based, pymodbus uses 0-based
+
+# Holding register function code used for async_setValues/async_getValues.
+_FC_HOLDING_REGISTER = 3
 
 # Some downstream EM540 clients issue contiguous bulk reads that span sparse gaps.
 # Populate these compatibility windows with explicit zero placeholders so reads
@@ -28,6 +32,40 @@ def _expanded_addresses(reg_map: dict[int, object]) -> set[int]:
     return addrs
 
 
+def _build_simdata(frame: Em540Frame) -> list[SimData]:
+    """Build a flat list of SimData entries (one per register address) from an Em540Frame.
+
+    pymodbus 3.13+ SimDevice enforces strict non-overlapping address validation.
+    The EM540 register layout has multi-register dynamic blocks that span into addresses
+    where static/remapped registers are independently declared.  To avoid overlap conflicts
+    we flatten everything into individual single-register entries.
+    """
+    values: dict[int, int] = {}
+
+    # Dynamic registers first (large contiguous blocks)
+    for addr, reg in frame.dynamic_reg_map.items():
+        for i, v in enumerate(reg.values):
+            values[addr + REG_OFFSET + i] = v
+
+    # Static registers overlay specific addresses within dynamic ranges
+    for addr, reg in frame.static_reg_map.items():
+        for i, v in enumerate(reg.values):
+            values[addr + REG_OFFSET + i] = v
+
+    # Remapped registers may also overlap dynamic ranges
+    for addr, reg in frame.remapped_reg_map.items():
+        for i, v in enumerate(reg.values):
+            values[addr + REG_OFFSET + i] = v
+
+    # Fill compatibility ranges with zeros where no register exists yet
+    for range_start, range_end in _COMPATIBILITY_RANGES:
+        for addr in range(range_start, range_end + 1):
+            values.setdefault(addr + REG_OFFSET, 0)
+
+    # Build sorted SimData entries — one per address for zero overlap risk
+    return [SimData(addr, values=[val], datatype=DataType.UINT16) for addr, val in sorted(values.items())]
+
+
 class Em540Slave(MeterDataListener):
     """Represents a Modbus slave that serves data read from an EM540 master."""
 
@@ -42,25 +80,8 @@ class Em540Slave(MeterDataListener):
         self._stats: EM540SlaveStats = EM540SlaveStats()
         logger.setLevel(config.log_level)
 
-        # Build a sparse datablock with the size of the frame registers
-        values: dict[int, list[int]] = {}
         logger.info("Building Modbus sparse datablock...")
-
-        for addr in frame.static_reg_map:
-            logger.debug("Adding static reg " + hex(addr))
-            values[addr + REG_OFFSET] = frame.static_reg_map[addr].values
-
-        for addr in frame.dynamic_reg_map:
-            logger.debug("Adding dynamic reg " + hex(addr))
-            values[addr + REG_OFFSET] = frame.dynamic_reg_map[addr].values
-
-        for addr in frame.remapped_reg_map:
-            logger.debug("Adding remapped reg " + hex(addr))
-            values[addr + REG_OFFSET] = frame.remapped_reg_map[addr].values
-
-        for range_start, range_end in _COMPATIBILITY_RANGES:
-            for addr in range(range_start, range_end + 1):
-                values.setdefault(addr + REG_OFFSET, [0])
+        simdata = _build_simdata(frame)
 
         self._static_addrs = tuple(frame.static_reg_map.keys())
         self._dynamic_addrs = tuple(frame.dynamic_reg_map.keys())
@@ -77,33 +98,27 @@ class Em540Slave(MeterDataListener):
             any(value != 0 for value in frame.static_reg_map[addr].values) for addr in self._static_addrs
         )
 
-        self.datablock: ModbusSparseDataBlock = ModbusSparseDataBlock.create(values)
-
-        self._context: ModbusDeviceContext = ModbusDeviceContext(
-            di=self.datablock,
-            co=self.datablock,
-            hr=self.datablock,
-            ir=self.datablock,
-        )
-        context: ModbusServerContext = ModbusServerContext(devices={self._slave_id: self._context}, single=False)
+        device = SimDevice(self._slave_id, simdata=simdata)
 
         # Modbus RTU over socket server
         self._rtu_server: ModbusTcpServer = ModbusTcpServer(
             framer=FramerType.RTU,
-            context=context,
+            context=device,
             address=(self.host, self.rtu_port),
             trace_pdu=self._pdu_helper.on_pdu,
             trace_connect=self._rtu_trace_connect,
         )
 
-        # Modbus TCP server
+        # Modbus TCP server — shares the same SimCore context so both protocols
+        # serve identical register state.
         self._tcp_server: ModbusTcpServer = ModbusTcpServer(
             framer=FramerType.SOCKET,
-            context=context,
+            context=device,
             address=(self.host, self.tcp_port),
             trace_pdu=self._pdu_helper.on_pdu,
             trace_connect=self._tcp_trace_connect,
         )
+        self._tcp_server.context = self._rtu_server.context
 
     def _rtu_trace_connect(self, connect: bool) -> None:
         logger.debug("Client connection to RTU server: %s", connect)
@@ -142,7 +157,11 @@ class Em540Slave(MeterDataListener):
         self._stats.dropped_stale_request_count = self._pdu_helper.dropped_request_count
         self._stats.changed()
 
-    def _sync_static_registers_if_changed(self, frame: Em540Frame) -> bool:
+    async def _set_values(self, address: int, values: list[int]) -> None:
+        """Write register values to the shared SimCore context."""
+        await self._rtu_server.async_setValues(self._slave_id, _FC_HOLDING_REGISTER, address, values)
+
+    async def _sync_static_registers_if_changed(self, frame: Em540Frame) -> bool:
         if self._static_synced:
             return False
 
@@ -157,15 +176,15 @@ class Em540Slave(MeterDataListener):
             return False
 
         for addr in self._static_addrs:
-            self.datablock.setValues(addr + REG_OFFSET, frame.static_reg_map[addr].values)
+            await self._set_values(addr + REG_OFFSET, frame.static_reg_map[addr].values)
             self._last_static_value_ids[addr] = id(frame.static_reg_map[addr].values)
 
         self._static_synced = True
         return True
 
-    def _refresh_overlapped_static_registers(self, frame: Em540Frame) -> None:
+    async def _refresh_overlapped_static_registers(self, frame: Em540Frame) -> None:
         for addr in self._overlapped_static_addrs:
-            self.datablock.setValues(addr + REG_OFFSET, frame.static_reg_map[addr].values)
+            await self._set_values(addr + REG_OFFSET, frame.static_reg_map[addr].values)
 
     async def new_data(self, data: MeterData) -> None:
         """Handle new data from the master.
@@ -178,18 +197,18 @@ class Em540Slave(MeterDataListener):
 
         # Update dynamic registers in the datablock
         for addr in self._dynamic_addrs:
-            self.datablock.setValues(addr + REG_OFFSET, frame.dynamic_reg_map[addr].values)
+            await self._set_values(addr + REG_OFFSET, frame.dynamic_reg_map[addr].values)
 
         # Update remapped values
         for addr in self._remapped_addrs:
-            self.datablock.setValues(addr + REG_OFFSET, frame.remapped_reg_map[addr].values)
+            await self._set_values(addr + REG_OFFSET, frame.remapped_reg_map[addr].values)
 
-        static_synced_this_cycle = self._sync_static_registers_if_changed(frame)
+        static_synced_this_cycle = await self._sync_static_registers_if_changed(frame)
 
         # Some static registers (e.g. 0x000B device type) overlap dynamic ranges.
         # Re-apply them after dynamic writes so downstream clients always see static metadata.
         if self._static_synced and not static_synced_this_cycle:
-            self._refresh_overlapped_static_registers(frame)
+            await self._refresh_overlapped_static_registers(frame)
 
         # Keep the circuit open until static registers have been synced at least once.
         # This prevents downstream consumers from receiving partially initialized data.
