@@ -33,7 +33,6 @@ class TestTs65aSlaveBridge(unittest.TestCase):
         with (
             patch("app.fronius.ts65a_slave_bridge.ModbusTcpServer"),
             patch("app.fronius.ts65a_slave_bridge.ModbusServerContext"),
-            patch("app.fronius.ts65a_slave_bridge.ModbusDeviceContext"),
             patch("app.fronius.ts65a_slave_bridge.ModbusSparseDataBlock") as mock_block_cls,
         ):
             mock_datablock = MagicMock()

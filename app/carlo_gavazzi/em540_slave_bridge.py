@@ -77,7 +77,7 @@ class Em540Slave(MeterDataListener):
             any(value != 0 for value in frame.static_reg_map[addr].values) for addr in self._static_addrs
         )
 
-        self.datablock: ModbusSparseDataBlock = ModbusSparseDataBlock(values)
+        self.datablock: ModbusSparseDataBlock = ModbusSparseDataBlock.create(values)
 
         self._context: ModbusDeviceContext = ModbusDeviceContext(
             di=self.datablock,

@@ -57,11 +57,10 @@ class TestEm540Slave(unittest.TestCase):
         with (
             patch("app.carlo_gavazzi.em540_slave_bridge.ModbusTcpServer"),
             patch("app.carlo_gavazzi.em540_slave_bridge.ModbusServerContext"),
-            patch("app.carlo_gavazzi.em540_slave_bridge.ModbusDeviceContext"),
             patch("app.carlo_gavazzi.em540_slave_bridge.ModbusSparseDataBlock") as mock_block_cls,
         ):
             mock_datablock = MagicMock()
-            mock_block_cls.return_value = mock_datablock
+            mock_block_cls.create.return_value = mock_datablock
             slave = Em540Slave(config, frame)
 
         return slave, mock_datablock
@@ -82,13 +81,12 @@ class TestEm540Slave(unittest.TestCase):
         with (
             patch("app.carlo_gavazzi.em540_slave_bridge.ModbusTcpServer"),
             patch("app.carlo_gavazzi.em540_slave_bridge.ModbusServerContext"),
-            patch("app.carlo_gavazzi.em540_slave_bridge.ModbusDeviceContext"),
             patch("app.carlo_gavazzi.em540_slave_bridge.ModbusSparseDataBlock") as mock_block_cls,
         ):
-            mock_block_cls.return_value = MagicMock()
+            mock_block_cls.create.return_value = MagicMock()
             Em540Slave(config, frame)
 
-            values_dict = mock_block_cls.call_args[0][0]
+            values_dict = mock_block_cls.create.call_args[0][0]
 
             for addr in frame.static_reg_map:
                 self.assertIn(addr + REG_OFFSET, values_dict, f"Static {hex(addr)} missing at {hex(addr + REG_OFFSET)}")
@@ -109,13 +107,12 @@ class TestEm540Slave(unittest.TestCase):
         with (
             patch("app.carlo_gavazzi.em540_slave_bridge.ModbusTcpServer"),
             patch("app.carlo_gavazzi.em540_slave_bridge.ModbusServerContext"),
-            patch("app.carlo_gavazzi.em540_slave_bridge.ModbusDeviceContext"),
             patch("app.carlo_gavazzi.em540_slave_bridge.ModbusSparseDataBlock") as mock_block_cls,
         ):
-            mock_block_cls.return_value = MagicMock()
+            mock_block_cls.create.return_value = MagicMock()
             Em540Slave(config, frame)
 
-            values_dict = mock_block_cls.call_args[0][0]
+            values_dict = mock_block_cls.create.call_args[0][0]
 
             for addr in range(0x0000, 0x0160 + 1):
                 self.assertIn(addr + REG_OFFSET, values_dict, f"Missing compatibility register {hex(addr)}")
