@@ -14,9 +14,6 @@ from app.utils.pdu_helper import PduHelper
 
 REG_OFFSET = 0  # SimDevice uses raw 0-based Modbus protocol addresses directly
 
-# Holding register function code used for async_setValues/async_getValues.
-_FC_HOLDING_REGISTER = 3
-
 # Some downstream EM540 clients issue contiguous bulk reads that span sparse gaps.
 # Populate these compatibility windows with explicit zero placeholders so reads
 # return stable values instead of illegal-address exceptions.
@@ -149,6 +146,13 @@ class Em540Slave(MeterDataListener):
         )
         self._tcp_server.context = self._rtu_server.context
 
+        # Grab a direct reference to the backing register list for zero-overhead writes.
+        # This avoids the async_setValues path which introduces event-loop scheduling
+        # overhead that can erode the 10Hz tick budget on the upstream read path.
+        runtime = self._rtu_server.context.devices[self._slave_id]
+        self._reg_start_addr: int = runtime.block["x"][0]
+        self._registers: list[int] = runtime.block["x"][2]
+
     def _rtu_trace_connect(self, connect: bool) -> None:
         logger.debug("Client connection to RTU server: %s", connect)
         if connect:
@@ -186,11 +190,12 @@ class Em540Slave(MeterDataListener):
         self._stats.dropped_stale_request_count = self._pdu_helper.dropped_request_count
         self._stats.changed()
 
-    async def _set_values(self, address: int, values: list[int]) -> None:
-        """Write register values to the shared SimCore context."""
-        await self._rtu_server.async_setValues(self._slave_id, _FC_HOLDING_REGISTER, address, values)
+    def _set_values(self, address: int, values: list[int]) -> None:
+        """Write register values directly to the backing register list (zero async overhead)."""
+        offset = address - self._reg_start_addr
+        self._registers[offset : offset + len(values)] = values
 
-    async def _sync_static_registers_if_changed(self, frame: Em540Frame) -> bool:
+    def _sync_static_registers_if_changed(self, frame: Em540Frame) -> bool:
         if self._static_synced:
             return False
 
@@ -205,15 +210,15 @@ class Em540Slave(MeterDataListener):
             return False
 
         for addr in self._static_addrs:
-            await self._set_values(addr + REG_OFFSET, frame.static_reg_map[addr].values)
+            self._set_values(addr + REG_OFFSET, frame.static_reg_map[addr].values)
             self._last_static_value_ids[addr] = id(frame.static_reg_map[addr].values)
 
         self._static_synced = True
         return True
 
-    async def _refresh_overlapped_static_registers(self, frame: Em540Frame) -> None:
+    def _refresh_overlapped_static_registers(self, frame: Em540Frame) -> None:
         for addr in self._overlapped_static_addrs:
-            await self._set_values(addr + REG_OFFSET, frame.static_reg_map[addr].values)
+            self._set_values(addr + REG_OFFSET, frame.static_reg_map[addr].values)
 
     async def new_data(self, data: MeterData) -> None:
         """Handle new data from the master.
@@ -226,21 +231,21 @@ class Em540Slave(MeterDataListener):
 
         # Update dynamic registers — already contiguous blocks, one call each
         for addr in self._dynamic_addrs:
-            await self._set_values(addr + REG_OFFSET, frame.dynamic_reg_map[addr].values)
+            self._set_values(addr + REG_OFFSET, frame.dynamic_reg_map[addr].values)
 
-        # Update remapped values — batched into contiguous runs to minimize async calls
+        # Update remapped values — batched into contiguous runs to minimize overhead
         for run_start, run_keys in self._remapped_runs:
             batch: list[int] = []
             for key in run_keys:
                 batch.extend(frame.remapped_reg_map[key].values)
-            await self._set_values(run_start + REG_OFFSET, batch)
+            self._set_values(run_start + REG_OFFSET, batch)
 
-        static_synced_this_cycle = await self._sync_static_registers_if_changed(frame)
+        static_synced_this_cycle = self._sync_static_registers_if_changed(frame)
 
         # Some static registers (e.g. 0x000B device type) overlap dynamic ranges.
         # Re-apply them after dynamic writes so downstream clients always see static metadata.
         if self._static_synced and not static_synced_this_cycle:
-            await self._refresh_overlapped_static_registers(frame)
+            self._refresh_overlapped_static_registers(frame)
 
         # Keep the circuit open until static registers have been synced at least once.
         # This prevents downstream consumers from receiving partially initialized data.

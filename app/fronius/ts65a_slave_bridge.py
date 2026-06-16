@@ -15,9 +15,6 @@ from app.utils.pdu_helper import PduHelper
 
 logger = logging.getLogger("ts65a-slave")
 
-# Holding register function code used for async_setValues.
-_FC_HOLDING_REGISTER = 3
-
 # Static register layout for the Fronius Smart Meter TS 65A-3 SunSpec model.
 # Addresses are 0-based Modbus protocol addresses (register number - 1).
 # Each tuple is (address, values_list).
@@ -188,6 +185,11 @@ class Ts65aSlaveBridge(MeterDataListener):
         self._dynamic_start_address: int = 40071
         self._dynamic_register_buffer: list[int] = [0] * (len(self._dynamic_values()) * 2)
 
+        # Grab a direct reference to the backing register list for zero-overhead writes.
+        runtime = self._server.context.devices[self._slave_id]
+        self._reg_start_addr: int = runtime.block["x"][0]
+        self._registers: list[int] = runtime.block["x"][2]
+
     def _trace_connect(self, connect):
         logger.debug("Client connection to TCP server: %s", connect)
         if connect:
@@ -285,7 +287,8 @@ class Ts65aSlaveBridge(MeterDataListener):
             registers[index + 1] = reg_pair[1]
             index += 2
 
-        await self._server.async_setValues(self._slave_id, _FC_HOLDING_REGISTER, self._dynamic_start_address, registers)
+        offset = self._dynamic_start_address - self._reg_start_addr
+        self._registers[offset : offset + len(registers)] = registers
 
         # Notify the PDU helper that we have new data
         self._pdu_helper.data_received(data.timestamp)
