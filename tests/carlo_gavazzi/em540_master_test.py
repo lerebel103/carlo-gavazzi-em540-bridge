@@ -196,9 +196,10 @@ class TestEm540Master(unittest.TestCase):
 
     def test_connect_failure_records_failure_time_after_connect_attempt(self):
         """Failure timestamps should be captured after the awaited connect attempt completes."""
+        import app.carlo_gavazzi.em540_master as _master_mod
 
         async def _connect():
-            time.perf_counter()
+            _master_mod.time.perf_counter()
             raise RuntimeError("dial failed")
 
         self.mock_client.connect = AsyncMock(side_effect=_connect)
@@ -213,13 +214,15 @@ class TestEm540Master(unittest.TestCase):
 
     def test_connect_success_logs_current_outage_duration(self):
         """Recovery logging should use the current time after connect completes."""
+        import app.carlo_gavazzi.em540_master as _master_mod
+
         self.master._consecutive_connect_failures = 2
         self.master._first_failure_time = 1.0
         self.master._static_data_valid = True
         type(self.mock_client).connected = PropertyMock(return_value=True)
 
         async def _connect():
-            time.perf_counter()
+            _master_mod.time.perf_counter()
 
         self.mock_client.connect = AsyncMock(side_effect=_connect)
 
