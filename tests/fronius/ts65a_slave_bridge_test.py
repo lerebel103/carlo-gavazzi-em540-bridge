@@ -22,7 +22,6 @@ class TestTs65aSlaveBridge(unittest.TestCase):
     def _build_bridge(self):
         with (
             patch("app.fronius.ts65a_slave_bridge.ModbusTcpServer") as mock_server_cls,
-            patch("app.fronius.ts65a_slave_bridge._build_ts65a_simdata"),
         ):
             mock_server = MagicMock()
             mock_server.async_setValues = AsyncMock()

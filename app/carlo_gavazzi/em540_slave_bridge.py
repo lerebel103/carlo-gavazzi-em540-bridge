@@ -114,7 +114,6 @@ class Em540Slave(MeterDataListener):
 
         self._static_addrs = tuple(frame.static_reg_map.keys())
         self._dynamic_addrs = tuple(frame.dynamic_reg_map.keys())
-        self._remapped_addrs = tuple(frame.remapped_reg_map.keys())
         self._remapped_runs = _build_contiguous_runs(frame.remapped_reg_map)
         dynamic_written_addrs = _expanded_addresses(frame.dynamic_reg_map)
         remapped_written_addrs = _expanded_addresses(frame.remapped_reg_map)

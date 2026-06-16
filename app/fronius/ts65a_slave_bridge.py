@@ -84,7 +84,7 @@ _TS65A_STATIC_REGISTERS: tuple[tuple[int, list[int]], ...] = (
     (40157, [0, 0]),  # Total VA Hours imported phase B (VAh)
     (40159, [0, 0]),  # Total VA Hours imported phase C (VAh)
     (
-        40162,
+        40161,
         [
             32704,
             0,

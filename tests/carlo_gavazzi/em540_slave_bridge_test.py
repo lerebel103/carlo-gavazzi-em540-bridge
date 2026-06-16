@@ -132,7 +132,7 @@ class TestEm540Slave(unittest.TestCase):
     # --- Requirement 12.1: new_data updates dynamic registers ---
 
     def test_new_data_updates_dynamic_registers(self):
-        """Requirement 12.1 – async_setValues called for every dynamic register with +1 offset."""
+        """Requirement 12.1 – async_setValues called for every dynamic register with REG_OFFSET applied."""
         frame = Em540Frame()
         slave, mock_server = self._build_slave(frame)
 
