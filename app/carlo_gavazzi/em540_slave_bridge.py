@@ -12,7 +12,7 @@ from app.carlo_gavazzi.em540_slave_stats import EM540SlaveStats
 from app.carlo_gavazzi.meter_data import MeterData
 from app.utils.pdu_helper import PduHelper
 
-REG_OFFSET = 1  # Modbus addresses are 1-based, pymodbus uses 0-based
+REG_OFFSET = 0  # SimDevice uses raw 0-based Modbus protocol addresses directly
 
 # Holding register function code used for async_setValues/async_getValues.
 _FC_HOLDING_REGISTER = 3

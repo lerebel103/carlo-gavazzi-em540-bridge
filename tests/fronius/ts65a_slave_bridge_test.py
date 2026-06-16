@@ -103,7 +103,7 @@ class TestTs65aSlaveBridge(unittest.TestCase):
         device_id, func_code, start_address, registers = call_args.args
         self.assertEqual(device_id, 1)
         self.assertEqual(func_code, 3)
-        self.assertEqual(start_address, 40072)
+        self.assertEqual(start_address, 40071)
         self.assertEqual(len(registers), len(bridge._dynamic_values()) * 2)
 
     def test_voltage_phase_ca_uses_phase_c_line_line_voltage(self):
@@ -161,7 +161,7 @@ class TestTs65aSlaveBridge(unittest.TestCase):
 
         call_args = mock_server.async_setValues.call_args
         _, _, start_address, registers = call_args.args
-        self.assertEqual(start_address, 40072)
+        self.assertEqual(start_address, 40071)
 
         phase_ca_index = 22
         self.assertEqual(registers[phase_ca_index], 777)

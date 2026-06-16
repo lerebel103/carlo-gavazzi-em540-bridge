@@ -19,69 +19,70 @@ logger = logging.getLogger("ts65a-slave")
 _FC_HOLDING_REGISTER = 3
 
 # Static register layout for the Fronius Smart Meter TS 65A-3 SunSpec model.
+# Addresses are 0-based Modbus protocol addresses (register number - 1).
 # Each tuple is (address, values_list).
 _TS65A_STATIC_REGISTERS: tuple[tuple[int, list[int]], ...] = (
-    (769, [0]),
-    (1707, [0]),
-    (40001, [21365, 28243]),
-    (40003, [1]),
-    (40004, [65]),
+    (768, [0]),
+    (1706, [0]),
+    (40000, [21365, 28243]),
+    (40002, [1]),
+    (40003, [65]),
     # Manufacturer "Fronius"
-    (40005, [18034, 28526, 26997, 29440, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]),
+    (40004, [18034, 28526, 26997, 29440, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]),
     # Device Model "Smart Meter TS 65A-3"
-    (40021, [21357, 24946, 29728, 19813, 29797, 29216, 21587, 8246, 13633, 11571, 0, 0, 0, 0, 0, 0]),
-    (40037, [15472, 29289, 28001, 29305, 15872, 0, 0, 0]),  # Options N/A
-    (40045, [12590, 14592, 0, 0, 0, 0, 0, 0]),  # Software Version N/A
+    (40020, [21357, 24946, 29728, 19813, 29797, 29216, 21587, 8246, 13633, 11571, 0, 0, 0, 0, 0, 0]),
+    (40036, [15472, 29289, 28001, 29305, 15872, 0, 0, 0]),  # Options N/A
+    (40044, [12590, 14592, 0, 0, 0, 0, 0, 0]),  # Software Version N/A
     # Serial Number: 000001
-    (40053, [48, 48, 48, 48, 48, 48, 48, 49, 0, 0, 0, 0, 0, 0, 0, 1]),
-    (40069, [3]),  # Modbus TCP Address
-    (40070, [213]),  # Meter Type
-    (40071, [124]),  # Modbus Length
-    (40072, [0, 0]),  # Ac Current Total
-    (40074, [0, 0]),  # Ac Current Phase A
-    (40076, [0, 0]),  # Ac Current Phase B
-    (40078, [0, 0]),  # Ac Current Phase C
-    (40080, [0, 0]),  # Ac voltage average phase to neutral value
-    (40082, [0, 0]),  # Ac voltage phase A to neutral value
-    (40084, [0, 0]),  # Ac voltage phase B to neutral value
-    (40086, [0, 0]),  # Ac voltage phase C to neutral value
-    (40088, [0, 0]),  # Ac voltage average phase to phase value
-    (40090, [0, 0]),  # Ac voltage phase ab value
-    (40092, [0, 0]),  # Ac voltage phase bc value
-    (40094, [0, 0]),  # Ac voltage phase ca value
-    (40096, [0, 0]),  # Ac Frequency
-    (40098, [0, 0]),  # Ac power value
-    (40100, [0, 0]),  # Ac power phase A value
-    (40102, [0, 0]),  # Ac power phase B value
-    (40104, [0, 0]),  # Ac power phase C value
-    (40106, [0, 0]),  # Ac apparent power value (VA)
-    (40108, [0, 0]),  # Ac apparent power phase A value (VA)
-    (40110, [0, 0]),  # Ac apparent power phase B value (VA)
-    (40112, [0, 0]),  # Ac apparent power phase C value (VA)
-    (40114, [0, 0]),  # Ac reactive power value (VAr)
-    (40116, [0, 0]),  # Ac reactive power phase A value (VAr)
-    (40118, [0, 0]),  # Ac reactive power phase B value (VAr)
-    (40120, [0, 0]),  # Ac reactive power phase C value (VAr)
-    (40122, [0, 0]),  # Ac power factor value
-    (40124, [0, 0]),  # Ac power factor phase A value
-    (40126, [0, 0]),  # Ac power factor phase B value
-    (40128, [0, 0]),  # Ac power factor phase C value
-    (40130, [0, 0]),  # Total Watt Hours exported (Wh)
-    (40132, [0, 0]),  # Total Watt Hours exported phase A (Wh)
-    (40134, [0, 0]),  # Total Watt Hours exported phase B (Wh)
-    (40136, [0, 0]),  # Total Watt Hours exported phase C (Wh)
-    (40138, [0, 0]),  # Total Watt Hours imported (Wh)
-    (40140, [0, 0]),  # Total Watt Hours imported phase A (Wh)
-    (40142, [0, 0]),  # Total Watt Hours imported phase B (Wh)
-    (40144, [0, 0]),  # Total Watt Hours imported phase C (Wh)
-    (40146, [0, 0]),  # Total VA Hours exported (VAh)
-    (40148, [0, 0]),  # Total VA Hours exported phase A (VAh)
-    (40150, [0, 0]),  # Total VA Hours exported phase B (VAh)
-    (40152, [0, 0]),  # Total VA Hours exported phase C (VAh)
-    (40154, [0, 0]),  # Total VA Hours imported (VAh)
-    (40156, [0, 0]),  # Total VA Hours imported phase A (VAh)
-    (40158, [0, 0]),  # Total VA Hours imported phase B (VAh)
-    (40160, [0, 0]),  # Total VA Hours imported phase C (VAh)
+    (40052, [48, 48, 48, 48, 48, 48, 48, 49, 0, 0, 0, 0, 0, 0, 0, 1]),
+    (40068, [3]),  # Modbus TCP Address
+    (40069, [213]),  # Meter Type
+    (40070, [124]),  # Modbus Length
+    (40071, [0, 0]),  # Ac Current Total
+    (40073, [0, 0]),  # Ac Current Phase A
+    (40075, [0, 0]),  # Ac Current Phase B
+    (40077, [0, 0]),  # Ac Current Phase C
+    (40079, [0, 0]),  # Ac voltage average phase to neutral value
+    (40081, [0, 0]),  # Ac voltage phase A to neutral value
+    (40083, [0, 0]),  # Ac voltage phase B to neutral value
+    (40085, [0, 0]),  # Ac voltage phase C to neutral value
+    (40087, [0, 0]),  # Ac voltage average phase to phase value
+    (40089, [0, 0]),  # Ac voltage phase ab value
+    (40091, [0, 0]),  # Ac voltage phase bc value
+    (40093, [0, 0]),  # Ac voltage phase ca value
+    (40095, [0, 0]),  # Ac Frequency
+    (40097, [0, 0]),  # Ac power value
+    (40099, [0, 0]),  # Ac power phase A value
+    (40101, [0, 0]),  # Ac power phase B value
+    (40103, [0, 0]),  # Ac power phase C value
+    (40105, [0, 0]),  # Ac apparent power value (VA)
+    (40107, [0, 0]),  # Ac apparent power phase A value (VA)
+    (40109, [0, 0]),  # Ac apparent power phase B value (VA)
+    (40111, [0, 0]),  # Ac apparent power phase C value (VA)
+    (40113, [0, 0]),  # Ac reactive power value (VAr)
+    (40115, [0, 0]),  # Ac reactive power phase A value (VAr)
+    (40117, [0, 0]),  # Ac reactive power phase B value (VAr)
+    (40119, [0, 0]),  # Ac reactive power phase C value (VAr)
+    (40121, [0, 0]),  # Ac power factor value
+    (40123, [0, 0]),  # Ac power factor phase A value
+    (40125, [0, 0]),  # Ac power factor phase B value
+    (40127, [0, 0]),  # Ac power factor phase C value
+    (40129, [0, 0]),  # Total Watt Hours exported (Wh)
+    (40131, [0, 0]),  # Total Watt Hours exported phase A (Wh)
+    (40133, [0, 0]),  # Total Watt Hours exported phase B (Wh)
+    (40135, [0, 0]),  # Total Watt Hours exported phase C (Wh)
+    (40137, [0, 0]),  # Total Watt Hours imported (Wh)
+    (40139, [0, 0]),  # Total Watt Hours imported phase A (Wh)
+    (40141, [0, 0]),  # Total Watt Hours imported phase B (Wh)
+    (40143, [0, 0]),  # Total Watt Hours imported phase C (Wh)
+    (40145, [0, 0]),  # Total VA Hours exported (VAh)
+    (40147, [0, 0]),  # Total VA Hours exported phase A (VAh)
+    (40149, [0, 0]),  # Total VA Hours exported phase B (VAh)
+    (40151, [0, 0]),  # Total VA Hours exported phase C (VAh)
+    (40153, [0, 0]),  # Total VA Hours imported (VAh)
+    (40155, [0, 0]),  # Total VA Hours imported phase A (VAh)
+    (40157, [0, 0]),  # Total VA Hours imported phase B (VAh)
+    (40159, [0, 0]),  # Total VA Hours imported phase C (VAh)
     (
         40162,
         [
@@ -137,8 +138,8 @@ _TS65A_STATIC_REGISTERS: tuple[tuple[int, list[int]], ...] = (
             0,
         ],
     ),
-    (40194, [0, 0]),  # Event
-    (40196, [65535, 0]),  # End Block
+    (40193, [0, 0]),  # Event
+    (40195, [65535, 0]),  # End Block
 )
 
 
@@ -184,7 +185,7 @@ class Ts65aSlaveBridge(MeterDataListener):
             trace_pdu=self._pdu_helper.on_pdu,
             trace_connect=self._trace_connect,
         )
-        self._dynamic_start_address: int = 40072
+        self._dynamic_start_address: int = 40071
         self._dynamic_register_buffer: list[int] = [0] * (len(self._dynamic_values()) * 2)
 
     def _trace_connect(self, connect):

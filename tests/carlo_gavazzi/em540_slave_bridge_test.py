@@ -56,9 +56,9 @@ class TestEm540Slave(unittest.TestCase):
 
     # --- Requirement 12.4: REG_OFFSET is 1 ---
 
-    def test_reg_offset_is_one(self):
-        """Requirement 12.4 – REG_OFFSET constant equals 1."""
-        self.assertEqual(REG_OFFSET, 1)
+    def test_reg_offset_is_zero(self):
+        """Requirement 12.4 – REG_OFFSET constant equals 0 (SimDevice uses 0-based addresses)."""
+        self.assertEqual(REG_OFFSET, 0)
 
     # --- Requirement 12.4: constructor builds simdata with +1 offset ---
 
