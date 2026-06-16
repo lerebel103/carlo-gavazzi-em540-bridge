@@ -80,7 +80,7 @@ class Em540Slave(MeterDataListener):
         self._stats: EM540SlaveStats = EM540SlaveStats()
         logger.setLevel(config.log_level)
 
-        logger.info("Building Modbus sparse datablock...")
+        logger.info("Building SimDevice register map...")
         simdata = _build_simdata(frame)
 
         self._static_addrs = tuple(frame.static_reg_map.keys())
