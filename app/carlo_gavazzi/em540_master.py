@@ -468,7 +468,7 @@ class Em540Master:
                 )
 
                 if result.isError():
-                    logger.debug(
+                    logger.warning(
                         "Modbus error reading register %s, count=%s: %s",
                         hex(reg_addr),
                         num_registers,
@@ -495,14 +495,14 @@ class Em540Master:
                 # Store the read values
                 reg_map[reg_addr].values = result.registers
         except ModbusIOException as ex:
-            logger.debug("Modbus IO error reading registers from EM540: %s", ex)
+            logger.warning("Modbus IO error reading registers from EM540: %s", ex)
             try:
                 self._client.close()
             except Exception:
                 logger.debug("Failed to close EM540 client after ModbusIOException", exc_info=True)
             return False
         except ModbusException as ex:
-            logger.debug("Modbus error reading registers from EM540: %s", ex)
+            logger.warning("Modbus error reading registers from EM540: %s", ex)
             try:
                 self._client.close()
             except Exception:

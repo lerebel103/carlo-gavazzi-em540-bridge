@@ -21,11 +21,12 @@ config_manager = None
 
 class _PymodbusReconnectWarningFilter(logging.Filter):
     def filter(self, record: logging.LogRecord) -> bool:
-        return not (
-            record.name == "pymodbus.logging"
-            and record.levelno == logging.WARNING
-            and record.getMessage().startswith("Failed to connect ")
-        )
+        if record.name == "pymodbus.logging" and record.levelno == logging.WARNING:
+            # Check the raw msg without eagerly formatting (avoids % formatting overhead)
+            msg = record.msg if isinstance(record.msg, str) else str(record.msg)
+            if msg.startswith("Failed to connect"):
+                return False
+        return True
 
 
 @contextmanager
