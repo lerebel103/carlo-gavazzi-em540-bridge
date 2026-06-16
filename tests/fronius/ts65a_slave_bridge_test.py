@@ -1,7 +1,7 @@
 import asyncio
 import unittest
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from app.carlo_gavazzi.meter_data import MeterData
 from app.fronius.ts65a_slave_bridge import Ts65aSlaveBridge, _build_ts65a_simdata
@@ -24,16 +24,12 @@ class TestTs65aSlaveBridge(unittest.TestCase):
             patch("app.fronius.ts65a_slave_bridge.ModbusTcpServer") as mock_server_cls,
         ):
             mock_server = MagicMock()
-            # Provide a backing register list that the bridge writes into directly
-            registers = [0] * 65536
-            mock_runtime = MagicMock()
-            mock_runtime.block = {"x": (0, 65536, registers, [0] * 65536)}
+            mock_server.async_setValues = AsyncMock()
             mock_server.context = MagicMock()
-            mock_server.context.devices = {1: mock_runtime}
             mock_server_cls.return_value = mock_server
             bridge = Ts65aSlaveBridge(self._make_config())
 
-        return bridge, registers
+        return bridge, mock_server
 
     def test_dynamic_register_buffer_matches_payload_size(self):
         bridge, _ = self._build_bridge()
@@ -42,7 +38,7 @@ class TestTs65aSlaveBridge(unittest.TestCase):
         self.assertEqual(len(bridge._dynamic_register_buffer), 90)
 
     def test_new_data_updates_full_dynamic_register_range(self):
-        bridge, registers = self._build_bridge()
+        bridge, mock_server = self._build_bridge()
         data = MeterData()
         data._timestamp = 123.0
         data.system.An = 12.3
@@ -100,15 +96,17 @@ class TestTs65aSlaveBridge(unittest.TestCase):
         ):
             asyncio.run(bridge.new_data(data))
 
-        # Verify registers were written at the dynamic start address
-        start = bridge._dynamic_start_address
-        written = registers[start : start + len(bridge._dynamic_values()) * 2]
-        self.assertEqual(len(written), len(bridge._dynamic_values()) * 2)
-        # At least some non-zero values should be present
-        self.assertTrue(any(v != 0 for v in written))
+        mock_server.async_setValues.assert_awaited_once()
+        call_args = mock_server.async_setValues.call_args
+        # async_setValues(device_id, func_code, address, values)
+        device_id, func_code, start_address, registers = call_args.args
+        self.assertEqual(device_id, 1)
+        self.assertEqual(func_code, 3)
+        self.assertEqual(start_address, 40071)
+        self.assertEqual(len(registers), len(bridge._dynamic_values()) * 2)
 
     def test_voltage_phase_ca_uses_phase_c_line_line_voltage(self):
-        bridge, registers = self._build_bridge()
+        bridge, mock_server = self._build_bridge()
         data = MeterData()
         data._timestamp = 123.0
         data.system.An = 12.3
@@ -160,12 +158,17 @@ class TestTs65aSlaveBridge(unittest.TestCase):
         ):
             asyncio.run(bridge.new_data(data))
 
-        start = bridge._dynamic_start_address
-        written = registers[start : start + len(bridge._dynamic_values()) * 2]
+        call_args = mock_server.async_setValues.call_args
+        _, _, start_address, registers = call_args.args
+        self.assertEqual(start_address, 40071)
 
         phase_ca_index = 22
-        self.assertEqual(written[phase_ca_index], 777)
-        self.assertEqual(written[phase_ca_index + 1], 778)
+        self.assertEqual(registers[phase_ca_index], 777)
+        self.assertEqual(registers[phase_ca_index + 1], 778)
+
+
+if __name__ == "__main__":
+    unittest.main()
 
 
 class TestBuildTs65aSimdata(unittest.TestCase):
@@ -179,7 +182,10 @@ class TestBuildTs65aSimdata(unittest.TestCase):
     def test_key_addresses_are_present(self):
         """Critical SunSpec addresses must be present in the flattened register map."""
         device = _build_ts65a_simdata(slave_id=1)
+        # simdata is a flat list when passed as a list; after build it's in simdata tuple
+        # Access the raw simdata from the device
         all_simdata = device.simdata
+        # For a list-based SimDevice, simdata is the list we passed
         addresses = set()
         if isinstance(all_simdata, list):
             for entry in all_simdata:
@@ -215,7 +221,3 @@ class TestBuildTs65aSimdata(unittest.TestCase):
                 if isinstance(block, list):
                     addresses.extend(entry.address for entry in block)
         self.assertEqual(len(addresses), len(set(addresses)), "Duplicate addresses found")
-
-
-if __name__ == "__main__":
-    unittest.main()
