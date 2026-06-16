@@ -1,20 +1,10 @@
 import asyncio
 import unittest
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
-
-import pymodbus.datastore as _ds
-
-if not hasattr(_ds, "ModbusDeviceContext"):
-    _ds.ModbusDeviceContext = getattr(_ds, "ModbusSlaveContext", MagicMock())
-
-import pymodbus.constants as _const
-
-if not hasattr(_const, "ExcCodes"):
-    _const.ExcCodes = SimpleNamespace(DEVICE_BUSY=6)
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from app.carlo_gavazzi.meter_data import MeterData
-from app.fronius.ts65a_slave_bridge import Ts65aSlaveBridge
+from app.fronius.ts65a_slave_bridge import Ts65aSlaveBridge, _build_ts65a_simdata
 
 
 class TestTs65aSlaveBridge(unittest.TestCase):
@@ -31,15 +21,15 @@ class TestTs65aSlaveBridge(unittest.TestCase):
 
     def _build_bridge(self):
         with (
-            patch("app.fronius.ts65a_slave_bridge.ModbusTcpServer"),
-            patch("app.fronius.ts65a_slave_bridge.ModbusServerContext"),
-            patch("app.fronius.ts65a_slave_bridge.ModbusSparseDataBlock") as mock_block_cls,
+            patch("app.fronius.ts65a_slave_bridge.ModbusTcpServer") as mock_server_cls,
         ):
-            mock_datablock = MagicMock()
-            mock_block_cls.return_value = mock_datablock
+            mock_server = MagicMock()
+            mock_server.async_setValues = AsyncMock()
+            mock_server.context = MagicMock()
+            mock_server_cls.return_value = mock_server
             bridge = Ts65aSlaveBridge(self._make_config())
 
-        return bridge, mock_datablock
+        return bridge, mock_server
 
     def test_dynamic_register_buffer_matches_payload_size(self):
         bridge, _ = self._build_bridge()
@@ -48,7 +38,7 @@ class TestTs65aSlaveBridge(unittest.TestCase):
         self.assertEqual(len(bridge._dynamic_register_buffer), 90)
 
     def test_new_data_updates_full_dynamic_register_range(self):
-        bridge, mock_datablock = self._build_bridge()
+        bridge, mock_server = self._build_bridge()
         data = MeterData()
         data._timestamp = 123.0
         data.system.An = 12.3
@@ -106,13 +96,17 @@ class TestTs65aSlaveBridge(unittest.TestCase):
         ):
             asyncio.run(bridge.new_data(data))
 
-        mock_datablock.setValues.assert_called_once()
-        start_address, registers = mock_datablock.setValues.call_args.args
-        self.assertEqual(start_address, 40072)
+        mock_server.async_setValues.assert_awaited_once()
+        call_args = mock_server.async_setValues.call_args
+        # async_setValues(device_id, func_code, address, values)
+        device_id, func_code, start_address, registers = call_args.args
+        self.assertEqual(device_id, 1)
+        self.assertEqual(func_code, 3)
+        self.assertEqual(start_address, 40071)
         self.assertEqual(len(registers), len(bridge._dynamic_values()) * 2)
 
     def test_voltage_phase_ca_uses_phase_c_line_line_voltage(self):
-        bridge, mock_datablock = self._build_bridge()
+        bridge, mock_server = self._build_bridge()
         data = MeterData()
         data._timestamp = 123.0
         data.system.An = 12.3
@@ -164,8 +158,9 @@ class TestTs65aSlaveBridge(unittest.TestCase):
         ):
             asyncio.run(bridge.new_data(data))
 
-        start_address, registers = mock_datablock.setValues.call_args.args
-        self.assertEqual(start_address, 40072)
+        call_args = mock_server.async_setValues.call_args
+        _, _, start_address, registers = call_args.args
+        self.assertEqual(start_address, 40071)
 
         phase_ca_index = 22
         self.assertEqual(registers[phase_ca_index], 777)
@@ -174,3 +169,55 @@ class TestTs65aSlaveBridge(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestBuildTs65aSimdata(unittest.TestCase):
+    """Validates that _build_ts65a_simdata produces a valid, non-overlapping SimDevice."""
+
+    def test_simdevice_creates_without_overlap_errors(self):
+        """SimDevice construction must not raise TypeError for overlapping addresses."""
+        device = _build_ts65a_simdata(slave_id=1)
+        self.assertEqual(device.id, 1)
+
+    def test_key_addresses_are_present(self):
+        """Critical SunSpec addresses must be present in the flattened register map."""
+        device = _build_ts65a_simdata(slave_id=1)
+        # simdata is a flat list when passed as a list; after build it's in simdata tuple
+        # Access the raw simdata from the device
+        all_simdata = device.simdata
+        # For a list-based SimDevice, simdata is the list we passed
+        addresses = set()
+        if isinstance(all_simdata, list):
+            for entry in all_simdata:
+                addresses.add(entry.address)
+        elif isinstance(all_simdata, tuple):
+            for block in all_simdata:
+                if isinstance(block, list):
+                    for entry in block:
+                        addresses.add(entry.address)
+
+        # SunSpec marker (0-based): register 769 → address 768
+        self.assertIn(768, addresses)
+        # SunSpec Well-Known: register 1707 → address 1706
+        self.assertIn(1706, addresses)
+        # SunSpec ID: register 40001 → address 40000
+        self.assertIn(40000, addresses)
+        # Event: register 40194 → address 40193
+        self.assertIn(40193, addresses)
+        # End Block: register 40196 → address 40195
+        self.assertIn(40195, addresses)
+        # Scale factors start: register 40162 → address 40161
+        self.assertIn(40161, addresses)
+
+    def test_no_duplicate_addresses(self):
+        """Flattened entries must have unique addresses (no overlaps)."""
+        device = _build_ts65a_simdata(slave_id=1)
+        all_simdata = device.simdata
+        addresses = []
+        if isinstance(all_simdata, list):
+            addresses = [entry.address for entry in all_simdata]
+        elif isinstance(all_simdata, tuple):
+            for block in all_simdata:
+                if isinstance(block, list):
+                    addresses.extend(entry.address for entry in block)
+        self.assertEqual(len(addresses), len(set(addresses)), "Duplicate addresses found")
