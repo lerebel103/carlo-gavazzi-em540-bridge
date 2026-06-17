@@ -167,10 +167,6 @@ class TestTs65aSlaveBridge(unittest.TestCase):
         self.assertEqual(registers[phase_ca_index + 1], 778)
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class TestBuildTs65aSimdata(unittest.TestCase):
     """Validates that _build_ts65a_simdata produces a valid, non-overlapping SimDevice."""
 
@@ -221,3 +217,7 @@ class TestBuildTs65aSimdata(unittest.TestCase):
                 if isinstance(block, list):
                     addresses.extend(entry.address for entry in block)
         self.assertEqual(len(addresses), len(set(addresses)), "Duplicate addresses found")
+
+
+if __name__ == "__main__":
+    unittest.main()

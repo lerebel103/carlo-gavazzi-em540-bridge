@@ -239,7 +239,10 @@ class Ts65aSlaveBridge(MeterDataListener):
             raise startup_error[0]
 
     def stop(self):
-        pass
+        """Stop the server and clean up the dedicated event loop."""
+        if self._server_loop is not None and self._server_loop.is_running():
+            self._server_loop.call_soon_threadsafe(self._server_loop.stop)
+        self._server_loop = None
 
     def _sync_pdu_stats(self) -> None:
         stale_age = self._pdu_helper.stale_age_seconds()
