@@ -136,7 +136,7 @@ class TestEm540Master(unittest.TestCase):
         # Return fewer registers than expected for the energy chunk read
         bad_result = MagicMock()
         bad_result.isError.return_value = False
-        bad_result.registers = [0]  # Only 1 register instead of expected 32
+        bad_result.registers = [0]  # Only 1 register instead of expected 16
         self.mock_client.read_holding_registers = AsyncMock(return_value=bad_result)
 
         with self.assertRaises(SystemExit):
