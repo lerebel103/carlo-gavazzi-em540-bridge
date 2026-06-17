@@ -39,7 +39,7 @@ def _make_successful_result(num_registers):
 
 
 def _build_first_tick_responses(frame):
-    """Build responses for the first tick: energy chunk 0 (32 regs) + primary block.
+    """Build responses for the first tick: energy chunk 0 (16 regs) + primary block.
 
     On the first tick, energy_skip_fires=True so chunk 0 is read, then the primary block.
     """
@@ -52,14 +52,15 @@ def _build_first_tick_responses(frame):
     ]
 
 
-def _build_chunk1_tick_responses(frame):
-    """Build responses for the tick following a chunk 0 read: energy chunk 1 + primary block."""
+def _build_continuation_tick_responses(frame, chunk_index):
+    """Build responses for a tick reading a pending energy chunk + primary block."""
     from app.carlo_gavazzi.em540_data import ENERGY_BLOCK_CHUNK_SIZE, ENERGY_BLOCK_TOTAL_SIZE
 
     primary_reg = frame.dynamic_reg_map[0x0000]
-    chunk1_size = ENERGY_BLOCK_TOTAL_SIZE - ENERGY_BLOCK_CHUNK_SIZE
+    chunk_offset = chunk_index * ENERGY_BLOCK_CHUNK_SIZE
+    chunk_size = min(ENERGY_BLOCK_CHUNK_SIZE, ENERGY_BLOCK_TOTAL_SIZE - chunk_offset)
     return [
-        _make_successful_result(chunk1_size),  # energy chunk 1
+        _make_successful_result(chunk_size),  # energy chunk N
         _make_successful_result(len(primary_reg.values)),  # primary block
     ]
 
@@ -367,71 +368,87 @@ class TestSkipNRead(unittest.TestCase):
         addresses = self._get_read_addresses()
         self.assertIn(0x0000, addresses)
         self.assertIn(0x0500, addresses)
-        # Chunk 1 should be pending for next tick
+        # Next chunk should be pending
         self.assertEqual(self.master._energy_chunk_pending, 1)
 
     # -----------------------------------------------------------------------
-    # Requirement 8.2: second tick reads energy chunk 1 + primary (continuation)
+    # Requirement 8.2: continuation ticks read remaining chunks sequentially
     # -----------------------------------------------------------------------
-    def test_second_cycle_reads_chunk1_then_primary(self):
-        """Requirement 8.2 – Second cycle reads energy chunk 1 (pending) + primary."""
+    def test_continuation_ticks_read_remaining_chunks(self):
+        """Requirement 8.2 – Ticks 2-4 read energy chunks 1-3, then tick 5 is primary only."""
         from app.carlo_gavazzi.em540_data import ENERGY_BLOCK_CHUNK_SIZE
 
         # Cycle 1: energy chunk 0 + primary
         self.mock_client.read_holding_registers = AsyncMock(side_effect=_build_first_tick_responses(self.frame))
         with patch.object(self.master._condition, "notify"):
             asyncio.run(self.master.acquire_data())
+        self.assertEqual(self.master._energy_chunk_pending, 1)
 
-        # Cycle 2: chunk 1 pending → reads energy chunk 1 + primary
+        # Cycle 2: chunk 1 + primary
         self.mock_client.read_holding_registers.reset_mock()
-        self.mock_client.read_holding_registers = AsyncMock(side_effect=_build_chunk1_tick_responses(self.frame))
+        self.mock_client.read_holding_registers = AsyncMock(
+            side_effect=_build_continuation_tick_responses(self.frame, 1)
+        )
         with patch.object(self.master._condition, "notify"):
             result = asyncio.run(self.master.acquire_data())
-
         self.assertTrue(result)
-        self.assertEqual(self.master._dyn_reg_read_counter, 2)
         addresses = self._get_read_addresses()
-        # Chunk 1 starts at 0x0500 + 32 = 0x0520
         self.assertIn(0x0500 + ENERGY_BLOCK_CHUNK_SIZE, addresses)
-        self.assertIn(0x0000, addresses)
-        # No more chunks pending
+        self.assertEqual(self.master._energy_chunk_pending, 2)
+
+        # Cycle 3: chunk 2 + primary
+        self.mock_client.read_holding_registers.reset_mock()
+        self.mock_client.read_holding_registers = AsyncMock(
+            side_effect=_build_continuation_tick_responses(self.frame, 2)
+        )
+        with patch.object(self.master._condition, "notify"):
+            result = asyncio.run(self.master.acquire_data())
+        self.assertTrue(result)
+        addresses = self._get_read_addresses()
+        self.assertIn(0x0500 + 2 * ENERGY_BLOCK_CHUNK_SIZE, addresses)
+        self.assertEqual(self.master._energy_chunk_pending, 3)
+
+        # Cycle 4: chunk 3 + primary (last chunk)
+        self.mock_client.read_holding_registers.reset_mock()
+        self.mock_client.read_holding_registers = AsyncMock(
+            side_effect=_build_continuation_tick_responses(self.frame, 3)
+        )
+        with patch.object(self.master._condition, "notify"):
+            result = asyncio.run(self.master.acquire_data())
+        self.assertTrue(result)
+        addresses = self._get_read_addresses()
+        self.assertIn(0x0500 + 3 * ENERGY_BLOCK_CHUNK_SIZE, addresses)
+        # All chunks done
         self.assertEqual(self.master._energy_chunk_pending, -1)
 
+        # Cycle 5: primary only (no energy, skip counter not fired yet)
+        self.mock_client.read_holding_registers.reset_mock()
+        self.mock_client.read_holding_registers = AsyncMock(side_effect=_build_primary_only_responses(self.frame))
+        with patch.object(self.master._condition, "notify"):
+            result = asyncio.run(self.master.acquire_data())
+        self.assertTrue(result)
+        self.assertEqual(self.mock_client.read_holding_registers.await_count, 1)
+
     # -----------------------------------------------------------------------
-    # Requirement 8.2: subsequent cycles skip energy when counter doesn't fire
+    # Requirement 8.2: energy reads are skipped when counter doesn't fire
     # -----------------------------------------------------------------------
     def test_subsequent_cycles_skip_energy_reads(self):
         """Requirement 8.2 – Energy reads are skipped when skip counter doesn't fire."""
-        # Cycle 1: energy chunk 0 + primary
-        self.mock_client.read_holding_registers = AsyncMock(side_effect=_build_first_tick_responses(self.frame))
-        with patch.object(self.master._condition, "notify"):
-            asyncio.run(self.master.acquire_data())
+        # Run through a full chunk sequence (4 ticks), then verify the next tick is primary-only
+        for i in range(4):
+            self.mock_client.read_holding_registers.reset_mock()
+            if i == 0:
+                self.mock_client.read_holding_registers = AsyncMock(side_effect=_build_first_tick_responses(self.frame))
+            else:
+                self.mock_client.read_holding_registers = AsyncMock(
+                    side_effect=_build_continuation_tick_responses(self.frame, i)
+                )
+            with patch.object(self.master._condition, "notify"):
+                asyncio.run(self.master.acquire_data())
 
-        # Cycle 2: chunk 1 + primary (chunk 1 pending)
-        self.mock_client.read_holding_registers.reset_mock()
-        self.mock_client.read_holding_registers = AsyncMock(side_effect=_build_chunk1_tick_responses(self.frame))
-        with patch.object(self.master._condition, "notify"):
-            asyncio.run(self.master.acquire_data())
-
-        # Cycle 3: counter=3, 3%3==0 → energy fires again (chunk 0 + primary)
-        # But wait — skip_n_read=2 means read when counter%(2+1)==0, i.e. counter%3==0
-        # counter=3 → 3%3==0 → fires
-        self.mock_client.read_holding_registers.reset_mock()
-        self.mock_client.read_holding_registers = AsyncMock(side_effect=_build_first_tick_responses(self.frame))
-        with patch.object(self.master._condition, "notify"):
-            result = asyncio.run(self.master.acquire_data())
-        self.assertTrue(result)
-        self.assertEqual(self.master._energy_chunk_pending, 1)
-
-        # Cycle 4: chunk 1 + primary (continuation of cycle 3's chunk 0)
-        self.mock_client.read_holding_registers.reset_mock()
-        self.mock_client.read_holding_registers = AsyncMock(side_effect=_build_chunk1_tick_responses(self.frame))
-        with patch.object(self.master._condition, "notify"):
-            result = asyncio.run(self.master.acquire_data())
-        self.assertTrue(result)
         self.assertEqual(self.master._energy_chunk_pending, -1)
 
-        # Cycle 5: counter=5, 5%3==2 → skip energy, primary only
+        # Cycle 5: counter=5, 5%3!=0 → skip energy, primary only
         self.mock_client.read_holding_registers.reset_mock()
         self.mock_client.read_holding_registers = AsyncMock(side_effect=_build_primary_only_responses(self.frame))
         with patch.object(self.master._condition, "notify"):
@@ -447,17 +464,17 @@ class TestSkipNRead(unittest.TestCase):
     # -----------------------------------------------------------------------
     def test_primary_block_reads_every_cycle(self):
         """Requirement 8.3 – Primary block (skip_n_read=0) is read on every cycle."""
-        # Run 5 cycles and verify 0x0000 is always read
-        for cycle in range(1, 6):
+        # Run 6 cycles and verify 0x0000 is always read
+        for cycle in range(1, 7):
             self.mock_client.read_holding_registers.reset_mock()
 
             if cycle == 1:
                 # First cycle: energy chunk 0 + primary
                 self.mock_client.read_holding_registers = AsyncMock(side_effect=_build_first_tick_responses(self.frame))
-            elif self.master._energy_chunk_pending == 1:
-                # Chunk 1 continuation tick
+            elif self.master._energy_chunk_pending > 0:
+                # Continuation chunk tick
                 self.mock_client.read_holding_registers = AsyncMock(
-                    side_effect=_build_chunk1_tick_responses(self.frame)
+                    side_effect=_build_continuation_tick_responses(self.frame, self.master._energy_chunk_pending)
                 )
             elif (cycle % 3) == 0:
                 # Energy skip fires
@@ -516,13 +533,13 @@ class TestListenerWorker(unittest.TestCase):
         """Slow consumers should increment missed-update metrics when sequence jumps occur."""
         frame = self.master.data.frame
 
-        # 3 cycles: first tick (chunk0+primary), second tick (chunk1+primary), third tick (primary only or chunk0 again)
+        # 3 cycles: first tick (chunk0+primary), second tick (chunk1+primary), third tick (chunk2+primary)
         # With default skip_n_read=4 for energy: fires on counter=1 (first cycle exception)
-        # counter=1: chunk0+primary, counter=2: chunk1+primary, counter=3: primary only
+        # counter=1: chunk0+primary, counter=2: chunk1+primary, counter=3: chunk2+primary
         responses = (
             _build_first_tick_responses(frame)
-            + _build_chunk1_tick_responses(frame)
-            + _build_primary_only_responses(frame)
+            + _build_continuation_tick_responses(frame, 1)
+            + _build_continuation_tick_responses(frame, 2)
         )
         self.mock_client.read_holding_registers = AsyncMock(side_effect=responses)
 
