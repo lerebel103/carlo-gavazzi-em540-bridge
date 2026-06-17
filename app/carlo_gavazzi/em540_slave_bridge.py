@@ -223,8 +223,19 @@ class Em540Slave(MeterDataListener):
         self._stats.changed()
 
     async def _set_values(self, address: int, values: list[int]) -> None:
-        """Write register values to the shared SimCore context."""
-        await self._rtu_server.async_setValues(self._slave_id, _FC_HOLDING_REGISTER, address, values)
+        """Write register values to the shared SimCore context.
+
+        Schedules the write on the server's event loop to ensure all datastore
+        access (reads from client requests + writes from listener updates) is
+        single-threaded on the server loop. Falls back to direct await if the
+        server loop isn't running (e.g. in unit tests).
+        """
+        coro = self._rtu_server.async_setValues(self._slave_id, _FC_HOLDING_REGISTER, address, values)
+        if self._server_loop is not None and self._server_loop.is_running():
+            future = asyncio.run_coroutine_threadsafe(coro, self._server_loop)
+            future.result()
+        else:
+            await coro
 
     async def _sync_static_registers_if_changed(self, frame: Em540Frame) -> bool:
         if self._static_synced:
