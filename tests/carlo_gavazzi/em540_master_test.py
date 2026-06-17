@@ -492,6 +492,51 @@ class TestSkipNRead(unittest.TestCase):
             addresses = self._get_read_addresses()
             self.assertIn(0x0000, addresses, f"Cycle {cycle}: 0x0000 should always be read")
 
+    # -----------------------------------------------------------------------
+    # Regression: chunk 0 values must persist in the frame after chunk 1 is read
+    # -----------------------------------------------------------------------
+    def test_chunk0_values_persist_after_chunk1_read(self):
+        """Chunk 0 values written in tick N must still be present after chunk 1 is read in tick N+1."""
+        from app.carlo_gavazzi.em540_data import ENERGY_BLOCK_CHUNK_SIZE
+
+        # Use distinct non-zero values for each chunk so we can verify they persist
+        chunk0_values = list(range(100, 100 + ENERGY_BLOCK_CHUNK_SIZE))
+        chunk1_values = list(range(200, 200 + ENERGY_BLOCK_CHUNK_SIZE))
+
+        primary_reg = self.frame.dynamic_reg_map[0x0000]
+        primary_result = _make_successful_result(len(primary_reg.values))
+
+        # Cycle 1: chunk 0 returns distinctive values
+        chunk0_result = MagicMock()
+        chunk0_result.isError.return_value = False
+        chunk0_result.registers = chunk0_values
+        self.mock_client.read_holding_registers = AsyncMock(side_effect=[chunk0_result, primary_result])
+
+        with patch("app.carlo_gavazzi.meter_data.MeterData.update_from_frame", return_value=None):
+            with patch.object(self.master._condition, "notify"):
+                result = asyncio.run(self.master.acquire_data())
+        self.assertTrue(result)
+        self.assertEqual(self.master._energy_chunk_pending, 1)
+
+        # Cycle 2: chunk 1 returns different distinctive values
+        chunk1_result = MagicMock()
+        chunk1_result.isError.return_value = False
+        chunk1_result.registers = chunk1_values
+        self.mock_client.read_holding_registers.reset_mock()
+        self.mock_client.read_holding_registers = AsyncMock(
+            side_effect=[chunk1_result, _make_successful_result(len(primary_reg.values))]
+        )
+
+        with patch("app.carlo_gavazzi.meter_data.MeterData.update_from_frame", return_value=None):
+            with patch.object(self.master._condition, "notify"):
+                result = asyncio.run(self.master.acquire_data())
+        self.assertTrue(result)
+
+        # Verify: the front buffer's energy block should have chunk 0 + chunk 1 values
+        energy_values = self.master.data.frame.dynamic_reg_map[0x0500].values
+        self.assertEqual(energy_values[:ENERGY_BLOCK_CHUNK_SIZE], chunk0_values)
+        self.assertEqual(energy_values[ENERGY_BLOCK_CHUNK_SIZE : 2 * ENERGY_BLOCK_CHUNK_SIZE], chunk1_values)
+
 
 class TestListenerWorker(unittest.TestCase):
     """Validates listener workers and consumer missed-update diagnostics."""

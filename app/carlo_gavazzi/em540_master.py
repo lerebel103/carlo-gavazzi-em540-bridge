@@ -316,8 +316,11 @@ class Em540Master:
             self._dyn_reg_read_counter == 1 or skip_n_read == 0 or (self._dyn_reg_read_counter % (skip_n_read + 1)) == 0
         )
 
-        # If a chunk is pending from a previous tick, read it
+        # If a chunk is pending from a previous tick, read it.
+        # First, seed the back buffer's energy values from the front buffer so that
+        # previously-read chunks (0..N-1) are coherent before writing chunk N on top.
         if self._energy_chunk_pending > 0:
+            self._backfill_energy_from_front(frame)
             chunk_idx = self._energy_chunk_pending
             energy_read_ok = await self._read_energy_chunk(frame, chunk_index=chunk_idx)
             if energy_read_ok:
@@ -326,7 +329,6 @@ class Em540Master:
                 self._energy_chunk_pending = next_chunk if next_chunk < num_chunks else -1
             else:
                 self._energy_chunk_pending = -1
-                self._backfill_energy_from_front(frame)
         elif energy_skip_fires:
             # Start a new chunked energy read: read chunk 0 this tick
             energy_read_ok = await self._read_energy_chunk(frame, chunk_index=0)
