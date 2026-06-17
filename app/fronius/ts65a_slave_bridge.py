@@ -1,6 +1,6 @@
 import asyncio
 import logging
-from threading import Thread
+from threading import Event, Thread
 from typing import Callable
 
 from pymodbus import FramerType
@@ -211,9 +211,17 @@ class Ts65aSlaveBridge(MeterDataListener):
         Isolates downstream server I/O from the main event loop where upstream reads run.
         """
         self._server_loop = asyncio.new_event_loop()
+        ready = Event()
+        startup_error: list[BaseException] = []
 
         async def _run_server():
-            await self._server.serve_forever(background=True)
+            try:
+                await self._server.serve_forever(background=True)
+            except Exception as e:
+                startup_error.append(e)
+                return
+            finally:
+                ready.set()
             while True:
                 await asyncio.sleep(3600)
 
@@ -223,9 +231,10 @@ class Ts65aSlaveBridge(MeterDataListener):
 
         thread = Thread(target=_server_thread, daemon=True, name="ts65a-slave-server")
         thread.start()
+        ready.wait(timeout=5.0)
 
-        # Wait briefly for server to bind
-        await asyncio.sleep(0.05)
+        if startup_error:
+            raise startup_error[0]
 
     def stop(self):
         pass

@@ -1,6 +1,6 @@
 import asyncio
 import logging
-from threading import Thread
+from threading import Event, Thread
 from typing import Callable
 
 from pymodbus import FramerType
@@ -185,10 +185,18 @@ class Em540Slave(MeterDataListener):
         Prevents downstream activity from starving the upstream read path.
         """
         self._server_loop = asyncio.new_event_loop()
+        ready = Event()
+        startup_error: list[BaseException] = []
 
         async def _run_servers():
-            await self._rtu_server.serve_forever(background=True)
-            await self._tcp_server.serve_forever(background=True)
+            try:
+                await self._rtu_server.serve_forever(background=True)
+                await self._tcp_server.serve_forever(background=True)
+            except Exception as e:
+                startup_error.append(e)
+                return
+            finally:
+                ready.set()
             # Keep the loop alive
             while True:
                 await asyncio.sleep(3600)
@@ -199,9 +207,10 @@ class Em540Slave(MeterDataListener):
 
         thread = Thread(target=_server_thread, daemon=True, name="em540-slave-servers")
         thread.start()
+        ready.wait(timeout=5.0)
 
-        # Wait briefly for servers to bind
-        await asyncio.sleep(0.05)
+        if startup_error:
+            raise startup_error[0]
 
     def _sync_pdu_stats(self) -> None:
         stale_age = self._pdu_helper.stale_age_seconds()
