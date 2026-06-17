@@ -207,8 +207,10 @@ class Em540Slave(MeterDataListener):
 
         thread = Thread(target=_server_thread, daemon=True, name="em540-slave-servers")
         thread.start()
-        ready.wait(timeout=5.0)
 
+        signalled = await asyncio.to_thread(ready.wait, 5.0)
+        if not signalled:
+            raise TimeoutError("EM540 downstream servers failed to start within 5 seconds")
         if startup_error:
             raise startup_error[0]
 

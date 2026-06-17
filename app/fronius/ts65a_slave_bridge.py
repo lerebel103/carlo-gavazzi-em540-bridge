@@ -231,8 +231,10 @@ class Ts65aSlaveBridge(MeterDataListener):
 
         thread = Thread(target=_server_thread, daemon=True, name="ts65a-slave-server")
         thread.start()
-        ready.wait(timeout=5.0)
 
+        signalled = await asyncio.to_thread(ready.wait, 5.0)
+        if not signalled:
+            raise TimeoutError("TS65A downstream server failed to start within 5 seconds")
         if startup_error:
             raise startup_error[0]
 
