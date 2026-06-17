@@ -31,6 +31,9 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy application source code
 COPY app/ ./app/
 
+# Copy profiling script
+COPY profile_server.py ./
+
 # Inject version from build arg (set by Makefile / CI from git tag)
 ARG VERSION=dev
 ENV EM540_BRIDGE_VERSION=${VERSION}
