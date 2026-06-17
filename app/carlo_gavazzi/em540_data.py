@@ -28,11 +28,6 @@ ZERO_FILL = -1
 _DYNAMIC_PRIMARY_BLOCK_ADDR = 0x0000
 _ENERGY_BLOCK_ADDR = 0x0500
 
-# Pre-computed struct formats for the hot remap path
-_STRUCT_INT64_LE = struct.Struct("<q")  # little-endian int64
-_STRUCT_INT32_LE = struct.Struct("<i")  # little-endian int32
-_STRUCT_INT16 = struct.Struct(">h")  # big-endian int16 (single register)
-
 
 def _convert_from_registers_little(registers: list[int], data_type: ModbusTcpClient.DATATYPE) -> int | float | str:
     if len(registers) > 1:

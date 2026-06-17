@@ -7,7 +7,6 @@ from app.carlo_gavazzi.em540_data import Em540Frame
 
 # Pre-compiled struct formats for fast register conversion
 _STRUCT_INT32_BE = struct.Struct(">i")
-_STRUCT_INT16_BE = struct.Struct(">h")
 _STRUCT_2H = struct.Struct(">2H")
 
 
