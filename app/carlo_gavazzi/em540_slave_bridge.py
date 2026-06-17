@@ -222,22 +222,26 @@ class Em540Slave(MeterDataListener):
         self._stats.dropped_stale_request_count = self._pdu_helper.dropped_request_count
         self._stats.changed()
 
-    async def _set_values(self, address: int, values: list[int]) -> None:
-        """Write register values to the shared SimCore context.
+    async def _flush_writes(self, writes: list[tuple[int, list[int]]]) -> None:
+        """Flush all pending register writes in a single cross-thread round-trip.
 
-        Schedules the write on the server's event loop to ensure all datastore
-        access (reads from client requests + writes from listener updates) is
-        single-threaded on the server loop. Falls back to direct await if the
-        server loop isn't running (e.g. in unit tests).
+        Batches multiple setValues calls into one coroutine scheduled on the server
+        loop, reducing cross-thread synchronization overhead from N round-trips to 1.
         """
-        coro = self._rtu_server.async_setValues(self._slave_id, _FC_HOLDING_REGISTER, address, values)
+        if not writes:
+            return
+
+        async def _batch_write():
+            for address, values in writes:
+                await self._rtu_server.async_setValues(self._slave_id, _FC_HOLDING_REGISTER, address, values)
+
         if self._server_loop is not None and self._server_loop.is_running():
-            future = asyncio.run_coroutine_threadsafe(coro, self._server_loop)
+            future = asyncio.run_coroutine_threadsafe(_batch_write(), self._server_loop)
             await asyncio.wrap_future(future)
         else:
-            await coro
+            await _batch_write()
 
-    async def _sync_static_registers_if_changed(self, frame: Em540Frame) -> bool:
+    def _sync_static_registers_if_changed(self, frame: Em540Frame, writes: list[tuple[int, list[int]]]) -> bool:
         if self._static_synced:
             return False
 
@@ -252,45 +256,48 @@ class Em540Slave(MeterDataListener):
             return False
 
         for addr in self._static_addrs:
-            await self._set_values(addr + REG_OFFSET, frame.static_reg_map[addr].values)
+            writes.append((addr + REG_OFFSET, frame.static_reg_map[addr].values))
             self._last_static_value_ids[addr] = id(frame.static_reg_map[addr].values)
 
         self._static_synced = True
         return True
 
-    async def _refresh_overlapped_static_registers(self, frame: Em540Frame) -> None:
+    def _refresh_overlapped_static_registers(self, frame: Em540Frame, writes: list[tuple[int, list[int]]]) -> None:
         for addr in self._overlapped_static_addrs:
-            await self._set_values(addr + REG_OFFSET, frame.static_reg_map[addr].values)
+            writes.append((addr + REG_OFFSET, frame.static_reg_map[addr].values))
 
     async def new_data(self, data: MeterData) -> None:
         """Handle new data from the master.
 
         We update the Modbus datastore with the new register values as is from the master.
-        Here we are only just resending the same values read upstream to connected clients without needing to do
-        any parsing, since we are bridging EM540 to EM540.
+        All writes are collected and flushed in a single cross-thread round-trip to
+        minimize synchronization overhead.
         """
         frame = data.frame
+        writes: list[tuple[int, list[int]]] = []
 
-        # Update dynamic registers — already contiguous blocks, one call each
+        # Collect dynamic register writes
         for addr in self._dynamic_addrs:
-            await self._set_values(addr + REG_OFFSET, frame.dynamic_reg_map[addr].values)
+            writes.append((addr + REG_OFFSET, frame.dynamic_reg_map[addr].values))
 
-        # Update remapped values — batched into contiguous runs to minimize async calls
+        # Collect remapped values — batched into contiguous runs
         for run_start, run_keys in self._remapped_runs:
             batch: list[int] = []
             for key in run_keys:
                 batch.extend(frame.remapped_reg_map[key].values)
-            await self._set_values(run_start + REG_OFFSET, batch)
+            writes.append((run_start + REG_OFFSET, batch))
 
-        static_synced_this_cycle = await self._sync_static_registers_if_changed(frame)
+        static_synced_this_cycle = self._sync_static_registers_if_changed(frame, writes)
 
         # Some static registers (e.g. 0x000B device type) overlap dynamic ranges.
         # Re-apply them after dynamic writes so downstream clients always see static metadata.
         if self._static_synced and not static_synced_this_cycle:
-            await self._refresh_overlapped_static_registers(frame)
+            self._refresh_overlapped_static_registers(frame, writes)
+
+        # Single cross-thread flush for all collected writes
+        await self._flush_writes(writes)
 
         # Keep the circuit open until static registers have been synced at least once.
-        # This prevents downstream consumers from receiving partially initialized data.
         if self._static_synced:
             self._pdu_helper.data_received(data.timestamp)
         else:
