@@ -36,8 +36,13 @@ Notes:
 ## Critical Runtime Rules
 
 - The master tick loop is performance-sensitive and targets 10Hz.
+- The main asyncio event loop is reserved exclusively for the upstream Modbus read path.
+  All other async I/O (downstream Modbus servers, MQTT, etc.) must run on separate event
+  loops in their own threads to avoid starving the upstream read of scheduling time.
 - Do not add blocking work to the tick loop.
 - Do not add blocking work to Modbus listener notification paths.
+- Do not add async servers or long-running coroutines to the main event loop. Downstream
+  Modbus servers run on dedicated daemon threads with their own event loops.
 - MQTT connect, reconnect, and publish failures must never interfere with the tick loop.
 - Downstream consumers must not receive stale data silently.
 

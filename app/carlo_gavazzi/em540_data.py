@@ -17,6 +17,7 @@ ones.
 """
 
 import logging
+import struct
 from typing import List
 
 from pymodbus.client import ModbusTcpClient
@@ -39,6 +40,26 @@ def _convert_to_registers_little(value: int | float | str, data_type: ModbusTcpC
     if len(registers) > 1:
         registers = list(reversed(registers))
     return registers
+
+
+def _fast_int64_from_regs_le(regs: list[int], offset: int) -> int:
+    """Decode a little-endian word-order INT64 from 4 consecutive 16-bit registers.
+
+    Registers are in little-endian word order (LSW first): [r0, r1, r2, r3]
+    Equivalent to reversing to [r3, r2, r1, r0] then reading as big-endian INT64.
+    """
+    r0, r1, r2, r3 = regs[offset], regs[offset + 1], regs[offset + 2], regs[offset + 3]
+    # Pack in reversed (big-endian) word order then unpack as big-endian INT64
+    return struct.unpack(">q", struct.pack(">4H", r3, r2, r1, r0))[0]
+
+
+def _fast_int32_to_regs_le(value: int) -> list[int]:
+    """Encode an INT32 into 2 registers in little-endian word order (LSW first).
+
+    Packs as big-endian INT32, then reverses the two 16-bit words.
+    """
+    hi, lo = struct.unpack(">2H", struct.pack(">i", value))
+    return [lo, hi]
 
 
 _STATIC_REGISTER_SPECS = (
@@ -300,14 +321,9 @@ class Em540Frame:
 
         for source_index, target_addr, alias_addr, divisor in _ENERGY_INT64_REMAPS:
             offset = source_index * 4
-            source_value = _convert_from_registers_little(
-                energy_values[offset : offset + 4],
-                ModbusTcpClient.DATATYPE.INT64,
-            )
-            converted_value = _convert_to_registers_little(
-                int(source_value / divisor),
-                ModbusTcpClient.DATATYPE.INT32,
-            )
+            # Fast path: direct struct unpack/pack instead of pymodbus convert_from/to_registers
+            source_value = _fast_int64_from_regs_le(energy_values, offset)
+            converted_value = _fast_int32_to_regs_le(int(source_value / divisor))
             remapped[target_addr].values = converted_value
             remapped[alias_addr].values = converted_value
 
@@ -317,18 +333,12 @@ class Em540Frame:
             if alias_addr is not None:
                 remapped[alias_addr].values = copied_value
 
-        frequency_value = _convert_to_registers_little(
-            int(
-                _convert_from_registers_little(
-                    energy_values[0x3C:0x3E],
-                    ModbusTcpClient.DATATYPE.INT32,
-                )
-                / 100
-            ),
-            ModbusTcpClient.DATATYPE.INT16,
-        )
-        remapped[0x0033].values = frequency_value
-        remapped[0x0110].values = [frequency_value[0], 0]
+        # Frequency: INT32 LE word order → divide by 100 → single register value
+        r0, r1 = energy_values[0x3C], energy_values[0x3D]
+        freq_int32 = struct.unpack(">i", struct.pack(">2H", r1, r0))[0]
+        freq_reg = int(freq_int32 / 100) & 0xFFFF
+        remapped[0x0033].values = [freq_reg]
+        remapped[0x0110].values = [freq_reg, 0]
 
         for source_addr, target_addr in register_remap:
             if target_addr not in remapped:

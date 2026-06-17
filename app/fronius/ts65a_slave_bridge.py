@@ -1,8 +1,10 @@
+import asyncio
 import logging
+import struct
+from threading import Event, Thread
 from typing import Callable
 
 from pymodbus import FramerType
-from pymodbus.client import ModbusTcpClient
 from pymodbus.server import ModbusTcpServer
 from pymodbus.simulator.simdata import DataType, SimData
 from pymodbus.simulator.simdevice import SimDevice
@@ -14,6 +16,13 @@ from app.fronius.ts65a_slave_stats import Ts65aSlaveStats
 from app.utils.pdu_helper import PduHelper
 
 logger = logging.getLogger("ts65a-slave")
+
+# Holding register function code used for async_setValues.
+_FC_HOLDING_REGISTER = 3
+
+# Pre-compiled struct for FLOAT32 → 2 registers (big-endian)
+_STRUCT_FLOAT32 = struct.Struct(">f")
+_STRUCT_2H = struct.Struct(">2H")
 
 # Static register layout for the Fronius Smart Meter TS 65A-3 SunSpec model.
 # Addresses are 0-based Modbus protocol addresses (register number - 1).
@@ -184,11 +193,7 @@ class Ts65aSlaveBridge(MeterDataListener):
         )
         self._dynamic_start_address: int = 40071
         self._dynamic_register_buffer: list[int] = [0] * (len(self._dynamic_values()) * 2)
-
-        # Grab a direct reference to the backing register list for zero-overhead writes.
-        runtime = self._server.context.devices[self._slave_id]
-        self._reg_start_addr: int = runtime.block["x"][0]
-        self._registers: list[int] = runtime.block["x"][2]
+        self._server_loop: asyncio.AbstractEventLoop | None = None
 
     def _trace_connect(self, connect):
         logger.debug("Client connection to TCP server: %s", connect)
@@ -205,10 +210,41 @@ class Ts65aSlaveBridge(MeterDataListener):
         self._stats.add_listener(listener)
 
     async def start(self):
-        await self._server.serve_forever(background=True)
+        """Start the downstream TS65A Modbus server on a dedicated event loop.
+
+        Isolates downstream server I/O from the main event loop where upstream reads run.
+        """
+        self._server_loop = asyncio.new_event_loop()
+        ready = Event()
+        startup_error: list[BaseException] = []
+
+        async def _run_server():
+            try:
+                await self._server.serve_forever(background=True)
+            except Exception as e:
+                startup_error.append(e)
+            finally:
+                ready.set()
+
+        def _server_thread():
+            asyncio.set_event_loop(self._server_loop)
+            self._server_loop.create_task(_run_server())
+            self._server_loop.run_forever()
+
+        thread = Thread(target=_server_thread, daemon=True, name="ts65a-slave-server")
+        thread.start()
+
+        signalled = await asyncio.to_thread(ready.wait, 5.0)
+        if not signalled:
+            raise TimeoutError("TS65A downstream server failed to start within 5 seconds")
+        if startup_error:
+            raise startup_error[0]
 
     def stop(self):
-        pass
+        """Stop the server and clean up the dedicated event loop."""
+        if self._server_loop is not None and self._server_loop.is_running():
+            self._server_loop.call_soon_threadsafe(self._server_loop.stop)
+        self._server_loop = None
 
     def _sync_pdu_stats(self) -> None:
         stale_age = self._pdu_helper.stale_age_seconds()
@@ -282,13 +318,19 @@ class Ts65aSlaveBridge(MeterDataListener):
         values = self._dynamic_values()
 
         for value in values:
-            reg_pair = ModbusTcpClient.convert_to_registers(value, ModbusTcpClient.DATATYPE.FLOAT32)
-            registers[index] = reg_pair[0]
-            registers[index + 1] = reg_pair[1]
+            hi, lo = _STRUCT_2H.unpack(_STRUCT_FLOAT32.pack(value))
+            registers[index] = hi
+            registers[index + 1] = lo
             index += 2
 
-        offset = self._dynamic_start_address - self._reg_start_addr
-        self._registers[offset : offset + len(registers)] = registers
+        coro = self._server.async_setValues(
+            self._slave_id, _FC_HOLDING_REGISTER, self._dynamic_start_address, registers
+        )
+        if self._server_loop is not None and self._server_loop.is_running():
+            future = asyncio.run_coroutine_threadsafe(coro, self._server_loop)
+            await asyncio.wrap_future(future)
+        else:
+            await coro
 
         # Notify the PDU helper that we have new data
         self._pdu_helper.data_received(data.timestamp)

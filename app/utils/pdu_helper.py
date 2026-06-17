@@ -1,5 +1,5 @@
 import logging
-from datetime import datetime
+import time
 from typing import Optional
 
 from pymodbus import ExceptionResponse
@@ -34,7 +34,7 @@ class PduHelper:
         if self._last_rx_timestamp is None:
             return None
         if now is None:
-            now = datetime.now().timestamp()
+            now = time.time()
         return now - self._last_rx_timestamp
 
     def _open_circuit(self, reason: str, now: float) -> None:
@@ -49,13 +49,13 @@ class PduHelper:
             self.logger.info("Closing Modbus circuit breaker: fresh upstream data")
 
     def upstream_failed(self) -> None:
-        now: float = datetime.now().timestamp()
+        now: float = time.time()
         self._open_circuit("upstream read failure", now)
 
     def on_pdu(self, flag: bool, pdu: ModbusPDU) -> ModbusPDU:
         # Here we deliberately drop requests if we have not received any data from the master
         # within the bridge timeout period.
-        now: float = datetime.now().timestamp()
+        now: float = time.time()
 
         stale_age = self.stale_age_seconds(now)
         bridge_timeout = self.bridge_timeout() if callable(self.bridge_timeout) else self.bridge_timeout

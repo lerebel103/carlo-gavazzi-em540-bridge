@@ -416,8 +416,8 @@ class TestMeterDataUpdateFromFrame(unittest.TestCase):
         self.assertEqual(md.timestamp, 0)
 
         fake_ts = 1700000000.123
-        with patch("app.carlo_gavazzi.meter_data.datetime") as mock_dt:
-            mock_dt.now.return_value.timestamp.return_value = fake_ts
+        with patch("app.carlo_gavazzi.meter_data.time") as mock_time:
+            mock_time.time.return_value = fake_ts
             md.update_from_frame()
 
         self.assertEqual(md.timestamp, fake_ts)
