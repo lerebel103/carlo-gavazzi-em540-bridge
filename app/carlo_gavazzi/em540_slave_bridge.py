@@ -197,13 +197,11 @@ class Em540Slave(MeterDataListener):
                 return
             finally:
                 ready.set()
-            # Keep the loop alive
-            while True:
-                await asyncio.sleep(3600)
 
         def _server_thread():
             asyncio.set_event_loop(self._server_loop)
             self._server_loop.run_until_complete(_run_servers())
+            self._server_loop.run_forever()
 
         thread = Thread(target=_server_thread, daemon=True, name="em540-slave-servers")
         thread.start()

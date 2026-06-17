@@ -86,10 +86,6 @@ class TestTs65aSlaveBridge(unittest.TestCase):
         ]
         data.phases = phase_values
 
-        def _fake_convert_to_registers(value, _datatype):
-            encoded = int(abs(value)) % 65536
-            return [encoded, encoded]
-
         asyncio.run(bridge.new_data(data))
 
         mock_server.async_setValues.assert_awaited_once()
