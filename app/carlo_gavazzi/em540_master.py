@@ -94,9 +94,10 @@ class Em540Master:
 
         # Energy block chunked-read state.
         # When the energy block's skip counter fires, we read chunk 0 (first 16 regs) on
-        # that tick, then chunks 1, 2, 3 on the following consecutive ticks. This spreads
-        # the I/O across four ticks to avoid overrunning the 100ms budget.
-        self._energy_chunk_pending: int = -1  # -1 = no chunk pending, 0..N = next chunk index to read
+        # that tick, then chunks 1, 2, 3 on alternate ticks with primary-only rest ticks
+        # in between. This interlacing lets shorter primary-only ticks absorb jitter.
+        self._energy_chunk_pending: int = -1  # -1 = no chunk pending, 1..N = next chunk index to read
+        self._energy_chunk_rest: bool = False  # True = skip this tick's chunk read (rest tick)
 
         # Reconnect log-spam suppression state
         self._consecutive_connect_failures: int = 0
@@ -297,15 +298,14 @@ class Em540Master:
         read_start = time.perf_counter()
 
         # --- Chunked energy block read logic ---
-        # The energy block (0x0500, 64 regs) is split into four 16-register reads spread
-        # across consecutive ticks to avoid busting the 100ms tick budget.
+        # The energy block (0x0500, 64 regs) is split into four 16-register reads
+        # interlaced with primary-only rest ticks to allow jitter recovery.
         #
         # Scheduling:
-        #   - When skip_n_read fires for the energy block, we read chunk 0 on that tick
-        #     and queue chunks 1, 2, 3 for the following ticks.
-        #   - On each subsequent tick, the next pending chunk is read unconditionally
-        #     until all chunks are consumed.
-        #   - On all other ticks, only the primary block is read.
+        #   - When skip_n_read fires, we read chunk 0 on that tick.
+        #   - After each chunk read, we rest for one tick (primary-only) before
+        #     reading the next chunk. This gives lighter ticks room to absorb jitter.
+        #   - Pattern: chunk0, rest, chunk1, rest, chunk2, rest, chunk3, then idle.
 
         energy_reg_desc = frame.dynamic_reg_map[_ENERGY_BLOCK_ADDR]
         skip_n_read = energy_reg_desc.skip_n_read
@@ -316,24 +316,38 @@ class Em540Master:
             self._dyn_reg_read_counter == 1 or skip_n_read == 0 or (self._dyn_reg_read_counter % (skip_n_read + 1)) == 0
         )
 
-        # If a chunk is pending from a previous tick, read it.
-        # First, seed the back buffer's energy values from the front buffer so that
-        # previously-read chunks (0..N-1) are coherent before writing chunk N on top.
+        # If a chunk is pending from a previous tick, handle rest/read alternation
         if self._energy_chunk_pending > 0:
-            self._backfill_energy_from_front(frame)
-            chunk_idx = self._energy_chunk_pending
-            energy_read_ok = await self._read_energy_chunk(frame, chunk_index=chunk_idx)
-            if energy_read_ok:
-                # Advance to next chunk, or mark done
-                next_chunk = chunk_idx + 1
-                self._energy_chunk_pending = next_chunk if next_chunk < num_chunks else -1
+            if self._energy_chunk_rest:
+                # Rest tick — skip the chunk read, just backfill and let primary run alone
+                self._energy_chunk_rest = False
+                energy_read_ok = True
+                self._backfill_energy_from_front(frame)
             else:
-                self._energy_chunk_pending = -1
+                # Read tick — seed from front then read the pending chunk
+                self._backfill_energy_from_front(frame)
+                chunk_idx = self._energy_chunk_pending
+                energy_read_ok = await self._read_energy_chunk(frame, chunk_index=chunk_idx)
+                if energy_read_ok:
+                    next_chunk = chunk_idx + 1
+                    if next_chunk < num_chunks:
+                        self._energy_chunk_pending = next_chunk
+                        self._energy_chunk_rest = True  # rest before next chunk
+                    else:
+                        self._energy_chunk_pending = -1
+                        self._energy_chunk_rest = False
+                else:
+                    self._energy_chunk_pending = -1
+                    self._energy_chunk_rest = False
         elif energy_skip_fires:
             # Start a new chunked energy read: read chunk 0 this tick
             energy_read_ok = await self._read_energy_chunk(frame, chunk_index=0)
             if energy_read_ok:
-                self._energy_chunk_pending = 1 if num_chunks > 1 else -1
+                if num_chunks > 1:
+                    self._energy_chunk_pending = 1
+                    self._energy_chunk_rest = True  # rest before chunk 1
+                else:
+                    self._energy_chunk_pending = -1
             else:
                 self._energy_chunk_pending = -1
                 self._backfill_energy_from_front(frame)
