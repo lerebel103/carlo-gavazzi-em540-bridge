@@ -26,8 +26,9 @@ def _fast_int32_from_regs_le(registers: list[int], offset: int) -> int:
 
 
 def _fast_int16_from_reg(registers: list[int], offset: int) -> int:
-    """Fast INT16 decode from a single register."""
-    return _STRUCT_INT16_BE.unpack(_STRUCT_INT16_BE.pack(registers[offset] & 0xFFFF))[0]
+    """Fast signed INT16 decode from a single unsigned 16-bit register."""
+    val = registers[offset] & 0xFFFF
+    return val - 0x10000 if val >= 0x8000 else val
 
 
 def _fast_int64_from_regs_le(registers: list[int], offset: int) -> int:
