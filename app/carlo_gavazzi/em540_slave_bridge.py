@@ -233,7 +233,7 @@ class Em540Slave(MeterDataListener):
         coro = self._rtu_server.async_setValues(self._slave_id, _FC_HOLDING_REGISTER, address, values)
         if self._server_loop is not None and self._server_loop.is_running():
             future = asyncio.run_coroutine_threadsafe(coro, self._server_loop)
-            future.result()
+            await asyncio.wrap_future(future)
         else:
             await coro
 

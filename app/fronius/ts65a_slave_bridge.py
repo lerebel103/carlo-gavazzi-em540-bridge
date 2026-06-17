@@ -323,7 +323,7 @@ class Ts65aSlaveBridge(MeterDataListener):
         )
         if self._server_loop is not None and self._server_loop.is_running():
             future = asyncio.run_coroutine_threadsafe(coro, self._server_loop)
-            future.result()
+            await asyncio.wrap_future(future)
         else:
             await coro
 
