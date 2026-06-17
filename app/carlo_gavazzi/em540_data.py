@@ -89,6 +89,13 @@ _DYNAMIC_REGISTER_SPECS = (
     (_ENERGY_BLOCK_ADDR, "Meter Data3", 0x053E - 0x0500 + 2, 4),
 )
 
+# The energy block (0x0500) is 64 registers but too large to read in a single tick
+# without causing overruns at 10Hz. Split into four 16-register chunks that are read
+# on alternating ticks (interlaced with primary-only rest ticks) to spread the I/O
+# cost and allow jitter recovery between heavier reads.
+ENERGY_BLOCK_CHUNK_SIZE = 16
+ENERGY_BLOCK_TOTAL_SIZE = 0x053E - 0x0500 + 2  # 64 registers
+
 _ADDITIONAL_REMAPPED_REGISTER_SPECS = (
     (0x0033, "Frequency", 1),
     (0x0110, "Frequency", 2),
