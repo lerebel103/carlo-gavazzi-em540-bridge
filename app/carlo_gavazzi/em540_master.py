@@ -11,6 +11,12 @@ from pymodbus import FramerType, ModbusException
 from pymodbus.client import AsyncModbusSerialClient, AsyncModbusTcpClient, ModbusBaseClient
 from pymodbus.exceptions import ModbusIOException
 
+from app.carlo_gavazzi.em540_data import (
+    _DYNAMIC_PRIMARY_BLOCK_ADDR,
+    _ENERGY_BLOCK_ADDR,
+    ENERGY_BLOCK_CHUNK_SIZE,
+    ENERGY_BLOCK_TOTAL_SIZE,
+)
 from app.carlo_gavazzi.meter_data import MeterData
 
 logger = logging.getLogger("Em540Master")
@@ -85,6 +91,12 @@ class Em540Master:
         self._dynamic_read_plan: tuple[int, ...] = tuple(self._front_data.frame.dynamic_reg_map.keys())
         logger.setLevel(config.log_level)
         self._client: ModbusBaseClient
+
+        # Energy block chunked-read state.
+        # When the energy block's skip counter fires, we read chunk 0 (first half) on that tick,
+        # then chunk 1 (second half) on the immediately following tick.  This spreads the I/O
+        # across two ticks to avoid overrunning the 100ms budget.
+        self._energy_chunk_pending: int = -1  # -1 = no chunk pending, 0 or 1 = chunk index to read next
 
         # Reconnect log-spam suppression state
         self._consecutive_connect_failures: int = 0
@@ -283,13 +295,58 @@ class Em540Master:
         # Read our dynamic registers
         self._dyn_reg_read_counter += 1
         read_start = time.perf_counter()
-        is_ok: bool = await self._read_registers(
-            frame.dynamic_reg_map,
-            dyn_reg=True,
-            fallback_reg_map=self._front_data.frame.dynamic_reg_map,
-            reg_addrs=self._dynamic_read_plan,
+
+        # --- Chunked energy block read logic ---
+        # The energy block (0x0500, 64 regs) is split into two 32-register reads spread
+        # across consecutive ticks to avoid busting the 100ms tick budget.
+        #
+        # Scheduling:
+        #   - When skip_n_read fires for the energy block, we read chunk 0 (regs 0–31)
+        #     on that tick and set chunk 1 as pending.
+        #   - On the very next tick, we read chunk 1 (regs 32–63) unconditionally,
+        #     regardless of the skip counter, since it's the continuation of the same
+        #     logical read.
+        #   - On all other ticks, only the primary block is read.
+
+        energy_reg_desc = frame.dynamic_reg_map[_ENERGY_BLOCK_ADDR]
+        skip_n_read = energy_reg_desc.skip_n_read
+
+        # Determine whether the energy block's skip counter would fire this tick
+        energy_skip_fires = (
+            self._dyn_reg_read_counter == 1 or skip_n_read == 0 or (self._dyn_reg_read_counter % (skip_n_read + 1)) == 0
         )
+
+        # If chunk 1 is pending from the previous tick, handle it first
+        if self._energy_chunk_pending == 1:
+            energy_read_ok = await self._read_energy_chunk(frame, chunk_index=1)
+            self._energy_chunk_pending = -1
+            if not energy_read_ok:
+                self._backfill_energy_from_front(frame)
+        elif energy_skip_fires:
+            # Start a new chunked energy read: read chunk 0 this tick
+            energy_read_ok = await self._read_energy_chunk(frame, chunk_index=0)
+            if energy_read_ok:
+                self._energy_chunk_pending = 1  # schedule chunk 1 for next tick
+            else:
+                self._energy_chunk_pending = -1
+                self._backfill_energy_from_front(frame)
+        else:
+            # No energy read this tick — backfill energy values from front buffer
+            energy_read_ok = True
+            self._backfill_energy_from_front(frame)
+
+        # If the energy chunk read failed (connection closed), abort the tick early.
+        if not energy_read_ok:
+            modbus_read_ms = (time.perf_counter() - read_start) * 1000.0
+            for listener in self._listeners:
+                await listener.read_failed()
+            self._update_timing_stats(cycle_start, modbus_read_ms, post_read_processing_ms)
+            return False
+
+        # Always read the primary block
+        is_ok: bool = await self._read_primary_block(frame)
         modbus_read_ms = (time.perf_counter() - read_start) * 1000.0
+
         if is_ok:
             process_start = time.perf_counter()
             try:
@@ -315,6 +372,126 @@ class Em540Master:
         self._update_timing_stats(cycle_start, modbus_read_ms, post_read_processing_ms)
 
         return is_ok
+
+    async def _read_primary_block(self, frame) -> bool:
+        """Read the primary dynamic register block (0x0000)."""
+        reg_desc = frame.dynamic_reg_map[_DYNAMIC_PRIMARY_BLOCK_ADDR]
+        num_registers = len(reg_desc.values)
+
+        self._refresh_client_runtime_config()
+        try:
+            result = await self._client.read_holding_registers(
+                _DYNAMIC_PRIMARY_BLOCK_ADDR, count=num_registers, device_id=self.slave_id
+            )
+
+            if result.isError():
+                logger.warning(
+                    "Modbus error reading register %s, count=%s: %s",
+                    hex(_DYNAMIC_PRIMARY_BLOCK_ADDR),
+                    num_registers,
+                    result,
+                )
+                try:
+                    self._client.close()
+                except Exception:
+                    logger.debug("Failed to close EM540 client after read error", exc_info=True)
+                return False
+
+            if len(result.registers) != num_registers:
+                logger.fatal(
+                    f"Expected {num_registers} registers but got {len(result.registers)} "
+                    f"for address {hex(_DYNAMIC_PRIMARY_BLOCK_ADDR)}"
+                )
+                os._exit(1)
+
+            self._bad_read_count = 0
+            reg_desc.values = result.registers
+        except ModbusIOException as ex:
+            logger.warning("Modbus IO error reading primary registers from EM540: %s", ex)
+            try:
+                self._client.close()
+            except Exception:
+                logger.debug("Failed to close EM540 client after ModbusIOException", exc_info=True)
+            return False
+        except ModbusException as ex:
+            logger.warning("Modbus error reading primary registers from EM540: %s", ex)
+            try:
+                self._client.close()
+            except Exception:
+                logger.debug("Failed to close EM540 client after ModbusException", exc_info=True)
+            return False
+
+        return True
+
+    async def _read_energy_chunk(self, frame, chunk_index: int) -> bool:
+        """Read a single chunk of the energy register block.
+
+        chunk_index 0: registers 0x0500 + 0 .. 0x0500 + 31  (first 32)
+        chunk_index 1: registers 0x0500 + 32 .. 0x0500 + 63 (second 32)
+
+        The results are written directly into the appropriate slice of the energy
+        register's values list in the frame.
+        """
+        reg_desc = frame.dynamic_reg_map[_ENERGY_BLOCK_ADDR]
+        chunk_offset = chunk_index * ENERGY_BLOCK_CHUNK_SIZE
+        start_addr = _ENERGY_BLOCK_ADDR + chunk_offset
+        num_registers = min(ENERGY_BLOCK_CHUNK_SIZE, ENERGY_BLOCK_TOTAL_SIZE - chunk_offset)
+
+        self._refresh_client_runtime_config()
+        try:
+            logger.debug(
+                "Reading energy chunk %d from address %s, count=%d",
+                chunk_index,
+                hex(start_addr),
+                num_registers,
+            )
+            result = await self._client.read_holding_registers(start_addr, count=num_registers, device_id=self.slave_id)
+
+            if result.isError():
+                logger.warning(
+                    "Modbus error reading energy chunk %d at %s, count=%s: %s",
+                    chunk_index,
+                    hex(start_addr),
+                    num_registers,
+                    result,
+                )
+                try:
+                    self._client.close()
+                except Exception:
+                    logger.debug("Failed to close EM540 client after energy chunk read error", exc_info=True)
+                return False
+
+            if len(result.registers) != num_registers:
+                logger.fatal(
+                    f"Expected {num_registers} registers but got {len(result.registers)} "
+                    f"for energy chunk {chunk_index} at address {hex(start_addr)}"
+                )
+                os._exit(1)
+
+            # Write chunk data into the correct slice of the energy register values
+            reg_desc.values[chunk_offset : chunk_offset + num_registers] = result.registers
+        except ModbusIOException as ex:
+            logger.warning("Modbus IO error reading energy chunk %d from EM540: %s", chunk_index, ex)
+            try:
+                self._client.close()
+            except Exception:
+                logger.debug("Failed to close EM540 client after ModbusIOException", exc_info=True)
+            return False
+        except ModbusException as ex:
+            logger.warning("Modbus error reading energy chunk %d from EM540: %s", chunk_index, ex)
+            try:
+                self._client.close()
+            except Exception:
+                logger.debug("Failed to close EM540 client after ModbusException", exc_info=True)
+            return False
+
+        return True
+
+    def _backfill_energy_from_front(self, frame) -> None:
+        """Copy energy register values from the front buffer to keep them current when not reading."""
+        front_energy = self._front_data.frame.dynamic_reg_map.get(_ENERGY_BLOCK_ADDR)
+        if front_energy is not None:
+            frame.dynamic_reg_map[_ENERGY_BLOCK_ADDR].values = list(front_energy.values)
 
     def _update_timing_stats(self, cycle_start: float, modbus_read_ms: float, post_read_processing_ms: float) -> None:
         elapsed_ms = (time.perf_counter() - cycle_start) * 1000.0
