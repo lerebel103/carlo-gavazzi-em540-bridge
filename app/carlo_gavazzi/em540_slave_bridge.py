@@ -307,3 +307,10 @@ class Em540Slave(MeterDataListener):
     async def read_failed(self) -> None:
         self._pdu_helper.upstream_failed()
         self._sync_pdu_stats()
+
+    def stop(self) -> None:
+        """Stop downstream servers and clean up the dedicated event loop."""
+        loop = self._server_loop
+        if loop is not None and loop.is_running():
+            loop.call_soon_threadsafe(loop.stop)
+        self._server_loop = None
