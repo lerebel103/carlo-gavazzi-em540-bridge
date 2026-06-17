@@ -223,13 +223,12 @@ class Ts65aSlaveBridge(MeterDataListener):
                 await self._server.serve_forever(background=True)
             except Exception as e:
                 startup_error.append(e)
-                return
             finally:
                 ready.set()
 
         def _server_thread():
             asyncio.set_event_loop(self._server_loop)
-            self._server_loop.run_until_complete(_run_server())
+            self._server_loop.create_task(_run_server())
             self._server_loop.run_forever()
 
         thread = Thread(target=_server_thread, daemon=True, name="ts65a-slave-server")
