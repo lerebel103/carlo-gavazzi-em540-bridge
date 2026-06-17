@@ -96,7 +96,7 @@ class Em540Master:
         # When the energy block's skip counter fires, we read chunk 0 (first 16 regs) on
         # that tick, then chunks 1, 2, 3 on alternate ticks with primary-only rest ticks
         # in between. This interlacing lets shorter primary-only ticks absorb jitter.
-        self._energy_chunk_pending: int = -1  # -1 = no chunk pending, 1..N = next chunk index to read
+        self._energy_chunk_pending: int = -1  # -1 = no chunk pending, 1..N-1 = next chunk index to read
         self._energy_chunk_rest: bool = False  # True = skip this tick's chunk read (rest tick)
 
         # Reconnect log-spam suppression state
@@ -340,7 +340,10 @@ class Em540Master:
                     self._energy_chunk_pending = -1
                     self._energy_chunk_rest = False
         elif energy_skip_fires:
-            # Start a new chunked energy read: read chunk 0 this tick
+            # Start a new chunked energy read: read chunk 0 this tick.
+            # Seed the back buffer's energy values from front first so that any chunks
+            # not yet overwritten (1..N-1) reflect the latest known values.
+            self._backfill_energy_from_front(frame)
             energy_read_ok = await self._read_energy_chunk(frame, chunk_index=0)
             if energy_read_ok:
                 if num_chunks > 1:
@@ -447,8 +450,9 @@ class Em540Master:
     async def _read_energy_chunk(self, frame, chunk_index: int) -> bool:
         """Read a single chunk of the energy register block.
 
-        chunk_index 0: registers 0x0500 + 0 .. 0x0500 + 31  (first 32)
-        chunk_index 1: registers 0x0500 + 32 .. 0x0500 + 63 (second 32)
+        The energy block is divided into chunks of ENERGY_BLOCK_CHUNK_SIZE registers
+        (currently 16). Each chunk is addressed at:
+            _ENERGY_BLOCK_ADDR + (chunk_index * ENERGY_BLOCK_CHUNK_SIZE)
 
         The results are written directly into the appropriate slice of the energy
         register's values list in the frame.

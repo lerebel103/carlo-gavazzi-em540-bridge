@@ -91,7 +91,8 @@ _DYNAMIC_REGISTER_SPECS = (
 
 # The energy block (0x0500) is 64 registers but too large to read in a single tick
 # without causing overruns at 10Hz. Split into four 16-register chunks that are read
-# on consecutive ticks to spread the I/O cost.
+# on alternating ticks (interlaced with primary-only rest ticks) to spread the I/O
+# cost and allow jitter recovery between heavier reads.
 ENERGY_BLOCK_CHUNK_SIZE = 16
 ENERGY_BLOCK_TOTAL_SIZE = 0x053E - 0x0500 + 2  # 64 registers
 
