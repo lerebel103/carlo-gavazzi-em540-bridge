@@ -4,4 +4,4 @@ venv/
 __pycache__/
 .pytest_cache/
 .hypothesis/
-config.yaml
+config.yaml.pymodbus-fork/
