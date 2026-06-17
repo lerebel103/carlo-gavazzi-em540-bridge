@@ -26,7 +26,9 @@ RUN groupadd -r lerebel103 && useradd -r -g lerebel103 lerebel103
 COPY requirements.txt .
 
 # Install Python dependencies
-RUN pip install --no-cache-dir -r requirements.txt
+RUN apt-get update && apt-get install -y --no-install-recommends git \
+    && pip install --no-cache-dir -r requirements.txt \
+    && apt-get purge -y --auto-remove git && rm -rf /var/lib/apt/lists/*
 
 # Copy application source code
 COPY app/ ./app/
