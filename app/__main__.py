@@ -10,7 +10,6 @@ import cProfile
 import io
 import pstats
 import signal
-import sys
 
 from app.main import main
 
