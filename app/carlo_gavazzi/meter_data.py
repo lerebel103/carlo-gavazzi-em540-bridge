@@ -1,8 +1,14 @@
-from datetime import datetime
+import struct
+import time
 
 from pymodbus.client import ModbusTcpClient
 
 from app.carlo_gavazzi.em540_data import Em540Frame
+
+# Pre-compiled struct formats for fast register conversion
+_STRUCT_INT32_BE = struct.Struct(">i")
+_STRUCT_INT16_BE = struct.Struct(">h")
+_STRUCT_2H = struct.Struct(">2H")
 
 
 def _convert_from_registers_little(registers: list[int], data_type: ModbusTcpClient.DATATYPE) -> int | float | str:
@@ -11,6 +17,23 @@ def _convert_from_registers_little(registers: list[int], data_type: ModbusTcpCli
     if len(registers) > 1:
         registers = list(reversed(registers))
     return ModbusTcpClient.convert_from_registers(registers, data_type)
+
+
+def _fast_int32_from_regs_le(registers: list[int], offset: int) -> int:
+    """Fast INT32 decode from 2 registers in little-endian word order."""
+    r0, r1 = registers[offset], registers[offset + 1]
+    return _STRUCT_INT32_BE.unpack(_STRUCT_2H.pack(r1, r0))[0]
+
+
+def _fast_int16_from_reg(registers: list[int], offset: int) -> int:
+    """Fast INT16 decode from a single register."""
+    return _STRUCT_INT16_BE.unpack(_STRUCT_INT16_BE.pack(registers[offset] & 0xFFFF))[0]
+
+
+def _fast_int64_from_regs_le(registers: list[int], offset: int) -> int:
+    """Fast INT64 decode from 4 registers in little-endian word order."""
+    r0, r1, r2, r3 = registers[offset], registers[offset + 1], registers[offset + 2], registers[offset + 3]
+    return struct.unpack(">q", struct.pack(">4H", r3, r2, r1, r0))[0]
 
 
 class SystemData:
@@ -30,25 +53,13 @@ class SystemData:
         # Pick from registers
         # An is computed separately
 
-        self.line_neutral_voltage = (
-            _convert_from_registers_little(registers[0x024 : 0x024 + 2], ModbusTcpClient.DATATYPE.INT32) / 10
-        )
-        self.line_line_voltage = (
-            _convert_from_registers_little(registers[0x026 : 0x026 + 2], ModbusTcpClient.DATATYPE.INT32) / 10
-        )
-        self.power = _convert_from_registers_little(registers[0x028 : 0x028 + 2], ModbusTcpClient.DATATYPE.INT32) / 10
-        self.apparent_power = (
-            _convert_from_registers_little(registers[0x02A : 0x02A + 2], ModbusTcpClient.DATATYPE.INT32) / 10
-        )
-        self.reactive_power = (
-            _convert_from_registers_little(registers[0x02C : 0x02C + 2], ModbusTcpClient.DATATYPE.INT32) / 10
-        )
-        self.power_factor = (
-            _convert_from_registers_little(registers[0x031 : 0x031 + 1], ModbusTcpClient.DATATYPE.INT16) / 1000
-        )
-        self.frequency = (
-            _convert_from_registers_little(registers[0x033 : 0x033 + 1], ModbusTcpClient.DATATYPE.INT16) / 10
-        )
+        self.line_neutral_voltage = _fast_int32_from_regs_le(registers, 0x024) / 10
+        self.line_line_voltage = _fast_int32_from_regs_le(registers, 0x026) / 10
+        self.power = _fast_int32_from_regs_le(registers, 0x028) / 10
+        self.apparent_power = _fast_int32_from_regs_le(registers, 0x02A) / 10
+        self.reactive_power = _fast_int32_from_regs_le(registers, 0x02C) / 10
+        self.power_factor = _fast_int16_from_reg(registers, 0x031) / 1000
+        self.frequency = _fast_int16_from_reg(registers, 0x033) / 10
 
         # print all above values
         # print(self)
@@ -91,79 +102,41 @@ class OtherEnergies:
         self.run_hour_life_counter: float = 0.0
 
     def parse(self, registers):
-        self.kwh_plus_total = (
-            _convert_from_registers_little(registers[0x00 : 0x00 + 4], ModbusTcpClient.DATATYPE.INT64) / 1000.0
-        )
+        self.kwh_plus_total = _fast_int64_from_regs_le(registers, 0x00) / 1000.0
 
-        self.kvarh_plus_total = (
-            _convert_from_registers_little(registers[0x04 : 0x04 + 4], ModbusTcpClient.DATATYPE.INT64) / 1000.0
-        )
+        self.kvarh_plus_total = _fast_int64_from_regs_le(registers, 0x04) / 1000.0
 
-        self.kwh_plus_l1 = (
-            _convert_from_registers_little(registers[0x10 : 0x10 + 4], ModbusTcpClient.DATATYPE.INT64) / 1000.0
-        )
-        self.kwh_plus_l2 = (
-            _convert_from_registers_little(registers[0x14 : 0x14 + 4], ModbusTcpClient.DATATYPE.INT64) / 1000.0
-        )
-        self.kwh_plus_l3 = (
-            _convert_from_registers_little(registers[0x18 : 0x18 + 4], ModbusTcpClient.DATATYPE.INT64) / 1000.0
-        )
+        self.kwh_plus_l1 = _fast_int64_from_regs_le(registers, 0x10) / 1000.0
+        self.kwh_plus_l2 = _fast_int64_from_regs_le(registers, 0x14) / 1000.0
+        self.kwh_plus_l3 = _fast_int64_from_regs_le(registers, 0x18) / 1000.0
 
-        self.kwh_neg_total = (
-            _convert_from_registers_little(registers[0x1C : 0x1C + 4], ModbusTcpClient.DATATYPE.INT64) / 1000.0
-        )
+        self.kwh_neg_total = _fast_int64_from_regs_le(registers, 0x1C) / 1000.0
 
-        self.kvarh_neg_total = (
-            _convert_from_registers_little(registers[0x24 : 0x24 + 4], ModbusTcpClient.DATATYPE.INT64) / 1000.0
-        )
+        self.kvarh_neg_total = _fast_int64_from_regs_le(registers, 0x24) / 1000.0
 
-        self.kvah_total = (
-            _convert_from_registers_little(registers[0x2C : 0x2C + 4], ModbusTcpClient.DATATYPE.INT64) / 1000.0
-        )
+        self.kvah_total = _fast_int64_from_regs_le(registers, 0x2C) / 1000.0
 
-        self.run_hour_meter = (
-            _convert_from_registers_little(registers[0x34 : 0x34 + 2], ModbusTcpClient.DATATYPE.INT32) / 100.0
-        )
+        self.run_hour_meter = _fast_int32_from_regs_le(registers, 0x34) / 100.0
 
-        self.run_hour_meter_neg_kwh = (
-            _convert_from_registers_little(registers[0x36 : 0x36 + 2], ModbusTcpClient.DATATYPE.INT32) / 100.0
-        )
+        self.run_hour_meter_neg_kwh = _fast_int32_from_regs_le(registers, 0x36) / 100.0
 
-        self.frequency = (
-            _convert_from_registers_little(registers[0x3C : 0x3C + 2], ModbusTcpClient.DATATYPE.INT32) / 1000.0
-        )
+        self.frequency = _fast_int32_from_regs_le(registers, 0x3C) / 1000.0
 
-        self.kwh_plus_partial = (
-            _convert_from_registers_little(registers[0x08 : 0x08 + 4], ModbusTcpClient.DATATYPE.INT64) / 1000.0
-        )
+        self.kwh_plus_partial = _fast_int64_from_regs_le(registers, 0x08) / 1000.0
 
-        self.kvarh_plus_partial = (
-            _convert_from_registers_little(registers[0x0C : 0x0C + 4], ModbusTcpClient.DATATYPE.INT64) / 1000.0
-        )
+        self.kvarh_plus_partial = _fast_int64_from_regs_le(registers, 0x0C) / 1000.0
 
-        self.kwh_neg_partial = (
-            _convert_from_registers_little(registers[0x20 : 0x20 + 4], ModbusTcpClient.DATATYPE.INT64) / 1000.0
-        )
+        self.kwh_neg_partial = _fast_int64_from_regs_le(registers, 0x20) / 1000.0
 
-        self.kvarh_neg_partial = (
-            _convert_from_registers_little(registers[0x28 : 0x28 + 4], ModbusTcpClient.DATATYPE.INT64) / 1000.0
-        )
+        self.kvarh_neg_partial = _fast_int64_from_regs_le(registers, 0x28) / 1000.0
 
-        self.kvah_partial = (
-            _convert_from_registers_little(registers[0x30 : 0x30 + 4], ModbusTcpClient.DATATYPE.INT64) / 1000.0
-        )
+        self.kvah_partial = _fast_int64_from_regs_le(registers, 0x30) / 1000.0
 
-        self.run_hour_meter_partial = (
-            _convert_from_registers_little(registers[0x38 : 0x38 + 2], ModbusTcpClient.DATATYPE.INT32) / 100.0
-        )
+        self.run_hour_meter_partial = _fast_int32_from_regs_le(registers, 0x38) / 100.0
 
-        self.run_hour_meter_neg_kwh_partial = (
-            _convert_from_registers_little(registers[0x3A : 0x3A + 2], ModbusTcpClient.DATATYPE.INT32) / 100.0
-        )
+        self.run_hour_meter_neg_kwh_partial = _fast_int32_from_regs_le(registers, 0x3A) / 100.0
 
-        self.run_hour_life_counter = (
-            _convert_from_registers_little(registers[0x3E : 0x3E + 2], ModbusTcpClient.DATATYPE.INT32) / 100.0
-        )
+        self.run_hour_life_counter = _fast_int32_from_regs_le(registers, 0x3E) / 100.0
 
         # print(self)
 
@@ -189,35 +162,25 @@ class PhaseData:
 
     def parse(self, phase_idx, registers):  # Each block of 7 registers corresponds to a phase:
         i = phase_idx * 2 + 0x0000
-        self.line_neutral_voltage = (
-            _convert_from_registers_little(registers[i : i + 2], ModbusTcpClient.DATATYPE.INT32) / 10.0
-        )
+        self.line_neutral_voltage = _fast_int32_from_regs_le(registers, i) / 10.0
 
         i = phase_idx * 2 + 0x0006
-        self.line_line_voltage = (
-            _convert_from_registers_little(registers[i : i + 2], ModbusTcpClient.DATATYPE.INT32) / 10.0
-        )
+        self.line_line_voltage = _fast_int32_from_regs_le(registers, i) / 10.0
 
         i = phase_idx * 2 + 0x000C
-        self.current = _convert_from_registers_little(registers[i : i + 2], ModbusTcpClient.DATATYPE.INT32) / 1000.0
+        self.current = _fast_int32_from_regs_le(registers, i) / 1000.0
 
         i = phase_idx * 2 + 0x0012
-        self.power = _convert_from_registers_little(registers[i : i + 2], ModbusTcpClient.DATATYPE.INT32) / 10.0
+        self.power = _fast_int32_from_regs_le(registers, i) / 10.0
 
         i = phase_idx * 2 + 0x0018
-        self.apparent_power = (
-            _convert_from_registers_little(registers[i : i + 2], ModbusTcpClient.DATATYPE.INT32) / 10.0
-        )
+        self.apparent_power = _fast_int32_from_regs_le(registers, i) / 10.0
 
         i = phase_idx * 2 + 0x001E
-        self.reactive_power = (
-            _convert_from_registers_little(registers[i : i + 2], ModbusTcpClient.DATATYPE.INT32) / 10.0
-        )
+        self.reactive_power = _fast_int32_from_regs_le(registers, i) / 10.0
 
         i = phase_idx + 0x002E
-        self.power_factor = (
-            _convert_from_registers_little(registers[i : i + 1], ModbusTcpClient.DATATYPE.INT16) / 1000.0
-        )
+        self.power_factor = _fast_int16_from_reg(registers, i) / 1000.0
 
         # print(self)
 
@@ -318,7 +281,7 @@ class MeterData:
 
     def update_from_frame(self):
         # Kee last update timestamp
-        self._timestamp = datetime.now().timestamp()
+        self._timestamp = time.time()
 
         # Remap registers as needed
         self.frame.remap_registers()

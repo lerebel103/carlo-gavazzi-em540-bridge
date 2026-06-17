@@ -1,10 +1,10 @@
 import asyncio
 import logging
+import struct
 from threading import Event, Thread
 from typing import Callable
 
 from pymodbus import FramerType
-from pymodbus.client import ModbusTcpClient
 from pymodbus.server import ModbusTcpServer
 from pymodbus.simulator.simdata import DataType, SimData
 from pymodbus.simulator.simdevice import SimDevice
@@ -19,6 +19,10 @@ logger = logging.getLogger("ts65a-slave")
 
 # Holding register function code used for async_setValues.
 _FC_HOLDING_REGISTER = 3
+
+# Pre-compiled struct for FLOAT32 → 2 registers (big-endian)
+_STRUCT_FLOAT32 = struct.Struct(">f")
+_STRUCT_2H = struct.Struct(">2H")
 
 # Static register layout for the Fronius Smart Meter TS 65A-3 SunSpec model.
 # Addresses are 0-based Modbus protocol addresses (register number - 1).
@@ -316,9 +320,9 @@ class Ts65aSlaveBridge(MeterDataListener):
         values = self._dynamic_values()
 
         for value in values:
-            reg_pair = ModbusTcpClient.convert_to_registers(value, ModbusTcpClient.DATATYPE.FLOAT32)
-            registers[index] = reg_pair[0]
-            registers[index + 1] = reg_pair[1]
+            hi, lo = _STRUCT_2H.unpack(_STRUCT_FLOAT32.pack(value))
+            registers[index] = hi
+            registers[index + 1] = lo
             index += 2
 
         coro = self._server.async_setValues(

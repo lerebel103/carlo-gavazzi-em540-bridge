@@ -90,11 +90,7 @@ class TestTs65aSlaveBridge(unittest.TestCase):
             encoded = int(abs(value)) % 65536
             return [encoded, encoded]
 
-        with patch(
-            "app.fronius.ts65a_slave_bridge.ModbusTcpClient.convert_to_registers",
-            side_effect=_fake_convert_to_registers,
-        ):
-            asyncio.run(bridge.new_data(data))
+        asyncio.run(bridge.new_data(data))
 
         mock_server.async_setValues.assert_awaited_once()
         call_args = mock_server.async_setValues.call_args
@@ -148,23 +144,21 @@ class TestTs65aSlaveBridge(unittest.TestCase):
             ),
         ]
 
-        def _fake_convert_to_registers(value, _datatype):
-            encoded = int(value)
-            return [encoded, encoded + 1]
-
-        with patch(
-            "app.fronius.ts65a_slave_bridge.ModbusTcpClient.convert_to_registers",
-            side_effect=_fake_convert_to_registers,
-        ):
-            asyncio.run(bridge.new_data(data))
+        asyncio.run(bridge.new_data(data))
 
         call_args = mock_server.async_setValues.call_args
         _, _, start_address, registers = call_args.args
         self.assertEqual(start_address, 40071)
 
+        # voltage_phase_ca is at index 11 in _dynamic_values (0-indexed)
+        # Each value takes 2 registers, so register offset = 11 * 2 = 22
         phase_ca_index = 22
-        self.assertEqual(registers[phase_ca_index], 777)
-        self.assertEqual(registers[phase_ca_index + 1], 778)
+        # Verify it encodes 777.0 as FLOAT32 big-endian (2 registers)
+        import struct
+
+        expected_regs = struct.unpack(">2H", struct.pack(">f", 777.0))
+        self.assertEqual(registers[phase_ca_index], expected_regs[0])
+        self.assertEqual(registers[phase_ca_index + 1], expected_regs[1])
 
 
 class TestBuildTs65aSimdata(unittest.TestCase):
