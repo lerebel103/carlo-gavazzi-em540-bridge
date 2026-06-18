@@ -59,7 +59,10 @@ class IdleConnectionReaper:
         """Patch the server to track per-connection PDU activity.
 
         Must be called before the server starts accepting connections.
+        Raises RuntimeError if called more than once.
         """
+        if self._original_callback_new_connection is not None:
+            raise RuntimeError(f"IdleConnectionReaper already installed on {self._label}")
         self._original_callback_new_connection = self._server.callback_new_connection
         self._server.callback_new_connection = self._wrapped_callback_new_connection  # type: ignore[method-assign]
 

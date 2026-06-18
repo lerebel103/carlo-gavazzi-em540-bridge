@@ -2,7 +2,7 @@
 
 import time
 import unittest
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 from app.utils.idle_connection_reaper import IdleConnectionReaper
 
@@ -53,13 +53,14 @@ class TestIdleConnectionReaper(unittest.TestCase):
         self.server.callback_new_connection.return_value = handler
         self.reaper.install()
 
-        self.server.callback_new_connection()
-        initial_time = self.reaper._last_activity["conn-1"]
+        with patch("app.utils.idle_connection_reaper.time.monotonic", return_value=100.0):
+            self.server.callback_new_connection()
+        self.assertEqual(self.reaper._last_activity["conn-1"], 100.0)
 
-        # Simulate time passing and PDU activity
-        time.sleep(0.01)
-        handler.trace_pdu(True, MagicMock())
-        self.assertGreater(self.reaper._last_activity["conn-1"], initial_time)
+        # Simulate PDU activity at a later time
+        with patch("app.utils.idle_connection_reaper.time.monotonic", return_value=105.0):
+            handler.trace_pdu(True, MagicMock())
+        self.assertEqual(self.reaper._last_activity["conn-1"], 105.0)
 
     def test_disconnect_cleans_up_tracking(self):
         """When a connection disconnects, its tracking entry should be removed."""
@@ -134,3 +135,9 @@ class TestIdleConnectionReaper(unittest.TestCase):
 
         loop.call_soon_threadsafe.assert_called_once_with(task.cancel)
         self.assertIsNone(self.reaper._task)
+
+    def test_double_install_raises(self):
+        """Calling install() twice should raise RuntimeError."""
+        self.reaper.install()
+        with self.assertRaises(RuntimeError):
+            self.reaper.install()
