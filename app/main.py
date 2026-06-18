@@ -124,12 +124,15 @@ async def process_loop():
 async def main():
     global config_manager
 
-    # Let Python's default GC handle memory management. Custom GC tuning was previously
-    # used here to reduce collection pauses in the 10Hz tick loop, but on constrained
-    # hosts with connection churn it caused unbounded memory growth from reference cycles
-    # (exception tracebacks, asyncio futures) that only a GC run can break.
-    # gc.disable()
-    # gc.set_threshold(100000, 10, 10)
+    # Tune GC for real-time performance: raise the gen-0 threshold so collections
+    # happen less frequently (roughly every few seconds instead of multiple times
+    # per second). This reduces tick-loop pauses from gen-0 sweeps while still
+    # collecting reference cycles that would otherwise leak memory.
+    # Default is (700, 10, 10); we raise gen-0 to 5000 so collections batch up
+    # during idle periods between tick bursts.
+    import gc
+
+    gc.set_threshold(5000, 10, 10)
 
     args = parse_args()
     config_manager = ConfigManager(args.config)
