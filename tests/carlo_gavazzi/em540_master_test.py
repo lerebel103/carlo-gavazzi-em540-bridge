@@ -562,6 +562,52 @@ class TestSkipNRead(unittest.TestCase):
         self.assertEqual(energy_values[:ENERGY_BLOCK_CHUNK_SIZE], chunk0_values)
         self.assertEqual(energy_values[ENERGY_BLOCK_CHUNK_SIZE : 2 * ENERGY_BLOCK_CHUNK_SIZE], chunk1_values)
 
+    # -----------------------------------------------------------------------
+    # Startup gate: no publish until first full energy read completes
+    # -----------------------------------------------------------------------
+    def test_no_publish_until_initial_energy_read_complete(self):
+        """Buffer swap must not happen until all energy chunks are read at least once."""
+        from app.carlo_gavazzi.em540_data import ENERGY_BLOCK_CHUNK_SIZE, ENERGY_BLOCK_TOTAL_SIZE
+
+        num_chunks = (ENERGY_BLOCK_TOTAL_SIZE + ENERGY_BLOCK_CHUNK_SIZE - 1) // ENERGY_BLOCK_CHUNK_SIZE
+
+        # Reset the gate to False (simulating fresh startup)
+        self.master._energy_initial_read_complete = False
+        # Reset dyn_reg_read_counter so energy skip fires on first tick
+        self.master._dyn_reg_read_counter = 0
+
+        initial_seq = self.master._data_seq
+
+        # Run chunk 0 + rest + chunk 1 + rest ... up to but NOT including the last chunk
+        # Build tick responses for all but the final chunk
+        tick_responses = [_build_first_tick_responses(self.frame)]  # chunk 0
+        for chunk_idx in range(1, num_chunks - 1):
+            tick_responses.append(_build_primary_only_responses(self.frame))  # rest
+            tick_responses.append(_build_continuation_tick_responses(self.frame, chunk_idx))
+
+        # Add the rest tick before last chunk
+        tick_responses.append(_build_primary_only_responses(self.frame))
+
+        for responses in tick_responses:
+            self.mock_client.read_holding_registers.reset_mock()
+            self.mock_client.read_holding_registers = AsyncMock(side_effect=responses)
+            asyncio.run(self.master.acquire_data())
+
+        # Sequence should NOT have advanced — no publish yet
+        self.assertEqual(self.master._data_seq, initial_seq)
+        self.assertFalse(self.master._energy_initial_read_complete)
+
+        # Now read the final chunk — this should complete the gate and publish
+        self.mock_client.read_holding_registers.reset_mock()
+        self.mock_client.read_holding_registers = AsyncMock(
+            side_effect=_build_continuation_tick_responses(self.frame, num_chunks - 1)
+        )
+        asyncio.run(self.master.acquire_data())
+
+        # Now the gate should be open and data_seq should have advanced
+        self.assertTrue(self.master._energy_initial_read_complete)
+        self.assertGreater(self.master._data_seq, initial_seq)
+
 
 class TestListenerWorker(unittest.TestCase):
     """Validates listener workers and consumer missed-update diagnostics."""
