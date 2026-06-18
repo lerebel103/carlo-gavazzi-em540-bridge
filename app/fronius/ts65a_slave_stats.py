@@ -1,6 +1,9 @@
+import logging
 from typing import Callable
 
 from app.carlo_gavazzi.meter_data import MeterData
+
+_logger = logging.getLogger(__name__)
 
 
 class Ts65aSlaveStats:
@@ -25,7 +28,10 @@ class Ts65aSlaveStats:
 
     def changed(self):
         for listener in self._listeners:
-            listener(self)
+            try:
+                listener(self)
+            except Exception:
+                _logger.debug("Stats listener raised an exception", exc_info=True)
 
     def add_listener(self, listener: Callable[["Ts65aSlaveStats"], None]):
         self._listeners.append(listener)

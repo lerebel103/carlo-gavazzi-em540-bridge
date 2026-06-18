@@ -39,29 +39,30 @@ def _make_successful_result(num_registers):
 
 
 def _build_first_tick_responses(frame):
-    """Build responses for the first tick: energy chunk 0 (16 regs) + primary block.
+    """Build responses for the first tick: primary block + energy chunk 0.
 
-    On the first tick, energy_skip_fires=True so chunk 0 is read, then the primary block.
+    On the first tick, primary is always read first, then energy_skip_fires=True
+    so chunk 0 is read.
     """
     from app.carlo_gavazzi.em540_data import ENERGY_BLOCK_CHUNK_SIZE
 
     primary_reg = frame.dynamic_reg_map[0x0000]
     return [
-        _make_successful_result(ENERGY_BLOCK_CHUNK_SIZE),  # energy chunk 0
         _make_successful_result(len(primary_reg.values)),  # primary block
+        _make_successful_result(ENERGY_BLOCK_CHUNK_SIZE),  # energy chunk 0
     ]
 
 
 def _build_continuation_tick_responses(frame, chunk_index):
-    """Build responses for a tick reading a pending energy chunk + primary block."""
+    """Build responses for a tick reading primary block + a pending energy chunk."""
     from app.carlo_gavazzi.em540_data import ENERGY_BLOCK_CHUNK_SIZE, ENERGY_BLOCK_TOTAL_SIZE
 
     primary_reg = frame.dynamic_reg_map[0x0000]
     chunk_offset = chunk_index * ENERGY_BLOCK_CHUNK_SIZE
     chunk_size = min(ENERGY_BLOCK_CHUNK_SIZE, ENERGY_BLOCK_TOTAL_SIZE - chunk_offset)
     return [
-        _make_successful_result(chunk_size),  # energy chunk N
         _make_successful_result(len(primary_reg.values)),  # primary block
+        _make_successful_result(chunk_size),  # energy chunk N
     ]
 
 
@@ -520,11 +521,11 @@ class TestSkipNRead(unittest.TestCase):
         primary_reg = self.frame.dynamic_reg_map[0x0000]
         primary_result = _make_successful_result(len(primary_reg.values))
 
-        # Cycle 1: chunk 0 returns distinctive values
+        # Cycle 1: primary + chunk 0 (chunk 0 returns distinctive values)
         chunk0_result = MagicMock()
         chunk0_result.isError.return_value = False
         chunk0_result.registers = chunk0_values
-        self.mock_client.read_holding_registers = AsyncMock(side_effect=[chunk0_result, primary_result])
+        self.mock_client.read_holding_registers = AsyncMock(side_effect=[primary_result, chunk0_result])
 
         with patch("app.carlo_gavazzi.meter_data.MeterData.update_from_frame", return_value=None):
             with patch.object(self.master._condition, "notify"):
@@ -543,13 +544,13 @@ class TestSkipNRead(unittest.TestCase):
                 result = asyncio.run(self.master.acquire_data())
         self.assertTrue(result)
 
-        # Cycle 3: chunk 1 returns different distinctive values
+        # Cycle 3: primary + chunk 1 (chunk 1 returns different distinctive values)
         chunk1_result = MagicMock()
         chunk1_result.isError.return_value = False
         chunk1_result.registers = chunk1_values
         self.mock_client.read_holding_registers.reset_mock()
         self.mock_client.read_holding_registers = AsyncMock(
-            side_effect=[chunk1_result, _make_successful_result(len(primary_reg.values))]
+            side_effect=[_make_successful_result(len(primary_reg.values)), chunk1_result]
         )
 
         with patch("app.carlo_gavazzi.meter_data.MeterData.update_from_frame", return_value=None):
@@ -563,10 +564,14 @@ class TestSkipNRead(unittest.TestCase):
         self.assertEqual(energy_values[ENERGY_BLOCK_CHUNK_SIZE : 2 * ENERGY_BLOCK_CHUNK_SIZE], chunk1_values)
 
     # -----------------------------------------------------------------------
-    # Startup gate: no publish until first full energy read completes
+    # Startup gate: energy_initial_read_complete tracks full energy read
     # -----------------------------------------------------------------------
-    def test_no_publish_until_initial_energy_read_complete(self):
-        """Buffer swap must not happen until all energy chunks are read at least once."""
+    def test_energy_initial_read_complete_tracks_full_cycle(self):
+        """_energy_initial_read_complete becomes True only after all chunks read.
+
+        Primary data publishes on every successful tick regardless of the energy gate.
+        The gate only tracks whether the first full energy read has completed.
+        """
         from app.carlo_gavazzi.em540_data import ENERGY_BLOCK_CHUNK_SIZE, ENERGY_BLOCK_TOTAL_SIZE
 
         num_chunks = (ENERGY_BLOCK_TOTAL_SIZE + ENERGY_BLOCK_CHUNK_SIZE - 1) // ENERGY_BLOCK_CHUNK_SIZE
@@ -579,7 +584,6 @@ class TestSkipNRead(unittest.TestCase):
         initial_seq = self.master._data_seq
 
         # Run chunk 0 + rest + chunk 1 + rest ... up to but NOT including the last chunk
-        # Build tick responses for all but the final chunk
         tick_responses = [_build_first_tick_responses(self.frame)]  # chunk 0
         for chunk_idx in range(1, num_chunks - 1):
             tick_responses.append(_build_primary_only_responses(self.frame))  # rest
@@ -593,20 +597,20 @@ class TestSkipNRead(unittest.TestCase):
             self.mock_client.read_holding_registers = AsyncMock(side_effect=responses)
             asyncio.run(self.master.acquire_data())
 
-        # Sequence should NOT have advanced — no publish yet
-        self.assertEqual(self.master._data_seq, initial_seq)
+        # Primary data DOES publish (data_seq advances) even before energy completes
+        self.assertGreater(self.master._data_seq, initial_seq)
+        # But the energy gate remains closed
         self.assertFalse(self.master._energy_initial_read_complete)
 
-        # Now read the final chunk — this should complete the gate and publish
+        # Now read the final chunk — this should complete the energy gate
         self.mock_client.read_holding_registers.reset_mock()
         self.mock_client.read_holding_registers = AsyncMock(
             side_effect=_build_continuation_tick_responses(self.frame, num_chunks - 1)
         )
         asyncio.run(self.master.acquire_data())
 
-        # Now the gate should be open and data_seq should have advanced
+        # Now the gate should be open
         self.assertTrue(self.master._energy_initial_read_complete)
-        self.assertGreater(self.master._data_seq, initial_seq)
 
 
 class TestListenerWorker(unittest.TestCase):

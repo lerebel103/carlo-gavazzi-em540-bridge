@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 import argparse
 import asyncio
-import gc
 import logging
 import time
 from contextlib import contextmanager
@@ -125,10 +124,12 @@ async def process_loop():
 async def main():
     global config_manager
 
-    # Optimize GC for real-time performance: disable automatic GC and set high thresholds
-    # to prevent collection pauses from interfering with the 10Hz tick loop.
-    gc.disable()
-    gc.set_threshold(100000, 10, 10)  # Extremely high thresholds; manual collection occurs only during idle periods
+    # Let Python's default GC handle memory management. Custom GC tuning was previously
+    # used here to reduce collection pauses in the 10Hz tick loop, but on constrained
+    # hosts with connection churn it caused unbounded memory growth from reference cycles
+    # (exception tracebacks, asyncio futures) that only a GC run can break.
+    # gc.disable()
+    # gc.set_threshold(100000, 10, 10)
 
     args = parse_args()
     config_manager = ConfigManager(args.config)

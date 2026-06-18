@@ -49,7 +49,10 @@ class Em540MasterStats:
 
     def changed(self) -> None:
         for listener in self._listeners:
-            listener(self)
+            try:
+                listener(self)
+            except Exception:
+                logger.debug("Stats listener raised an exception", exc_info=True)
 
     def add_listener(self, listener: Callable[["Em540MasterStats"], None]) -> None:
         self._listeners.append(listener)
@@ -299,15 +302,31 @@ class Em540Master:
         self._dyn_reg_read_counter += 1
         read_start = time.perf_counter()
 
-        # --- Chunked energy block read logic ---
-        # The energy block (0x0500, 64 regs) is split into four 16-register reads
-        # interlaced with primary-only rest ticks to allow jitter recovery.
+        # --- Primary block read (critical path) ---
+        # Read the primary block FIRST. This contains real-time power/voltage/current
+        # data that downstream consumers depend on at 10Hz. Energy chunk failures must
+        # never prevent primary data from reaching listeners.
+        is_ok: bool = await self._read_primary_block(frame)
+
+        if not is_ok:
+            modbus_read_ms = (time.perf_counter() - read_start) * 1000.0
+            for listener in self._listeners:
+                await listener.read_failed()
+            self._update_timing_stats(cycle_start, modbus_read_ms, post_read_processing_ms)
+            return False
+
+        # --- Chunked energy block read logic (best-effort, non-blocking) ---
+        # The energy block (0x0500, 64 regs) is split into chunks that are read
+        # on alternating ticks with primary-only rest ticks to allow jitter recovery.
         #
         # Scheduling:
         #   - When skip_n_read fires, we read chunk 0 on that tick.
         #   - After each chunk read, we rest for one tick (primary-only) before
         #     reading the next chunk. This gives lighter ticks room to absorb jitter.
-        #   - Pattern: chunk0, rest, chunk1, rest, chunk2, rest, chunk3, then idle.
+        #   - Pattern: chunk0, rest, chunk1, rest, ..., chunkN, then idle.
+        #
+        # Energy chunk failures do NOT abort the tick — primary data still publishes.
+        # The chunk sequence resets on failure and retries on the next skip-counter fire.
 
         energy_reg_desc = frame.dynamic_reg_map[_ENERGY_BLOCK_ADDR]
         skip_n_read = energy_reg_desc.skip_n_read
@@ -323,7 +342,6 @@ class Em540Master:
             if self._energy_chunk_rest:
                 # Rest tick — skip the chunk read, just backfill and let primary run alone
                 self._energy_chunk_rest = False
-                energy_read_ok = True
                 self._backfill_energy_from_front(frame)
             else:
                 # Read tick — seed from front then read the pending chunk
@@ -340,9 +358,13 @@ class Em540Master:
                         self._energy_chunk_rest = False
                         if not self._energy_initial_read_complete:
                             self._energy_initial_read_complete = True
+                            logger.info("Initial energy read complete, publishing energy data.")
                 else:
+                    # Chunk failed — reset sequence but DON'T abort the tick.
+                    # Primary data already read successfully above.
                     self._energy_chunk_pending = -1
                     self._energy_chunk_rest = False
+                    self._backfill_energy_from_front(frame)
         elif energy_skip_fires:
             # Start a new chunked energy read: read chunk 0 this tick.
             # Seed the back buffer's energy values from front first so that any chunks
@@ -357,53 +379,37 @@ class Em540Master:
                     self._energy_chunk_pending = -1
                     if not self._energy_initial_read_complete:
                         self._energy_initial_read_complete = True
+                        logger.info("Initial energy read complete, publishing energy data.")
             else:
                 self._energy_chunk_pending = -1
                 self._backfill_energy_from_front(frame)
         else:
             # No energy read this tick — backfill energy values from front buffer
-            energy_read_ok = True
             self._backfill_energy_from_front(frame)
 
-        # If the energy chunk read failed (connection closed), abort the tick early.
-        if not energy_read_ok:
-            modbus_read_ms = (time.perf_counter() - read_start) * 1000.0
-            for listener in self._listeners:
-                await listener.read_failed()
-            self._update_timing_stats(cycle_start, modbus_read_ms, post_read_processing_ms)
-            return False
-
-        # Always read the primary block
-        is_ok: bool = await self._read_primary_block(frame)
         modbus_read_ms = (time.perf_counter() - read_start) * 1000.0
 
-        if is_ok:
-            process_start = time.perf_counter()
-            try:
-                self._back_data.update_from_frame()
-            except (struct.error, ValueError, OverflowError) as e:
-                logger.warning("Corrupt frame data, dropping cycle: %s", e)
-                is_ok = False
-                for listener in self._listeners:
-                    await listener.read_failed()
-
-            if is_ok:
-                # Don't publish until the first full energy read cycle completes.
-                # Otherwise listeners see zero-filled energy registers on startup.
-                if not self._energy_initial_read_complete:
-                    logger.debug("Holding back frame: initial energy read not yet complete.")
-                else:
-                    # Atomic swap so listeners always read a coherent, latest snapshot.
-                    with self._condition:
-                        self._front_data, self._back_data = self._back_data, self._front_data
-                        self._data_seq += 1
-                        self._condition.notify_all()
-            post_read_processing_ms = (time.perf_counter() - process_start) * 1000.0
-        else:
-            # Now notify listeners
+        # --- Post-read processing and publication ---
+        process_start = time.perf_counter()
+        try:
+            self._back_data.update_from_frame()
+        except (struct.error, ValueError, OverflowError) as e:
+            logger.warning("Corrupt frame data, dropping cycle: %s", e)
+            is_ok = False
             for listener in self._listeners:
                 await listener.read_failed()
 
+        if is_ok:
+            # Always publish when primary data is fresh. Energy registers will contain
+            # zeros until the first full energy read completes, but this is acceptable —
+            # energy counters are slow-changing values and downstream consumers should
+            # not be starved of real-time power data waiting for them.
+            with self._condition:
+                self._front_data, self._back_data = self._back_data, self._front_data
+                self._data_seq += 1
+                self._condition.notify_all()
+
+        post_read_processing_ms = (time.perf_counter() - process_start) * 1000.0
         self._update_timing_stats(cycle_start, modbus_read_ms, post_read_processing_ms)
 
         return is_ok
@@ -526,11 +532,10 @@ class Em540Master:
     def _backfill_energy_from_front(self, frame) -> None:
         """Copy energy register values from the front buffer to keep them current when not reading.
 
-        Skip backfill during the initial energy read cycle (gate closed) because the
-        front buffer contains all zeros and would overwrite chunks already read.
+        This propagates previously-read energy chunks across buffer swaps so that
+        partial energy data accumulates correctly during the initial read sequence
+        and energy values stay current between read cycles after completion.
         """
-        if not self._energy_initial_read_complete:
-            return
         front_energy = self._front_data.frame.dynamic_reg_map.get(_ENERGY_BLOCK_ADDR)
         if front_energy is not None:
             frame.dynamic_reg_map[_ENERGY_BLOCK_ADDR].values = list(front_energy.values)
@@ -631,14 +636,16 @@ class Em540Master:
                 try:
                     loop.run_until_complete(listener.new_data(snapshot))
                     num_errors = 0
-                except Exception as e:
-                    logger.critical("Listener worker failure, starting error counting", exc_info=True)
-                    logger.exception(e)
+                except Exception:
                     num_errors += 1
+                    if num_errors <= 3 or num_errors % 10 == 0:
+                        logger.critical("Listener worker failure (%d consecutive errors)", num_errors, exc_info=True)
 
                 if num_errors > 10:
                     logger.critical("Too many successive listener errors, restarting.")
                     break
+        except Exception:
+            logger.critical("Listener thread crashed unexpectedly", exc_info=True)
         finally:
             loop.close()
 

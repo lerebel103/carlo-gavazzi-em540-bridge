@@ -141,3 +141,59 @@ class TestIdleConnectionReaper(unittest.TestCase):
         self.reaper.install()
         with self.assertRaises(RuntimeError):
             self.reaper.install()
+
+    def test_connection_rejected_when_at_capacity(self):
+        """New connections beyond max_connections should be immediately closed."""
+        server = _make_mock_server()
+        reaper = IdleConnectionReaper(server, idle_timeout=1.0, max_connections=2, server_label="test-cap")
+        reaper.install()
+
+        # Set up handlers
+        handler1 = _make_mock_handler("conn-1")
+        handler2 = _make_mock_handler("conn-2")
+        handler3 = _make_mock_handler("conn-3")
+
+        # Simulate first two connections (within cap)
+        reaper._original_callback_new_connection.return_value = handler1
+        server.active_connections["conn-1"] = handler1
+        server.callback_new_connection()
+        handler1.close.assert_not_called()
+
+        reaper._original_callback_new_connection.return_value = handler2
+        server.active_connections["conn-2"] = handler2
+        server.callback_new_connection()
+        handler2.close.assert_not_called()
+
+        # Third connection should be rejected (3 in active_connections > max of 2)
+        reaper._original_callback_new_connection.return_value = handler3
+        server.active_connections["conn-3"] = handler3
+        server.callback_new_connection()
+        handler3.close.assert_called_once()
+        self.assertEqual(reaper.rejected_connection_count, 1)
+        # Rejected connection should NOT be tracked for idle reaping
+        self.assertNotIn("conn-3", reaper._last_activity)
+
+    def test_connection_accepted_after_disconnect_frees_slot(self):
+        """After a disconnect frees a slot, new connections should be accepted."""
+        server = _make_mock_server()
+        reaper = IdleConnectionReaper(server, idle_timeout=1.0, max_connections=1, server_label="test-cap")
+        reaper.install()
+
+        handler1 = _make_mock_handler("conn-1")
+        reaper._original_callback_new_connection.return_value = handler1
+        server.active_connections["conn-1"] = handler1
+        server.callback_new_connection()
+        handler1.close.assert_not_called()
+
+        # Simulate disconnect (remove from active_connections)
+        del server.active_connections["conn-1"]
+        handler1.callback_disconnected()
+
+        # New connection should be accepted
+        handler2 = _make_mock_handler("conn-2")
+        reaper._original_callback_new_connection.return_value = handler2
+        server.active_connections["conn-2"] = handler2
+        server.callback_new_connection()
+        handler2.close.assert_not_called()
+        self.assertIn("conn-2", reaper._last_activity)
+        self.assertEqual(reaper.rejected_connection_count, 0)

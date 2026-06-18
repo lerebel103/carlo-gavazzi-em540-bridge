@@ -1,4 +1,7 @@
+import logging
 from typing import Callable
+
+_logger = logging.getLogger(__name__)
 
 
 class EM540SlaveStats:
@@ -18,7 +21,10 @@ class EM540SlaveStats:
 
     def changed(self) -> None:
         for listener in self._listeners:
-            listener(self)
+            try:
+                listener(self)
+            except Exception:
+                _logger.debug("Stats listener raised an exception", exc_info=True)
 
     def add_listener(self, listener: Callable[["EM540SlaveStats"], None]) -> None:
         self._listeners.append(listener)
