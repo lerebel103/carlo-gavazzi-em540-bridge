@@ -340,7 +340,6 @@ class Em540Master:
                         self._energy_chunk_rest = False
                         if not self._energy_initial_read_complete:
                             self._energy_initial_read_complete = True
-                            logger.info("Initial energy read complete, publishing enabled.")
                 else:
                     self._energy_chunk_pending = -1
                     self._energy_chunk_rest = False
@@ -358,7 +357,6 @@ class Em540Master:
                     self._energy_chunk_pending = -1
                     if not self._energy_initial_read_complete:
                         self._energy_initial_read_complete = True
-                        logger.info("Initial energy read complete, publishing enabled.")
             else:
                 self._energy_chunk_pending = -1
                 self._backfill_energy_from_front(frame)
