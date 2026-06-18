@@ -75,8 +75,9 @@ class TestIdleConnectionReaper(unittest.TestCase):
         self.assertNotIn("conn-1", self.reaper._last_activity)
 
     def test_idle_connection_is_reaped(self):
-        """Connections idle beyond the timeout should be closed."""
+        """Connections idle beyond the timeout should be closed and disconnected."""
         handler = _make_mock_handler("conn-1")
+        original_disconnected = handler.callback_disconnected
         self.server.callback_new_connection.return_value = handler
         self.reaper.install()
 
@@ -91,6 +92,9 @@ class TestIdleConnectionReaper(unittest.TestCase):
         self.reaper._reap_idle_connections()
 
         handler.close.assert_called_once()
+        # The original callback_disconnected should be called (via our wrapper)
+        # since pymodbus won't fire it on explicit close().
+        original_disconnected.assert_called_once_with(None)
         self.assertNotIn("conn-1", self.reaper._last_activity)
 
     def test_active_connection_is_not_reaped(self):

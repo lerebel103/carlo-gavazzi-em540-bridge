@@ -156,6 +156,13 @@ class IdleConnectionReaper:
             )
             try:
                 handler.close()
+                # pymodbus does not call callback_disconnected when close() is invoked
+                # explicitly (is_closing flag prevents connection_lost from firing).
+                # Manually trigger it so trace_connect(False) fires and stats update.
+                try:
+                    handler.callback_disconnected(None)
+                except Exception:
+                    pass
             except Exception:
                 logger.debug(
                     "[%s] Error closing idle connection %s",
