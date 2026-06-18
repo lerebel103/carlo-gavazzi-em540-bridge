@@ -1,7 +1,7 @@
 import asyncio
 import logging
 import struct
-from threading import Event, Thread
+from threading import Event, Lock, Thread
 from typing import Callable
 
 from pymodbus import FramerType
@@ -195,6 +195,19 @@ class Ts65aSlaveBridge(MeterDataListener):
         self._dynamic_register_buffer: list[int] = [0] * (len(self._dynamic_values()) * 2)
         self._server_loop: asyncio.AbstractEventLoop | None = None
 
+        # Direct access to the SimRuntime register array for lock-based writes.
+        # This avoids routing writes through the server event loop (which caused
+        # starvation deadlocks when many downstream connections saturated the loop).
+        # After construction, server.context is a SimCore wrapping the SimDevice.
+        sim_core = self._server.context
+        sim_runtime = sim_core.devices[self._slave_id]
+        block_key = "x" if "x" in sim_runtime.block else "h"
+        if block_key not in sim_runtime.block:
+            raise RuntimeError(f"SimRuntime has no register block (available keys: {list(sim_runtime.block.keys())})")
+        self._reg_start_address: int = sim_runtime.block[block_key][0]
+        self._registers: list[int] = sim_runtime.block[block_key][2]
+        self._reg_lock: Lock = Lock()
+
     def _trace_connect(self, connect):
         logger.debug("Client connection to TCP server: %s", connect)
         if connect:
@@ -323,17 +336,31 @@ class Ts65aSlaveBridge(MeterDataListener):
             registers[index + 1] = lo
             index += 2
 
-        coro = self._server.async_setValues(
-            self._slave_id, _FC_HOLDING_REGISTER, self._dynamic_start_address, registers
-        )
-        if self._server_loop is not None and self._server_loop.is_running():
-            future = asyncio.run_coroutine_threadsafe(coro, self._server_loop)
-            await asyncio.wrap_future(future)
-        else:
-            await coro
+        # Write directly into the SimRuntime register array under a lock.
+        # This avoids the cross-thread run_coroutine_threadsafe dependency that
+        # caused starvation deadlocks when many downstream connections saturated
+        # the server event loop.
+        offset = self._dynamic_start_address - self._reg_start_address
+        end = offset + len(registers)
+        write_ok = True
+        with self._reg_lock:
+            if offset < 0 or end > len(self._registers):
+                logger.error(
+                    "Register write out of bounds: offset=%d, end=%d, array_len=%d",
+                    offset,
+                    end,
+                    len(self._registers),
+                )
+                write_ok = False
+            else:
+                self._registers[offset:end] = registers
 
-        # Notify the PDU helper that we have new data
-        self._pdu_helper.data_received(data.timestamp)
+        # Only close the circuit if the write succeeded — prevents serving
+        # stale/partial data after an internal write failure.
+        if write_ok:
+            self._pdu_helper.data_received(data.timestamp)
+        else:
+            self._pdu_helper.upstream_failed()
         self._sync_pdu_stats()
 
     async def read_failed(self):
