@@ -93,11 +93,13 @@ class Em540Master:
         self._client: ModbusBaseClient
 
         # Energy block chunked-read state.
-        # When the energy block's skip counter fires, we read chunk 0 (first 16 regs) on
-        # that tick, then chunks 1, 2, 3 on alternate ticks with primary-only rest ticks
-        # in between. This interlacing lets shorter primary-only ticks absorb jitter.
+        # When the energy block's skip counter fires, we read chunk 0 on that tick,
+        # then subsequent chunks on alternating ticks with primary-only rest ticks
+        # in between. Chunk size and count are driven by ENERGY_BLOCK_CHUNK_SIZE.
+        # This interlacing lets shorter primary-only ticks absorb jitter.
         self._energy_chunk_pending: int = -1  # -1 = no chunk pending, 1..N-1 = next chunk index to read
         self._energy_chunk_rest: bool = False  # True = skip this tick's chunk read (rest tick)
+        self._energy_initial_read_complete: bool = False  # Gate: don't publish until first full energy read
 
         # Reconnect log-spam suppression state
         self._consecutive_connect_failures: int = 0
@@ -336,6 +338,7 @@ class Em540Master:
                     else:
                         self._energy_chunk_pending = -1
                         self._energy_chunk_rest = False
+                        self._energy_initial_read_complete = True
                 else:
                     self._energy_chunk_pending = -1
                     self._energy_chunk_rest = False
@@ -351,6 +354,7 @@ class Em540Master:
                     self._energy_chunk_rest = True  # rest before chunk 1
                 else:
                     self._energy_chunk_pending = -1
+                    self._energy_initial_read_complete = True
             else:
                 self._energy_chunk_pending = -1
                 self._backfill_energy_from_front(frame)
@@ -382,11 +386,16 @@ class Em540Master:
                     await listener.read_failed()
 
             if is_ok:
-                # Atomic swap so listeners always read a coherent, latest snapshot.
-                with self._condition:
-                    self._front_data, self._back_data = self._back_data, self._front_data
-                    self._data_seq += 1
-                    self._condition.notify_all()
+                # Don't publish until the first full energy read cycle completes.
+                # Otherwise listeners see zero-filled energy registers on startup.
+                if not self._energy_initial_read_complete:
+                    logger.debug("Holding back frame: initial energy read not yet complete.")
+                else:
+                    # Atomic swap so listeners always read a coherent, latest snapshot.
+                    with self._condition:
+                        self._front_data, self._back_data = self._back_data, self._front_data
+                        self._data_seq += 1
+                        self._condition.notify_all()
             post_read_processing_ms = (time.perf_counter() - process_start) * 1000.0
         else:
             # Now notify listeners
