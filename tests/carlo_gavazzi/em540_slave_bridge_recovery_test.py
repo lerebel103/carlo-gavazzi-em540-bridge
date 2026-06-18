@@ -94,11 +94,14 @@ def _wait_for_port(port: int, timeout: float = 3.0):
         s.settimeout(0.1)
         try:
             s.connect(("127.0.0.1", port))
+        except ConnectionRefusedError, OSError:
+            pass
+        else:
             s.close()
             return
-        except ConnectionRefusedError, OSError:
+        finally:
             s.close()
-            time.sleep(0.05)
+        time.sleep(0.05)
     raise TimeoutError(f"Port {port} not ready within {timeout}s")
 
 
@@ -111,8 +114,8 @@ def _flood_connections(host: str, port: int, count: int, timeout: float = 1.0) -
     """
     sockets = []
     for i in range(count):
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         try:
-            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             s.settimeout(timeout)
             s.connect((host, port))
 
@@ -126,8 +129,8 @@ def _flood_connections(host: str, port: int, count: int, timeout: float = 1.0) -
                 1,  # unit_id
                 3,  # function: read holding registers
                 0,  # address
-                8,
-            )  # count
+                8,  # count
+            )
             s.sendall(request)
 
             # Don't wait for response — just keep the socket open
@@ -135,6 +138,7 @@ def _flood_connections(host: str, port: int, count: int, timeout: float = 1.0) -
             s.setblocking(False)
             sockets.append(s)
         except ConnectionRefusedError, OSError:
+            s.close()
             break
     return sockets
 
@@ -239,15 +243,15 @@ class TestEm540SlaveRecoveryAfterOutage(unittest.TestCase):
         self.assertFalse(slave._pdu_helper.circuit_open, "Circuit should be closed with active feed")
         self.assertIsNone(self.feeder.error, f"Feeder crashed: {self.feeder.error}")
 
-        # Read using pymodbus client (runs on the test's event loop, server is on its own thread)
+        # Read using pymodbus client
         client = AsyncModbusTcpClient(host="127.0.0.1", port=tcp_port, framer=FramerType.SOCKET, timeout=3.0)
-        await client.connect()
-        self.assertTrue(client.connected, "Could not connect to downstream server")
-
-        result = await client.read_holding_registers(0, count=2, device_id=1)
-        client.close()
-
-        self.assertFalse(result.isError(), f"Read failed while data is flowing: {result}")
+        try:
+            await client.connect()
+            self.assertTrue(client.connected, "Could not connect to downstream server")
+            result = await client.read_holding_registers(0, count=2, device_id=1)
+            self.assertFalse(result.isError(), f"Read failed while data is flowing: {result}")
+        finally:
+            client.close()
 
     async def _async_test_recovery_with_flood(self):
         tcp_port = _get_free_port()
@@ -266,10 +270,12 @@ class TestEm540SlaveRecoveryAfterOutage(unittest.TestCase):
 
         # Verify downstream read works
         client = AsyncModbusTcpClient(host="127.0.0.1", port=tcp_port, framer=FramerType.SOCKET, timeout=3.0)
-        await client.connect()
-        result = await client.read_holding_registers(0, count=2, device_id=1)
-        client.close()
-        self.assertFalse(result.isError(), f"Initial read should succeed: {result}")
+        try:
+            await client.connect()
+            result = await client.read_holding_registers(0, count=2, device_id=1)
+            self.assertFalse(result.isError(), f"Initial read should succeed: {result}")
+        finally:
+            client.close()
 
         # --- Phase 2: Upstream outage ---
         self.feeder.stop()
@@ -312,15 +318,17 @@ class TestEm540SlaveRecoveryAfterOutage(unittest.TestCase):
 
         # Downstream read should succeed
         client = AsyncModbusTcpClient(host="127.0.0.1", port=tcp_port, framer=FramerType.SOCKET, timeout=3.0)
-        await client.connect()
-        self.assertTrue(client.connected, "Could not connect after recovery")
-        result = await client.read_holding_registers(0, count=2, device_id=1)
-        client.close()
-        self.assertFalse(
-            result.isError(),
-            f"Downstream read FAILED after recovery (got {result}) — "
-            "system cannot recover from outage + connection flood!",
-        )
+        try:
+            await client.connect()
+            self.assertTrue(client.connected, "Could not connect after recovery")
+            result = await client.read_holding_registers(0, count=2, device_id=1)
+            self.assertFalse(
+                result.isError(),
+                f"Downstream read FAILED after recovery (got {result}) — "
+                "system cannot recover from outage + connection flood!",
+            )
+        finally:
+            client.close()
 
     async def _async_test_recovery_without_flood(self):
         tcp_port = _get_free_port()
@@ -356,10 +364,12 @@ class TestEm540SlaveRecoveryAfterOutage(unittest.TestCase):
         self.assertFalse(slave._pdu_helper.circuit_open, "Circuit should close after recovery (no flood)")
 
         client = AsyncModbusTcpClient(host="127.0.0.1", port=tcp_port, framer=FramerType.SOCKET, timeout=3.0)
-        await client.connect()
-        result = await client.read_holding_registers(0, count=2, device_id=1)
-        client.close()
-        self.assertFalse(result.isError(), f"Read should succeed after recovery (no flood): {result}")
+        try:
+            await client.connect()
+            result = await client.read_holding_registers(0, count=2, device_id=1)
+            self.assertFalse(result.isError(), f"Read should succeed after recovery (no flood): {result}")
+        finally:
+            client.close()
 
 
 if __name__ == "__main__":

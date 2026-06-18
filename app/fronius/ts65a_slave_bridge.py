@@ -202,6 +202,8 @@ class Ts65aSlaveBridge(MeterDataListener):
         sim_core = self._server.context
         sim_runtime = sim_core.devices[self._slave_id]
         block_key = "x" if "x" in sim_runtime.block else "h"
+        if block_key not in sim_runtime.block:
+            raise RuntimeError(f"SimRuntime has no register block (available keys: {list(sim_runtime.block.keys())})")
         self._reg_start_address: int = sim_runtime.block[block_key][0]
         self._registers: list[int] = sim_runtime.block[block_key][2]
         self._reg_lock: Lock = Lock()

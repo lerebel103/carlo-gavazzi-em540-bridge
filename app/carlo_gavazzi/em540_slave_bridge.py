@@ -161,6 +161,8 @@ class Em540Slave(MeterDataListener):
         # SimRuntime uses block key "x" when a single SimDevice is used (non-dict build),
         # otherwise "h" for holding registers.
         block_key = "x" if "x" in sim_runtime.block else "h"
+        if block_key not in sim_runtime.block:
+            raise RuntimeError(f"SimRuntime has no register block (available keys: {list(sim_runtime.block.keys())})")
         self._reg_start_address: int = sim_runtime.block[block_key][0]
         self._registers: list[int] = sim_runtime.block[block_key][2]
         self._reg_lock: Lock = Lock()
@@ -242,9 +244,11 @@ class Em540Slave(MeterDataListener):
         run_coroutine_threadsafe to execute on the overloaded loop.
 
         The register array is a plain Python list; writes are fast in-memory
-        slice assignments. The lock serializes concurrent writers (if any)
-        to prevent interleaving. Read-side consistency is provided by CPython's
-        GIL which makes list slice operations atomic at the bytecode level.
+        slice assignments. The lock serializes concurrent writers to prevent
+        interleaving of multi-register updates. The server-side read path
+        (SimRuntime.get_reg_block) is not coordinated by this lock; torn
+        reads of a single multi-register update are theoretically possible
+        but harmless — the next tick (100ms) will overwrite with fresh data.
         """
         if not writes:
             return
