@@ -52,6 +52,7 @@ class IdleConnectionReaper:
         # Maps connection unique_id -> last activity monotonic timestamp
         self._last_activity: dict[str, float] = {}
         self._task: asyncio.Task | None = None
+        self._loop: asyncio.AbstractEventLoop | None = None
         self._original_callback_new_connection: Callable | None = None
 
     def install(self) -> None:
@@ -94,13 +95,23 @@ class IdleConnectionReaper:
         """Start the periodic idle-scan task on the given event loop."""
         if self._task is not None:
             return
+        self._loop = loop
         self._task = loop.create_task(self._scan_loop(), name=f"idle-reaper-{self._label}")
 
     def stop(self) -> None:
-        """Cancel the periodic scan task."""
-        if self._task is not None:
-            self._task.cancel()
+        """Cancel the periodic scan task (thread-safe).
+
+        The task runs on the server's dedicated event loop thread, so we schedule
+        cancellation via call_soon_threadsafe to avoid cross-thread race conditions.
+        """
+        task = self._task
+        if task is not None:
             self._task = None
+            loop = self._loop
+            if loop is not None and loop.is_running():
+                loop.call_soon_threadsafe(task.cancel)
+            else:
+                task.cancel()
 
     async def _scan_loop(self) -> None:
         """Periodically scan for and close idle connections."""
