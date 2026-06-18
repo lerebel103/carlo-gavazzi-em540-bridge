@@ -282,7 +282,7 @@ class TestEm540Master(unittest.TestCase):
         self.assertTrue(self.master._static_data_valid)
 
     def test_timing_stats_notifies_listeners_each_cycle(self):
-        """Timing stats should be pushed every cycle for diagnostics consumers."""
+        """Timing stats should be pushed periodically (throttled) for diagnostics consumers."""
         observed = []
 
         def _on_stats(stats):
@@ -296,12 +296,15 @@ class TestEm540Master(unittest.TestCase):
 
         self.master.add_stats_listener(_on_stats)
 
-        cycle_start = time.perf_counter() - 0.02
-        self.master._update_timing_stats(
-            cycle_start=cycle_start,
-            modbus_read_ms=12.0,
-            post_read_processing_ms=3.0,
-        )
+        # Stats notifications are throttled to every N ticks; call enough times to trigger.
+        notify_interval = self.master._stats_notify_interval
+        for _ in range(notify_interval):
+            cycle_start = time.perf_counter() - 0.02
+            self.master._update_timing_stats(
+                cycle_start=cycle_start,
+                modbus_read_ms=12.0,
+                post_read_processing_ms=3.0,
+            )
 
         self.assertTrue(observed)
         modbus_ms, post_ms, non_read_ms = observed[-1]

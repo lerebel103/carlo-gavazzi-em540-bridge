@@ -86,11 +86,13 @@ class Em540Master:
         self._data_seq: int = 0
         self._condition: threading.Condition = threading.Condition()
         self._stats: Em540MasterStats = Em540MasterStats()
-        self._stats_lock: threading.Lock = threading.Lock()
+        self._stats_notify_counter: int = 0
+        self._stats_notify_interval: int = 10  # Notify listeners every N ticks (~1Hz at 10Hz tick rate)
         self._static_read_plan: tuple[int, ...] = tuple(self._front_data.frame.static_reg_map.keys())
         self._dynamic_read_plan: tuple[int, ...] = tuple(self._front_data.frame.dynamic_reg_map.keys())
         logger.setLevel(config.log_level)
         self._client: ModbusBaseClient
+        self._tick_budget_ms: float = float(getattr(config, "update_interval", 0.1)) * 1000.0
 
         # Energy block chunked-read state.
         # When the energy block's skip counter fires, we read chunk 0 (first 16 regs) on
@@ -402,7 +404,6 @@ class Em540Master:
         reg_desc = frame.dynamic_reg_map[_DYNAMIC_PRIMARY_BLOCK_ADDR]
         num_registers = len(reg_desc.values)
 
-        self._refresh_client_runtime_config()
         try:
             result = await self._client.read_holding_registers(
                 _DYNAMIC_PRIMARY_BLOCK_ADDR, count=num_registers, device_id=self.slave_id
@@ -462,7 +463,6 @@ class Em540Master:
         start_addr = _ENERGY_BLOCK_ADDR + chunk_offset
         num_registers = min(ENERGY_BLOCK_CHUNK_SIZE, ENERGY_BLOCK_TOTAL_SIZE - chunk_offset)
 
-        self._refresh_client_runtime_config()
         try:
             logger.debug(
                 "Reading energy chunk %d from address %s, count=%d",
@@ -516,41 +516,48 @@ class Em540Master:
         """Copy energy register values from the front buffer to keep them current when not reading."""
         front_energy = self._front_data.frame.dynamic_reg_map.get(_ENERGY_BLOCK_ADDR)
         if front_energy is not None:
-            frame.dynamic_reg_map[_ENERGY_BLOCK_ADDR].values = list(front_energy.values)
+            target = frame.dynamic_reg_map[_ENERGY_BLOCK_ADDR]
+            target.values[:] = front_energy.values
 
     def _update_timing_stats(self, cycle_start: float, modbus_read_ms: float, post_read_processing_ms: float) -> None:
         elapsed_ms = (time.perf_counter() - cycle_start) * 1000.0
         non_read_processing_ms = max(0.0, elapsed_ms - modbus_read_ms - post_read_processing_ms)
-        tick_budget_ms = float(getattr(self._config, "update_interval", 0.1)) * 1000.0
+        tick_budget_ms = self._tick_budget_ms
         headroom_ms = tick_budget_ms - elapsed_ms
 
-        with self._stats_lock:
-            self._stats.read_duration_ms_last = elapsed_ms
-            self._stats.read_duration_ms_max = max(self._stats.read_duration_ms_max, elapsed_ms)
-            self._stats.modbus_read_duration_ms_last = modbus_read_ms
-            self._stats.modbus_read_duration_ms_max = max(self._stats.modbus_read_duration_ms_max, modbus_read_ms)
-            self._stats.post_read_processing_ms_last = post_read_processing_ms
-            self._stats.post_read_processing_ms_max = max(
-                self._stats.post_read_processing_ms_max,
-                post_read_processing_ms,
-            )
-            self._stats.non_read_processing_ms_last = non_read_processing_ms
-            self._stats.non_read_processing_ms_max = max(
-                self._stats.non_read_processing_ms_max,
-                non_read_processing_ms,
-            )
-            self._stats.tick_headroom_ms_last = headroom_ms
+        # No lock needed: this method is only called from the single main-loop thread.
+        # Readers (diagnostics) tolerate momentarily inconsistent snapshots under the GIL.
+        stats = self._stats
+        stats.read_duration_ms_last = elapsed_ms
+        stats.read_duration_ms_max = max(stats.read_duration_ms_max, elapsed_ms)
+        stats.modbus_read_duration_ms_last = modbus_read_ms
+        stats.modbus_read_duration_ms_max = max(stats.modbus_read_duration_ms_max, modbus_read_ms)
+        stats.post_read_processing_ms_last = post_read_processing_ms
+        stats.post_read_processing_ms_max = max(
+            stats.post_read_processing_ms_max,
+            post_read_processing_ms,
+        )
+        stats.non_read_processing_ms_last = non_read_processing_ms
+        stats.non_read_processing_ms_max = max(
+            stats.non_read_processing_ms_max,
+            non_read_processing_ms,
+        )
+        stats.tick_headroom_ms_last = headroom_ms
 
-            if self._stats.tick_headroom_ms_min == 0:
-                self._stats.tick_headroom_ms_min = headroom_ms
-            else:
-                self._stats.tick_headroom_ms_min = min(self._stats.tick_headroom_ms_min, headroom_ms)
+        if stats.tick_headroom_ms_min == 0:
+            stats.tick_headroom_ms_min = headroom_ms
+        else:
+            stats.tick_headroom_ms_min = min(stats.tick_headroom_ms_min, headroom_ms)
 
-            if headroom_ms < 0:
-                self._stats.tick_overrun_count += 1
+        if headroom_ms < 0:
+            stats.tick_overrun_count += 1
 
-        # Timing stats are expected to update continuously for diagnostics consumers.
-        self._stats.changed()
+        # Notify stats listeners at a reduced rate (~1Hz) to avoid per-tick callback overhead.
+        # Diagnostics consumers only publish every few seconds, so 1Hz is more than sufficient.
+        self._stats_notify_counter += 1
+        if self._stats_notify_counter >= self._stats_notify_interval:
+            self._stats_notify_counter = 0
+            stats.changed()
 
     def _copy_meter_data(self, source: MeterData, target: MeterData) -> None:
         """Copy frame register values between buffers while keeping object allocation stable."""
@@ -606,9 +613,10 @@ class Em540Master:
 
                 if gap > 1:
                     missed = gap - 1
-                    with self._stats_lock:
-                        self._stats.consumer_missed_updates_total += missed
-                        self._stats.consumer_max_seq_gap = max(self._stats.consumer_max_seq_gap, gap)
+                    # No lock needed: individual attribute writes are GIL-atomic.
+                    # Readers tolerate momentarily stale values.
+                    self._stats.consumer_missed_updates_total += missed
+                    self._stats.consumer_max_seq_gap = max(self._stats.consumer_max_seq_gap, gap)
                     self._stats.changed()
 
                 try:

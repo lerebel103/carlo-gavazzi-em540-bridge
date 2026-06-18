@@ -62,6 +62,16 @@ def _fast_int32_to_regs_le(value: int) -> list[int]:
     return [lo, hi]
 
 
+def _fast_int32_to_regs_le_into(value: int, target: list[int]) -> None:
+    """Encode an INT32 into an existing 2-element list in little-endian word order (LSW first).
+
+    Mutates target in-place to avoid allocation.
+    """
+    hi, lo = struct.unpack(">2H", struct.pack(">i", value))
+    target[0] = lo
+    target[1] = hi
+
+
 _STATIC_REGISTER_SPECS = (
     (0x0302, "Firmware Version and revision code", 1, 0),
     (0x000B, "Device Type", 1, 0),
@@ -330,22 +340,28 @@ class Em540Frame:
             offset = source_index * 4
             # Fast path: direct struct unpack/pack instead of pymodbus convert_from/to_registers
             source_value = _fast_int64_from_regs_le(energy_values, offset)
-            converted_value = _fast_int32_to_regs_le(int(source_value / divisor))
-            remapped[target_addr].values = converted_value
-            remapped[alias_addr].values = converted_value
+            # Write directly into the existing register value lists to avoid allocation
+            converted_int = int(source_value / divisor)
+            _fast_int32_to_regs_le_into(converted_int, remapped[target_addr].values)
+            _fast_int32_to_regs_le_into(converted_int, remapped[alias_addr].values)
 
         for source_offset, target_addr, alias_addr in _ENERGY_DIRECT_COPY_REMAPS:
-            copied_value = energy_values[source_offset : source_offset + 2]
-            remapped[target_addr].values = copied_value
+            target_vals = remapped[target_addr].values
+            target_vals[0] = energy_values[source_offset]
+            target_vals[1] = energy_values[source_offset + 1]
             if alias_addr is not None:
-                remapped[alias_addr].values = copied_value
+                alias_vals = remapped[alias_addr].values
+                alias_vals[0] = target_vals[0]
+                alias_vals[1] = target_vals[1]
 
         # Frequency: INT32 LE word order → divide by 100 → single register value
         r0, r1 = energy_values[0x3C], energy_values[0x3D]
         freq_int32 = struct.unpack(">i", struct.pack(">2H", r1, r0))[0]
         freq_reg = int(freq_int32 / 100) & 0xFFFF
-        remapped[0x0033].values = [freq_reg]
-        remapped[0x0110].values = [freq_reg, 0]
+        remapped[0x0033].values[0] = freq_reg
+        freq_110 = remapped[0x0110].values
+        freq_110[0] = freq_reg
+        freq_110[1] = 0
 
         for source_addr, target_addr in register_remap:
             if target_addr not in remapped:
