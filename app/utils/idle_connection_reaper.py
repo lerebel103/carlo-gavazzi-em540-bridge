@@ -88,7 +88,7 @@ class IdleConnectionReaper:
         """Intercept new connection creation to wrap trace_pdu with activity tracking.
 
         Also enforces the max-connections cap: if the limit is reached, the new
-        connection is immediately closed and None-guarded in the caller.
+        connection is immediately closed after creation.
         """
         handler = self._original_callback_new_connection()
 

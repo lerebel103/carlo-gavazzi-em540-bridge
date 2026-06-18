@@ -358,7 +358,7 @@ class Em540Master:
                         self._energy_chunk_rest = False
                         if not self._energy_initial_read_complete:
                             self._energy_initial_read_complete = True
-                            logger.info("Initial energy read complete, publishing energy data.")
+                            logger.info("First full energy register read complete.")
                 else:
                     # Chunk failed — reset sequence but DON'T abort the tick.
                     # Primary data already read successfully above.
