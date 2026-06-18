@@ -256,7 +256,17 @@ class Em540Slave(MeterDataListener):
         with self._reg_lock:
             for address, values in writes:
                 offset = address - self._reg_start_address
-                self._registers[offset : offset + len(values)] = values
+                end = offset + len(values)
+                if offset < 0 or end > len(self._registers):
+                    logger.error(
+                        "Register write out of bounds: address=%s, offset=%d, end=%d, array_len=%d",
+                        hex(address),
+                        offset,
+                        end,
+                        len(self._registers),
+                    )
+                    continue
+                self._registers[offset:end] = values
 
     def _sync_static_registers_if_changed(self, frame: Em540Frame, writes: list[tuple[int, list[int]]]) -> bool:
         if self._static_synced:

@@ -341,8 +341,17 @@ class Ts65aSlaveBridge(MeterDataListener):
         # caused starvation deadlocks when many downstream connections saturated
         # the server event loop.
         offset = self._dynamic_start_address - self._reg_start_address
+        end = offset + len(registers)
         with self._reg_lock:
-            self._registers[offset : offset + len(registers)] = registers
+            if offset < 0 or end > len(self._registers):
+                logger.error(
+                    "Register write out of bounds: offset=%d, end=%d, array_len=%d",
+                    offset,
+                    end,
+                    len(self._registers),
+                )
+            else:
+                self._registers[offset:end] = registers
 
         # Notify the PDU helper that we have new data
         self._pdu_helper.data_received(data.timestamp)
