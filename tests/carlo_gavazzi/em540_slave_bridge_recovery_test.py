@@ -145,7 +145,7 @@ def _flood_connections(host: str, port: int, count: int, timeout: float = 1.0) -
 
 class _DataFeeder:
     """Background thread that continuously calls new_data() at ~20Hz,
-    simulating the production master's 10Hz tick loop feeding the slave.
+    faster than the 0.5s bridge timeout to keep the circuit closed.
     """
 
     def __init__(self, slave: Em540Slave, meter_data: MeterData):
@@ -239,8 +239,10 @@ class TestEm540SlaveRecoveryAfterOutage(unittest.TestCase):
         self.feeder = _DataFeeder(slave, meter_data)
         self.feeder.start()
 
-        # Give feeder time to close the circuit
-        await asyncio.sleep(0.3)
+        # Wait for feeder to close the circuit (poll with timeout)
+        deadline = time.time() + 3.0
+        while slave._pdu_helper.circuit_open and time.time() < deadline:
+            await asyncio.sleep(0.05)
 
         self.assertFalse(slave._pdu_helper.circuit_open, "Circuit should be closed with active feed")
         self.assertIsNone(self.feeder.error, f"Feeder crashed: {self.feeder.error}")
@@ -266,7 +268,11 @@ class TestEm540SlaveRecoveryAfterOutage(unittest.TestCase):
         meter_data = _make_meter_data(frame)
         self.feeder = _DataFeeder(slave, meter_data)
         self.feeder.start()
-        await asyncio.sleep(0.3)
+
+        # Wait for feeder to close the circuit (poll with timeout)
+        deadline = time.time() + 3.0
+        while slave._pdu_helper.circuit_open and time.time() < deadline:
+            await asyncio.sleep(0.05)
 
         self.assertFalse(slave._pdu_helper.circuit_open, "Circuit should be closed initially")
 
@@ -343,7 +349,10 @@ class TestEm540SlaveRecoveryAfterOutage(unittest.TestCase):
         meter_data = _make_meter_data(frame)
         self.feeder = _DataFeeder(slave, meter_data)
         self.feeder.start()
-        await asyncio.sleep(0.3)
+
+        deadline = time.time() + 3.0
+        while slave._pdu_helper.circuit_open and time.time() < deadline:
+            await asyncio.sleep(0.05)
         self.assertFalse(slave._pdu_helper.circuit_open)
 
         # Phase 2: Outage (no flood)
