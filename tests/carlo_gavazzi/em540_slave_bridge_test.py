@@ -52,12 +52,16 @@ class TestEm540Slave(unittest.TestCase):
         real_sim_core = SimCore(real_device)
 
         with patch("app.carlo_gavazzi.em540_slave_bridge.ModbusTcpServer") as mock_server_cls:
-            mock_server = MagicMock()
-            mock_server.context = real_sim_core
-            mock_server_cls.return_value = mock_server
+            rtu_mock = MagicMock()
+            rtu_mock.context = real_sim_core
+
+            tcp_mock = MagicMock()
+            tcp_mock.context = real_sim_core
+
+            mock_server_cls.side_effect = [rtu_mock, tcp_mock]
             slave = Em540Slave(config, frame)
 
-        return slave, mock_server
+        return slave, rtu_mock
 
     def test_rtu_and_tcp_servers_share_context(self):
         """RTU and TCP servers must share the same SimCore context for coherent register state.

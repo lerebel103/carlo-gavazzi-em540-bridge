@@ -79,17 +79,25 @@ async def _create_and_start_slave(tcp_port: int, rtu_port: int) -> tuple["Em540S
     return slave, frame
 
 
+def _get_free_port() -> int:
+    """Get an available TCP port from the OS."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
 def _wait_for_port(port: int, timeout: float = 3.0):
     """Wait until a TCP port is accepting connections."""
     deadline = time.time() + timeout
     while time.time() < deadline:
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.settimeout(0.1)
         try:
-            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            s.settimeout(0.1)
             s.connect(("127.0.0.1", port))
             s.close()
             return
         except ConnectionRefusedError, OSError:
+            s.close()
             time.sleep(0.05)
     raise TimeoutError(f"Port {port} not ready within {timeout}s")
 
@@ -214,8 +222,8 @@ class TestEm540SlaveRecoveryAfterOutage(unittest.TestCase):
     # --- Test implementations ---
 
     async def _async_test_basic_read(self):
-        tcp_port = 15521
-        rtu_port = 15522
+        tcp_port = _get_free_port()
+        rtu_port = _get_free_port()
         slave, frame = await _create_and_start_slave(tcp_port, rtu_port)
         self.slave = slave
         _wait_for_port(tcp_port)
@@ -242,8 +250,8 @@ class TestEm540SlaveRecoveryAfterOutage(unittest.TestCase):
         self.assertFalse(result.isError(), f"Read failed while data is flowing: {result}")
 
     async def _async_test_recovery_with_flood(self):
-        tcp_port = 15531
-        rtu_port = 15532
+        tcp_port = _get_free_port()
+        rtu_port = _get_free_port()
         slave, frame = await _create_and_start_slave(tcp_port, rtu_port)
         self.slave = slave
         _wait_for_port(tcp_port)
@@ -277,7 +285,6 @@ class TestEm540SlaveRecoveryAfterOutage(unittest.TestCase):
         # --- Phase 3: Connection flood during outage ---
         self.flood_sockets = _flood_connections("127.0.0.1", tcp_port, count=200)
         actual_flood = len(self.flood_sockets)
-        print(f"Opened {actual_flood} flood connections")
         self.assertGreater(actual_flood, 50, f"Only opened {actual_flood} flood connections, need >50")
 
         # Let the server process all those connections
@@ -316,8 +323,8 @@ class TestEm540SlaveRecoveryAfterOutage(unittest.TestCase):
         )
 
     async def _async_test_recovery_without_flood(self):
-        tcp_port = 15541
-        rtu_port = 15542
+        tcp_port = _get_free_port()
+        rtu_port = _get_free_port()
         slave, frame = await _create_and_start_slave(tcp_port, rtu_port)
         self.slave = slave
         _wait_for_port(tcp_port)

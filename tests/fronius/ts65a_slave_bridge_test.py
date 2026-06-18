@@ -91,11 +91,13 @@ class TestTs65aSlaveBridge(unittest.TestCase):
 
         asyncio.run(bridge.new_data(data))
 
-        # Verify registers were written directly into the register array
+        # Verify registers were written directly into the register array with correct values
         offset = bridge._dynamic_start_address - bridge._reg_start_address
         num_regs = len(bridge._dynamic_values()) * 2
         written = bridge._registers[offset : offset + num_regs]
         self.assertEqual(len(written), num_regs)
+        # At least some registers should be non-zero after writing real meter data
+        self.assertTrue(any(v != 0 for v in written), "Register writes should produce non-zero values")
 
     def test_voltage_phase_ca_uses_phase_c_line_line_voltage(self):
         bridge, _ = self._build_bridge()

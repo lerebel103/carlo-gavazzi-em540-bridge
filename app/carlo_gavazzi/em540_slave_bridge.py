@@ -242,8 +242,9 @@ class Em540Slave(MeterDataListener):
         run_coroutine_threadsafe to execute on the overloaded loop.
 
         The register array is a plain Python list; writes are fast in-memory
-        slice assignments. The lock ensures atomic multi-register updates
-        so downstream reads never see partially-written values.
+        slice assignments. The lock serializes concurrent writers (if any)
+        to prevent interleaving. Read-side consistency is provided by CPython's
+        GIL which makes list slice operations atomic at the bytecode level.
         """
         if not writes:
             return
