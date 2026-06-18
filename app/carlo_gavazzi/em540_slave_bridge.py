@@ -234,7 +234,7 @@ class Em540Slave(MeterDataListener):
         self._stats.dropped_stale_request_count = self._pdu_helper.dropped_request_count
         self._stats.changed()
 
-    async def _flush_writes(self, writes: list[tuple[int, list[int]]]) -> None:
+    async def _flush_writes(self, writes: list[tuple[int, list[int]]]) -> bool:
         """Write register values directly into the SimRuntime register array.
 
         Uses a threading lock instead of scheduling coroutines on the server
@@ -249,10 +249,13 @@ class Em540Slave(MeterDataListener):
         (SimRuntime.get_reg_block) is not coordinated by this lock; torn
         reads of a single multi-register update are theoretically possible
         but harmless — the next tick (100ms) will overwrite with fresh data.
+
+        Returns True if all writes succeeded, False if any were out of bounds.
         """
         if not writes:
-            return
+            return True
 
+        success = True
         with self._reg_lock:
             for address, values in writes:
                 offset = address - self._reg_start_address
@@ -265,8 +268,10 @@ class Em540Slave(MeterDataListener):
                         end,
                         len(self._registers),
                     )
+                    success = False
                     continue
                 self._registers[offset:end] = values
+        return success
 
     def _sync_static_registers_if_changed(self, frame: Em540Frame, writes: list[tuple[int, list[int]]]) -> bool:
         if self._static_synced:
@@ -322,10 +327,11 @@ class Em540Slave(MeterDataListener):
             self._refresh_overlapped_static_registers(frame, writes)
 
         # Single cross-thread flush for all collected writes
-        await self._flush_writes(writes)
+        write_ok = await self._flush_writes(writes)
 
         # Keep the circuit open until static registers have been synced at least once.
-        if self._static_synced:
+        # Also keep it open if any write failed (prevents serving stale/partial data).
+        if self._static_synced and write_ok:
             self._pdu_helper.data_received(data.timestamp)
         else:
             self._pdu_helper.upstream_failed()

@@ -161,6 +161,8 @@ class _DataFeeder:
     def stop(self):
         self._stop.set()
         self._thread.join(timeout=3.0)
+        if self._thread.is_alive():
+            raise RuntimeError("Data feeder thread did not stop within 3s — likely deadlocked")
 
     @property
     def is_alive(self) -> bool:

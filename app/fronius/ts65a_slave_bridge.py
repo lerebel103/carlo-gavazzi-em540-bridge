@@ -342,6 +342,7 @@ class Ts65aSlaveBridge(MeterDataListener):
         # the server event loop.
         offset = self._dynamic_start_address - self._reg_start_address
         end = offset + len(registers)
+        write_ok = True
         with self._reg_lock:
             if offset < 0 or end > len(self._registers):
                 logger.error(
@@ -350,11 +351,16 @@ class Ts65aSlaveBridge(MeterDataListener):
                     end,
                     len(self._registers),
                 )
+                write_ok = False
             else:
                 self._registers[offset:end] = registers
 
-        # Notify the PDU helper that we have new data
-        self._pdu_helper.data_received(data.timestamp)
+        # Only close the circuit if the write succeeded — prevents serving
+        # stale/partial data after an internal write failure.
+        if write_ok:
+            self._pdu_helper.data_received(data.timestamp)
+        else:
+            self._pdu_helper.upstream_failed()
         self._sync_pdu_stats()
 
     async def read_failed(self):
