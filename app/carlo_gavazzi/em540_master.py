@@ -338,8 +338,9 @@ class Em540Master:
                     else:
                         self._energy_chunk_pending = -1
                         self._energy_chunk_rest = False
-                        self._energy_initial_read_complete = True
-                        logger.info("Initial energy read complete, publishing enabled.")
+                        if not self._energy_initial_read_complete:
+                            self._energy_initial_read_complete = True
+                            logger.info("Initial energy read complete, publishing enabled.")
                 else:
                     self._energy_chunk_pending = -1
                     self._energy_chunk_rest = False
@@ -355,8 +356,9 @@ class Em540Master:
                     self._energy_chunk_rest = True  # rest before chunk 1
                 else:
                     self._energy_chunk_pending = -1
-                    self._energy_initial_read_complete = True
-                    logger.info("Initial energy read complete, publishing enabled.")
+                    if not self._energy_initial_read_complete:
+                        self._energy_initial_read_complete = True
+                        logger.info("Initial energy read complete, publishing enabled.")
             else:
                 self._energy_chunk_pending = -1
                 self._backfill_energy_from_front(frame)
@@ -524,7 +526,13 @@ class Em540Master:
         return True
 
     def _backfill_energy_from_front(self, frame) -> None:
-        """Copy energy register values from the front buffer to keep them current when not reading."""
+        """Copy energy register values from the front buffer to keep them current when not reading.
+
+        Skip backfill during the initial energy read cycle (gate closed) because the
+        front buffer contains all zeros and would overwrite chunks already read.
+        """
+        if not self._energy_initial_read_complete:
+            return
         front_energy = self._front_data.frame.dynamic_reg_map.get(_ENERGY_BLOCK_ADDR)
         if front_energy is not None:
             frame.dynamic_reg_map[_ENERGY_BLOCK_ADDR].values = list(front_energy.values)
