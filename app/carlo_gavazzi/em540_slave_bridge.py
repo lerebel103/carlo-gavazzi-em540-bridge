@@ -12,6 +12,7 @@ from app.carlo_gavazzi.em540_data import Em540Frame
 from app.carlo_gavazzi.em540_master import MeterDataListener
 from app.carlo_gavazzi.em540_slave_stats import EM540SlaveStats
 from app.carlo_gavazzi.meter_data import MeterData
+from app.utils.idle_connection_reaper import IdleConnectionReaper
 from app.utils.pdu_helper import PduHelper
 
 REG_OFFSET = 0  # SimDevice uses raw 0-based Modbus protocol addresses directly
@@ -167,6 +168,12 @@ class Em540Slave(MeterDataListener):
         self._registers: list[int] = sim_runtime.block[block_key][2]
         self._reg_lock: Lock = Lock()
 
+        # Idle connection reapers — close connections with no PDU activity
+        self._rtu_reaper = IdleConnectionReaper(self._rtu_server, server_label="em540-rtu")
+        self._rtu_reaper.install()
+        self._tcp_reaper = IdleConnectionReaper(self._tcp_server, server_label="em540-tcp")
+        self._tcp_reaper.install()
+
     def _rtu_trace_connect(self, connect: bool) -> None:
         logger.debug("Client connection to RTU server: %s", connect)
         if connect:
@@ -207,6 +214,9 @@ class Em540Slave(MeterDataListener):
             try:
                 await self._rtu_server.serve_forever(background=True)
                 await self._tcp_server.serve_forever(background=True)
+                # Start idle connection reapers now that servers are listening
+                self._rtu_reaper.start(self._server_loop)
+                self._tcp_reaper.start(self._server_loop)
             except Exception as e:
                 startup_error.append(e)
             finally:
@@ -343,6 +353,8 @@ class Em540Slave(MeterDataListener):
 
     def stop(self) -> None:
         """Stop downstream servers and clean up the dedicated event loop."""
+        self._rtu_reaper.stop()
+        self._tcp_reaper.stop()
         loop = self._server_loop
         if loop is not None and loop.is_running():
             loop.call_soon_threadsafe(loop.stop)

@@ -13,6 +13,7 @@ from app.carlo_gavazzi import meter_data
 from app.carlo_gavazzi.em540_master import MeterDataListener
 from app.fronius.ts65a_data import Ts65aMeterData
 from app.fronius.ts65a_slave_stats import Ts65aSlaveStats
+from app.utils.idle_connection_reaper import IdleConnectionReaper
 from app.utils.pdu_helper import PduHelper
 
 logger = logging.getLogger("ts65a-slave")
@@ -208,6 +209,10 @@ class Ts65aSlaveBridge(MeterDataListener):
         self._registers: list[int] = sim_runtime.block[block_key][2]
         self._reg_lock: Lock = Lock()
 
+        # Idle connection reaper — close connections with no PDU activity
+        self._reaper = IdleConnectionReaper(self._server, server_label="ts65a-tcp")
+        self._reaper.install()
+
     def _trace_connect(self, connect):
         logger.debug("Client connection to TCP server: %s", connect)
         if connect:
@@ -234,6 +239,8 @@ class Ts65aSlaveBridge(MeterDataListener):
         async def _run_server():
             try:
                 await self._server.serve_forever(background=True)
+                # Start idle connection reaper now that the server is listening
+                self._reaper.start(self._server_loop)
             except Exception as e:
                 startup_error.append(e)
             finally:
@@ -255,6 +262,7 @@ class Ts65aSlaveBridge(MeterDataListener):
 
     def stop(self):
         """Stop the server and clean up the dedicated event loop."""
+        self._reaper.stop()
         if self._server_loop is not None and self._server_loop.is_running():
             self._server_loop.call_soon_threadsafe(self._server_loop.stop)
         self._server_loop = None
