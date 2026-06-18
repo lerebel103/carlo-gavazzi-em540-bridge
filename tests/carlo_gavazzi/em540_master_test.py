@@ -87,6 +87,8 @@ class TestEm540Master(unittest.TestCase):
         self.master = Em540Master(self.config)
         # Replace the client created by the constructor with our mock
         self.master._client = self.mock_client
+        # Bypass initial energy-read gate for tests not focused on energy chunking
+        self.master._energy_initial_read_complete = True
 
     # -----------------------------------------------------------------------
     # Requirement 9.1: disconnected → returns False, calls read_failed
@@ -337,6 +339,8 @@ class TestSkipNRead(unittest.TestCase):
         self.config = _make_config()
         self.master = Em540Master(self.config)
         self.master._client = self.mock_client
+        # Bypass initial energy-read gate for testing chunked read mechanics
+        self.master._energy_initial_read_complete = True
 
         self.frame = self.master.data.frame
 
@@ -574,6 +578,8 @@ class TestListenerWorker(unittest.TestCase):
         self.config = _make_config()
         self.master = Em540Master(self.config)
         self.master._client = self.mock_client
+        # Bypass initial energy-read gate for listener tests
+        self.master._energy_initial_read_complete = True
 
     def test_listener_worker_receives_latest_snapshot(self):
         """Listener worker should process new snapshots from successful acquisitions."""
