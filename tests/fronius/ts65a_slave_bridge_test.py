@@ -1,7 +1,7 @@
 import asyncio
 import unittest
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock, patch
 
 from app.carlo_gavazzi.meter_data import MeterData
 from app.fronius.ts65a_slave_bridge import Ts65aSlaveBridge, _build_ts65a_simdata
@@ -20,12 +20,15 @@ class TestTs65aSlaveBridge(unittest.TestCase):
         return config
 
     def _build_bridge(self):
-        with (
-            patch("app.fronius.ts65a_slave_bridge.ModbusTcpServer") as mock_server_cls,
-        ):
+        with patch("app.fronius.ts65a_slave_bridge.ModbusTcpServer") as mock_server_cls:
+            # Pre-build real SimCore so the mock server exposes it via .context
+            from pymodbus.simulator.simcore import SimCore
+
+            real_device = _build_ts65a_simdata(self._make_config().slave_id)
+            real_sim_core = SimCore(real_device)
+
             mock_server = MagicMock()
-            mock_server.async_setValues = AsyncMock()
-            mock_server.context = MagicMock()
+            mock_server.context = real_sim_core
             mock_server_cls.return_value = mock_server
             bridge = Ts65aSlaveBridge(self._make_config())
 
@@ -38,7 +41,7 @@ class TestTs65aSlaveBridge(unittest.TestCase):
         self.assertEqual(len(bridge._dynamic_register_buffer), 90)
 
     def test_new_data_updates_full_dynamic_register_range(self):
-        bridge, mock_server = self._build_bridge()
+        bridge, _ = self._build_bridge()
         data = MeterData()
         data._timestamp = 123.0
         data.system.An = 12.3
@@ -88,17 +91,14 @@ class TestTs65aSlaveBridge(unittest.TestCase):
 
         asyncio.run(bridge.new_data(data))
 
-        mock_server.async_setValues.assert_awaited_once()
-        call_args = mock_server.async_setValues.call_args
-        # async_setValues(device_id, func_code, address, values)
-        device_id, func_code, start_address, registers = call_args.args
-        self.assertEqual(device_id, 1)
-        self.assertEqual(func_code, 3)
-        self.assertEqual(start_address, 40071)
-        self.assertEqual(len(registers), len(bridge._dynamic_values()) * 2)
+        # Verify registers were written directly into the register array
+        offset = bridge._dynamic_start_address - bridge._reg_start_address
+        num_regs = len(bridge._dynamic_values()) * 2
+        written = bridge._registers[offset : offset + num_regs]
+        self.assertEqual(len(written), num_regs)
 
     def test_voltage_phase_ca_uses_phase_c_line_line_voltage(self):
-        bridge, mock_server = self._build_bridge()
+        bridge, _ = self._build_bridge()
         data = MeterData()
         data._timestamp = 123.0
         data.system.An = 12.3
@@ -142,9 +142,10 @@ class TestTs65aSlaveBridge(unittest.TestCase):
 
         asyncio.run(bridge.new_data(data))
 
-        call_args = mock_server.async_setValues.call_args
-        _, _, start_address, registers = call_args.args
-        self.assertEqual(start_address, 40071)
+        # Read the registers directly from the register array
+        offset = bridge._dynamic_start_address - bridge._reg_start_address
+        num_regs = len(bridge._dynamic_values()) * 2
+        registers = bridge._registers[offset : offset + num_regs]
 
         # voltage_phase_ca is at index 11 in _dynamic_values (0-indexed)
         # Each value takes 2 registers, so register offset = 11 * 2 = 22

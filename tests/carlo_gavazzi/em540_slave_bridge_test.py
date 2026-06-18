@@ -2,17 +2,18 @@
 
 Validates: Requirements 12.1, 12.2, 12.3, 12.4
 
-The tests patch ModbusTcpServer and SimDevice to verify that the bridge
-correctly builds SimData entries and updates registers via async_setValues.
+The tests patch ModbusTcpServer to verify that the bridge correctly builds
+SimData entries and writes register values directly into the register array.
 """
 
 import asyncio
 import unittest
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock, patch
+
+from pymodbus.simulator.simdevice import SimDevice
 
 from app.carlo_gavazzi.em540_data import Em540Frame
 from app.carlo_gavazzi.em540_slave_bridge import (
-    _FC_HOLDING_REGISTER,
     REG_OFFSET,
     Em540Slave,
     _build_simdata,
@@ -34,47 +35,41 @@ class TestEm540Slave(unittest.TestCase):
         return config
 
     def _build_slave(self, frame=None):
-        """Construct Em540Slave with server and SimDevice patched out.
+        """Construct Em540Slave with ModbusTcpServer patched out (but real SimDevice/SimCore).
 
-        Returns (slave, mock_rtu_server).
+        Returns (slave, mock_server) — the slave has a real register array that
+        new_data() writes into directly.
         """
         if frame is None:
             frame = Em540Frame()
         config = self._make_config()
 
-        with (
-            patch("app.carlo_gavazzi.em540_slave_bridge.ModbusTcpServer") as mock_server_cls,
-            patch("app.carlo_gavazzi.em540_slave_bridge.SimDevice"),
-        ):
+        # Pre-build the real SimCore so the mock server can expose it via .context
+        from pymodbus.simulator.simcore import SimCore
+
+        simdata = _build_simdata(frame)
+        real_device = SimDevice(config.slave_id, simdata=simdata)
+        real_sim_core = SimCore(real_device)
+
+        with patch("app.carlo_gavazzi.em540_slave_bridge.ModbusTcpServer") as mock_server_cls:
             mock_server = MagicMock()
-            mock_server.async_setValues = AsyncMock()
-            mock_server.context = MagicMock()
+            mock_server.context = real_sim_core
             mock_server_cls.return_value = mock_server
             slave = Em540Slave(config, frame)
 
         return slave, mock_server
 
     def test_rtu_and_tcp_servers_share_context(self):
-        """RTU and TCP servers must share the same SimCore context for coherent register state."""
+        """RTU and TCP servers must share the same SimCore context for coherent register state.
+
+        Since both servers are constructed with the same sim_core instance,
+        and _tcp_server.context is explicitly set to _rtu_server.context,
+        they always serve identical register state.
+        """
         frame = Em540Frame()
-        config = self._make_config()
+        slave, _ = self._build_slave(frame)
 
-        with (
-            patch("app.carlo_gavazzi.em540_slave_bridge.ModbusTcpServer") as mock_server_cls,
-            patch("app.carlo_gavazzi.em540_slave_bridge.SimDevice"),
-        ):
-            rtu_server = MagicMock()
-            rtu_server.async_setValues = AsyncMock()
-            rtu_server.context = MagicMock(name="rtu_context")
-
-            tcp_server = MagicMock()
-            tcp_server.async_setValues = AsyncMock()
-            tcp_server.context = MagicMock(name="tcp_context")
-
-            mock_server_cls.side_effect = [rtu_server, tcp_server]
-            slave = Em540Slave(config, frame)
-
-        # The constructor assigns rtu_server.context to tcp_server.context
+        # Both server references point to the same context object
         self.assertIs(slave._tcp_server.context, slave._rtu_server.context)
 
     # --- Requirement 12.4: REG_OFFSET is 0 ---
@@ -132,9 +127,9 @@ class TestEm540Slave(unittest.TestCase):
     # --- Requirement 12.1: new_data updates dynamic registers ---
 
     def test_new_data_updates_dynamic_registers(self):
-        """Requirement 12.1 – async_setValues called for every dynamic register with REG_OFFSET applied."""
+        """Requirement 12.1 – registers updated for every dynamic register with REG_OFFSET applied."""
         frame = Em540Frame()
-        slave, mock_server = self._build_slave(frame)
+        slave, _ = self._build_slave(frame)
 
         meter_data = MeterData()
         meter_data.frame = frame
@@ -143,50 +138,54 @@ class TestEm540Slave(unittest.TestCase):
 
         asyncio.run(slave.new_data(meter_data))
 
-        calls = {
-            c.args[2]: c.args[3]
-            for c in mock_server.async_setValues.call_args_list
-            if c.args[1] == _FC_HOLDING_REGISTER
-        }
-        for addr in frame.dynamic_reg_map:
-            expected_addr = addr + REG_OFFSET
-            self.assertIn(expected_addr, calls, f"Dynamic {hex(addr)} not updated at {hex(expected_addr)}")
-            self.assertEqual(calls[expected_addr], meter_data.frame.dynamic_reg_map[addr].values)
+        # Verify a subset of dynamic registers that are not overlapped by remapped registers.
+        # The primary block at 0x0000 has remapped registers starting at 0x33, so check 0x00..0x32.
+        offset = 0 + REG_OFFSET - slave._reg_start_address
+        actual_primary = slave._registers[offset : offset + 0x33]
+        self.assertEqual(actual_primary, [42] * 0x33)
+
+        # Energy block at 0x0500 has no overlapping remapped registers
+        energy_offset = 0x0500 + REG_OFFSET - slave._reg_start_address
+        actual_energy = slave._registers[energy_offset : energy_offset + 0x40]
+        self.assertEqual(actual_energy, [7] * 0x40)
 
     # --- Requirement 12.2: new_data does not rewrite static registers ---
 
     def test_new_data_does_not_update_static_registers_when_unchanged(self):
         """Requirement 12.2 – static register values are not rewritten unless source data changes."""
         frame = Em540Frame()
-        slave, mock_server = self._build_slave(frame)
+        slave, _ = self._build_slave(frame)
 
         meter_data = MeterData()
         meter_data.frame = frame
 
+        # Snapshot registers before
+        pre_snapshot: dict[int, list[int]] = {}
+        for addr in frame.static_reg_map:
+            offset = addr + REG_OFFSET - slave._reg_start_address
+            length = len(frame.static_reg_map[addr].values)
+            pre_snapshot[addr] = list(slave._registers[offset : offset + length])
+
         asyncio.run(slave.new_data(meter_data))
 
-        calls = {
-            c.args[2]: c.args[3]
-            for c in mock_server.async_setValues.call_args_list
-            if c.args[1] == _FC_HOLDING_REGISTER
-        }
+        # Static-only addresses (not overlapped by dynamic/remapped) should be unchanged
         for addr in frame.static_reg_map:
-            expected_addr = addr + REG_OFFSET
-            # Static addrs that are overlapped by dynamic/remapped will be refreshed,
-            # but pure static-only addrs should NOT be updated
             if addr not in slave._overlapped_static_addrs:
-                self.assertNotIn(
-                    expected_addr,
-                    calls,
-                    f"Static {hex(addr)} should not be rewritten at {hex(expected_addr)}",
+                offset = addr + REG_OFFSET - slave._reg_start_address
+                length = len(frame.static_reg_map[addr].values)
+                actual = slave._registers[offset : offset + length]
+                self.assertEqual(
+                    actual,
+                    pre_snapshot[addr],
+                    f"Static {hex(addr)} should not be rewritten",
                 )
 
     # --- Requirement 12.3: new_data updates remapped registers ---
 
     def test_new_data_updates_remapped_registers(self):
-        """Requirement 12.3 – async_setValues called for all remapped registers (batched by contiguous runs)."""
+        """Requirement 12.3 – remapped registers are written correctly."""
         frame = Em540Frame()
-        slave, mock_server = self._build_slave(frame)
+        slave, _ = self._build_slave(frame)
 
         meter_data = MeterData()
         meter_data.frame = frame
@@ -195,36 +194,27 @@ class TestEm540Slave(unittest.TestCase):
 
         asyncio.run(slave.new_data(meter_data))
 
-        # Rebuild the full address→value map from batched writes
-        written: dict[int, int] = {}
-        for call in mock_server.async_setValues.call_args_list:
-            if call.args[1] == _FC_HOLDING_REGISTER:
-                start_addr = call.args[2]
-                values = call.args[3]
-                for i, v in enumerate(values):
-                    written[start_addr + i] = v
-
+        # Verify each remapped register was written into the register array
         for addr in frame.remapped_reg_map:
-            expected_addr = addr + REG_OFFSET
+            offset = addr + REG_OFFSET - slave._reg_start_address
             reg_values = frame.remapped_reg_map[addr].values
             for i, expected_val in enumerate(reg_values):
-                actual = written.get(expected_addr + i)
+                actual = slave._registers[offset + i]
                 self.assertEqual(
                     actual,
                     expected_val,
-                    f"Remapped {hex(addr)}+{i} not updated at {hex(expected_addr + i)}",
+                    f"Remapped {hex(addr)}+{i} not updated at offset {offset + i}",
                 )
 
     def test_new_data_resyncs_static_registers_when_source_static_changes(self):
         frame = Em540Frame()
-        slave, mock_server = self._build_slave(frame)
+        slave, _ = self._build_slave(frame)
 
         meter_data = MeterData()
         meter_data.frame = frame
         meter_data._timestamp = 123.0
 
         asyncio.run(slave.new_data(meter_data))
-        mock_server.async_setValues.reset_mock()
 
         first_static_addr = next(iter(frame.static_reg_map))
         reg = frame.static_reg_map[first_static_addr]
@@ -232,18 +222,14 @@ class TestEm540Slave(unittest.TestCase):
 
         asyncio.run(slave.new_data(meter_data))
 
-        calls = {
-            c.args[2]: c.args[3]
-            for c in mock_server.async_setValues.call_args_list
-            if c.args[1] == _FC_HOLDING_REGISTER
-        }
-        self.assertIn(first_static_addr + REG_OFFSET, calls)
-        self.assertEqual(calls[first_static_addr + REG_OFFSET], frame.static_reg_map[first_static_addr].values)
+        offset = first_static_addr + REG_OFFSET - slave._reg_start_address
+        actual = slave._registers[offset : offset + len(reg.values)]
+        self.assertEqual(actual, reg.values)
 
     def test_new_data_preserves_overlapped_static_device_type_register(self):
         frame = Em540Frame()
         frame.static_reg_map[0x000B].values = [1744]
-        slave, mock_server = self._build_slave(frame)
+        slave, _ = self._build_slave(frame)
 
         meter_data = MeterData()
         meter_data.frame = frame
@@ -252,8 +238,8 @@ class TestEm540Slave(unittest.TestCase):
 
         asyncio.run(slave.new_data(meter_data))
 
-        calls = [(c.args[2], c.args[3]) for c in mock_server.async_setValues.call_args_list]
-        self.assertIn((0x000B + REG_OFFSET, [1744]), calls)
+        offset = 0x000B + REG_OFFSET - slave._reg_start_address
+        self.assertEqual(slave._registers[offset], 1744)
 
     def test_new_data_keeps_circuit_open_until_static_sync(self):
         frame = Em540Frame()

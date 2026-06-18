@@ -1,7 +1,7 @@
 import asyncio
 import logging
 import struct
-from threading import Event, Thread
+from threading import Event, Lock, Thread
 from typing import Callable
 
 from pymodbus import FramerType
@@ -195,6 +195,17 @@ class Ts65aSlaveBridge(MeterDataListener):
         self._dynamic_register_buffer: list[int] = [0] * (len(self._dynamic_values()) * 2)
         self._server_loop: asyncio.AbstractEventLoop | None = None
 
+        # Direct access to the SimRuntime register array for lock-based writes.
+        # This avoids routing writes through the server event loop (which caused
+        # starvation deadlocks when many downstream connections saturated the loop).
+        # After construction, server.context is a SimCore wrapping the SimDevice.
+        sim_core = self._server.context
+        sim_runtime = sim_core.devices[self._slave_id]
+        block_key = "x" if "x" in sim_runtime.block else "h"
+        self._reg_start_address: int = sim_runtime.block[block_key][0]
+        self._registers: list[int] = sim_runtime.block[block_key][2]
+        self._reg_lock: Lock = Lock()
+
     def _trace_connect(self, connect):
         logger.debug("Client connection to TCP server: %s", connect)
         if connect:
@@ -323,14 +334,13 @@ class Ts65aSlaveBridge(MeterDataListener):
             registers[index + 1] = lo
             index += 2
 
-        coro = self._server.async_setValues(
-            self._slave_id, _FC_HOLDING_REGISTER, self._dynamic_start_address, registers
-        )
-        if self._server_loop is not None and self._server_loop.is_running():
-            future = asyncio.run_coroutine_threadsafe(coro, self._server_loop)
-            await asyncio.wrap_future(future)
-        else:
-            await coro
+        # Write directly into the SimRuntime register array under a lock.
+        # This avoids the cross-thread run_coroutine_threadsafe dependency that
+        # caused starvation deadlocks when many downstream connections saturated
+        # the server event loop.
+        offset = self._dynamic_start_address - self._reg_start_address
+        with self._reg_lock:
+            self._registers[offset : offset + len(registers)] = registers
 
         # Notify the PDU helper that we have new data
         self._pdu_helper.data_received(data.timestamp)

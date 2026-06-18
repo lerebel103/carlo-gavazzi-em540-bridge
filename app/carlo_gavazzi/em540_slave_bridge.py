@@ -1,6 +1,6 @@
 import asyncio
 import logging
-from threading import Event, Thread
+from threading import Event, Lock, Thread
 from typing import Callable
 
 from pymodbus import FramerType
@@ -152,6 +152,19 @@ class Em540Slave(MeterDataListener):
         self._tcp_server.context = self._rtu_server.context
         self._server_loop: asyncio.AbstractEventLoop | None = None
 
+        # Direct access to the SimRuntime register array for lock-based writes.
+        # This avoids routing writes through the server event loop (which caused
+        # starvation deadlocks when many downstream connections saturated the loop).
+        # After construction, server.context is a SimCore wrapping the SimDevice.
+        sim_core = self._rtu_server.context
+        sim_runtime = sim_core.devices[self._slave_id]
+        # SimRuntime uses block key "x" when a single SimDevice is used (non-dict build),
+        # otherwise "h" for holding registers.
+        block_key = "x" if "x" in sim_runtime.block else "h"
+        self._reg_start_address: int = sim_runtime.block[block_key][0]
+        self._registers: list[int] = sim_runtime.block[block_key][2]
+        self._reg_lock: Lock = Lock()
+
     def _rtu_trace_connect(self, connect: bool) -> None:
         logger.debug("Client connection to RTU server: %s", connect)
         if connect:
@@ -220,23 +233,25 @@ class Em540Slave(MeterDataListener):
         self._stats.changed()
 
     async def _flush_writes(self, writes: list[tuple[int, list[int]]]) -> None:
-        """Flush all pending register writes in a single cross-thread round-trip.
+        """Write register values directly into the SimRuntime register array.
 
-        Batches multiple setValues calls into one coroutine scheduled on the server
-        loop, reducing cross-thread synchronization overhead from N round-trips to 1.
+        Uses a threading lock instead of scheduling coroutines on the server
+        event loop. This eliminates the cross-thread dependency that caused
+        starvation deadlocks when many downstream connections saturated the
+        server loop — the listener thread would block forever waiting for
+        run_coroutine_threadsafe to execute on the overloaded loop.
+
+        The register array is a plain Python list; writes are fast in-memory
+        slice assignments. The lock ensures atomic multi-register updates
+        so downstream reads never see partially-written values.
         """
         if not writes:
             return
 
-        async def _batch_write():
+        with self._reg_lock:
             for address, values in writes:
-                await self._rtu_server.async_setValues(self._slave_id, _FC_HOLDING_REGISTER, address, values)
-
-        if self._server_loop is not None and self._server_loop.is_running():
-            future = asyncio.run_coroutine_threadsafe(_batch_write(), self._server_loop)
-            await asyncio.wrap_future(future)
-        else:
-            await _batch_write()
+                offset = address - self._reg_start_address
+                self._registers[offset : offset + len(values)] = values
 
     def _sync_static_registers_if_changed(self, frame: Em540Frame, writes: list[tuple[int, list[int]]]) -> bool:
         if self._static_synced:
@@ -267,8 +282,8 @@ class Em540Slave(MeterDataListener):
         """Handle new data from the master.
 
         We update the Modbus datastore with the new register values as is from the master.
-        All writes are collected and flushed in a single cross-thread round-trip to
-        minimize synchronization overhead.
+        All writes are collected and flushed directly into the register array under a
+        lock — no cross-thread event loop scheduling required.
         """
         frame = data.frame
         writes: list[tuple[int, list[int]]] = []
