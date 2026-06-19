@@ -89,6 +89,11 @@ class IdleConnectionReaper:
 
         Also enforces the max-connections cap: if the limit is reached, the new
         connection is immediately closed after creation.
+
+        Note: pymodbus expects this factory to return a protocol handler instance,
+        so the handler is always returned even when rejected. In the rejection path
+        the handler has already been closed and its disconnect callback invoked, so
+        the returned object is inert and will not service requests.
         """
         handler = self._original_callback_new_connection()
 

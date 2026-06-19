@@ -382,7 +382,7 @@ class Em540Master:
                         self._energy_chunk_rest = False
                         if not self._energy_initial_read_complete:
                             self._energy_initial_read_complete = True
-                            logger.info("First full energy register read complete.")
+                            logger.info("Initial full energy register read complete.")
                 else:
                     # Chunk failed — reset sequence but DON'T abort the tick.
                     # Primary data already read successfully above.
@@ -403,7 +403,7 @@ class Em540Master:
                     self._energy_chunk_pending = -1
                     if not self._energy_initial_read_complete:
                         self._energy_initial_read_complete = True
-                        logger.info("Initial energy read complete, publishing energy data.")
+                        logger.info("Initial full energy register read complete.")
             else:
                 self._energy_chunk_pending = -1
                 self._backfill_energy_from_front(frame)
@@ -424,19 +424,17 @@ class Em540Master:
                 await listener.read_failed()
 
         if is_ok:
-            # Only publish to listeners once we have both static data and a complete
-            # initial energy read. This prevents sending incomplete frames with zero
-            # energy values to downstream consumers (e.g., Home Assistant) on startup.
-            # Data is still read and buffered internally while waiting for completion.
-            if self._static_data_valid and self._energy_initial_read_complete:
-                with self._condition:
-                    self._front_data, self._back_data = self._back_data, self._front_data
+            # Swap buffers under the condition lock so the front buffer stays immutable
+            # for listener threads (which read _front_data under _condition). The swap is
+            # always performed so partial energy chunks are preserved across ticks via
+            # _backfill_energy_from_front. Only advance the sequence and wake listeners
+            # once we have static data AND a complete initial energy read, so downstream
+            # consumers never observe a frame with zero energy values on startup.
+            with self._condition:
+                self._front_data, self._back_data = self._back_data, self._front_data
+                if self._static_data_valid and self._energy_initial_read_complete:
                     self._data_seq += 1
                     self._condition.notify_all()
-            else:
-                # Data is valid but initial energy read not yet complete;
-                # update the back buffer in place for the next tick
-                self._front_data, self._back_data = self._back_data, self._front_data
 
         post_read_processing_ms = (time.perf_counter() - process_start) * 1000.0
         self._update_timing_stats(cycle_start, modbus_read_ms, post_read_processing_ms)
