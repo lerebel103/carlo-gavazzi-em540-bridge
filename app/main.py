@@ -131,12 +131,15 @@ async def process_loop():
 async def main():
     global config_manager
 
-    # Tune GC for real-time performance: raise the gen-0 threshold so collections
-    # happen less frequently (roughly every few seconds instead of multiple times
-    # per second). This reduces tick-loop pauses from gen-0 sweeps while still
-    # collecting reference cycles that would otherwise leak memory.
-    # Default is (700, 10, 10); we raise gen-0 to 5000 so collections batch up
-    # during idle periods between tick bursts.
+    # Real-time GC tuning (intentional, retained optimisation):
+    # The tick loop targets 10Hz, so latency spikes from garbage collection directly
+    # translate into tick jitter/overruns. CPython's default gen-0 threshold of 700
+    # allocations triggers very frequent young-generation sweeps — multiple times per
+    # second under our per-tick allocation rate. Raising gen-0 to 5000 batches these
+    # collections so they happen roughly every few seconds during idle gaps between
+    # ticks rather than mid-tick. gen-1/gen-2 thresholds are left at defaults so cyclic
+    # garbage is still reclaimed and memory does not grow unbounded. We deliberately do
+    # NOT disable GC entirely, which would risk unbounded growth under connection churn.
     import gc
 
     gc.set_threshold(5000, 10, 10)
