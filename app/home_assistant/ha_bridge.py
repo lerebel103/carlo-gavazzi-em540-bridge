@@ -99,6 +99,7 @@ class HABridge(MeterDataListener):
         self._next_diagnostics_publish_monotonic: float = 0.0
         self._config_entities: HAConfigEntities | None = None
         self._last_payload_by_topic: dict[str, str] = {}
+        self._last_payload_lock: threading.Lock = threading.Lock()
         self._stop_event = threading.Event()
         self._front_snapshot = _HASnapshot()
         self._back_snapshot = _HASnapshot()
@@ -160,7 +161,8 @@ class HABridge(MeterDataListener):
     @staticmethod
     def on_disconnect(client, userdata, flags, rc, props):
         userdata.connected = False
-        userdata._last_payload_by_topic.clear()
+        with userdata._last_payload_lock:
+            userdata._last_payload_by_topic.clear()
         if rc != 0:
             logger.warning(
                 "Disconnected from MQTT broker with result code: %s. Reconnect will continue in background.",
@@ -196,12 +198,12 @@ class HABridge(MeterDataListener):
 
     def publish(self, topic, msg, retain=False):
         msg_str = str(msg)
-        if self._last_payload_by_topic.get(topic) == msg_str:
-            return
-
-        if self.connected:
-            self.client.publish(topic, msg_str, retain=retain)
-            self._last_payload_by_topic[topic] = msg_str
+        with self._last_payload_lock:
+            if self._last_payload_by_topic.get(topic) == msg_str:
+                return
+            if self.connected:
+                self.client.publish(topic, msg_str, retain=retain)
+                self._last_payload_by_topic[topic] = msg_str
 
     async def new_data(self, data: MeterData):
         # Only set static device info if static registers have been read

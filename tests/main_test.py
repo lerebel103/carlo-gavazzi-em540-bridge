@@ -106,6 +106,7 @@ def _setup_mocks():
     """Return common mocks for process_loop dependencies."""
     mock_master = MagicMock()
     type(mock_master).connected = PropertyMock(return_value=True)
+    mock_master.has_fatal_error = False
     mock_master.connect = AsyncMock()
     mock_master.disconnect = AsyncMock()
     mock_master.add_listener = MagicMock()

@@ -75,6 +75,13 @@ class Em540Master:
     # Interval between repeated "still disconnected" log messages (seconds).
     _RECONNECT_LOG_INTERVAL: float = 30.0
 
+    # Fraction of the per-tick budget allowed as jitter before a cycle is counted as an
+    # overrun. A single cycle's wall-clock duration includes Modbus I/O round-trip time,
+    # which naturally jitters. Without this margin, transient blips that the scheduler
+    # fully absorbs on the next tick would inflate the overrun count. Only cycles that
+    # exceed budget + margin are counted as genuine overload pressure.
+    _TICK_OVERRUN_MARGIN_FRACTION: float = 0.5
+
     def __init__(self, config) -> None:
         self._config = config
         self._front_data: MeterData = MeterData()
@@ -103,6 +110,7 @@ class Em540Master:
         self._energy_chunk_pending: int = -1  # -1 = no chunk pending, 1..N-1 = next chunk index to read
         self._energy_chunk_rest: bool = False  # True = skip this tick's chunk read (rest tick)
         self._energy_initial_read_complete: bool = False  # Gate: don't publish until first full energy read
+        self._fatal_error: threading.Event = threading.Event()
 
         # Reconnect log-spam suppression state
         self._consecutive_connect_failures: int = 0
@@ -200,8 +208,6 @@ class Em540Master:
                 )
             else:
                 logger.info("Connected to EM540.")
-            self._consecutive_connect_failures = 0
-
             if not self._static_data_valid:
                 logger.debug("Reading static registers from EM540...")
                 frame = self._front_data.frame
@@ -214,10 +220,14 @@ class Em540Master:
                         self._client.close()
                     except Exception:
                         logger.debug("Failed to close EM540 client after static read failure", exc_info=True)
+                    self._record_connect_failure(time.perf_counter())
+                    return
                 else:
                     self._static_data_valid = True
                     # Keep both buffers aligned so skipped reads in dynamic maps keep prior values.
                     self._copy_meter_data(self._front_data, self._back_data)
+            # Connection fully ready (TCP connected and static data available).
+            self._consecutive_connect_failures = 0
         else:
             if is_first_attempt:
                 logger.warning("Failed to connect to EM540.")
@@ -277,6 +287,16 @@ class Em540Master:
         with self._condition:
             self._condition.notify_all()
 
+    def stop_listeners(self) -> None:
+        """Signal all listener threads to stop and unblock any threads waiting on the condition."""
+        with self._condition:
+            self._listener_stop = True
+            self._condition.notify_all()
+
+    @property
+    def has_fatal_error(self) -> bool:
+        return self._fatal_error.is_set()
+
     @property
     def connected(self) -> bool:
         return self._client.connected
@@ -288,6 +308,8 @@ class Em540Master:
 
         # No point reading if we are not connected
         if not self._client.connected:
+            self._energy_chunk_pending = -1
+            self._energy_chunk_rest = False
             for listener in self._listeners:
                 await listener.read_failed()
             self._update_timing_stats(cycle_start, modbus_read_ms, post_read_processing_ms)
@@ -309,6 +331,8 @@ class Em540Master:
         is_ok: bool = await self._read_primary_block(frame)
 
         if not is_ok:
+            self._energy_chunk_pending = -1
+            self._energy_chunk_rest = False
             modbus_read_ms = (time.perf_counter() - read_start) * 1000.0
             for listener in self._listeners:
                 await listener.read_failed()
@@ -400,14 +424,19 @@ class Em540Master:
                 await listener.read_failed()
 
         if is_ok:
-            # Always publish when primary data is fresh. Energy registers will contain
-            # zeros until the first full energy read completes, but this is acceptable —
-            # energy counters are slow-changing values and downstream consumers should
-            # not be starved of real-time power data waiting for them.
-            with self._condition:
+            # Only publish to listeners once we have both static data and a complete
+            # initial energy read. This prevents sending incomplete frames with zero
+            # energy values to downstream consumers (e.g., Home Assistant) on startup.
+            # Data is still read and buffered internally while waiting for completion.
+            if self._static_data_valid and self._energy_initial_read_complete:
+                with self._condition:
+                    self._front_data, self._back_data = self._back_data, self._front_data
+                    self._data_seq += 1
+                    self._condition.notify_all()
+            else:
+                # Data is valid but initial energy read not yet complete;
+                # update the back buffer in place for the next tick
                 self._front_data, self._back_data = self._back_data, self._front_data
-                self._data_seq += 1
-                self._condition.notify_all()
 
         post_read_processing_ms = (time.perf_counter() - process_start) * 1000.0
         self._update_timing_stats(cycle_start, modbus_read_ms, post_read_processing_ms)
@@ -445,7 +474,6 @@ class Em540Master:
                 )
                 os._exit(1)
 
-            self._bad_read_count = 0
             reg_desc.values = result.registers
         except ModbusIOException as ex:
             logger.warning("Modbus IO error reading primary registers from EM540: %s", ex)
@@ -568,7 +596,11 @@ class Em540Master:
             else:
                 self._stats.tick_headroom_ms_min = min(self._stats.tick_headroom_ms_min, headroom_ms)
 
-            if headroom_ms < 0:
+            # Only count an overrun when the cycle exceeds the budget by more than the
+            # jitter margin. This filters transient I/O jitter that the scheduler absorbs
+            # on the following tick, leaving the counter to reflect genuine overload.
+            overrun_threshold_ms = tick_budget_ms * self._TICK_OVERRUN_MARGIN_FRACTION
+            if headroom_ms < -overrun_threshold_ms:
                 self._stats.tick_overrun_count += 1
 
         # Timing stats are expected to update continuously for diagnostics consumers.
@@ -649,7 +681,8 @@ class Em540Master:
         finally:
             loop.close()
 
-        os._exit(2)
+        logger.critical("Listener thread terminated unrecoverably, signalling process shutdown.")
+        self._fatal_error.set()
 
     async def _read_registers(
         self,
@@ -720,7 +753,6 @@ class Em540Master:
                     )
                     os._exit(1)
 
-                self._bad_read_count = 0
 
                 # Store the read values
                 reg_map[reg_addr].values = result.registers

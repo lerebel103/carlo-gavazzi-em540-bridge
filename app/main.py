@@ -86,6 +86,10 @@ async def process_loop():
 
     try:
         while True:
+            if em540_master.has_fatal_error:
+                logger.critical("A listener thread encountered unrecoverable errors, initiating shutdown.")
+                break
+
             read_interval = max(0.001, float(state.em540_master.update_interval))
             current_time = time.perf_counter()
             if current_time >= next_call_time:
@@ -115,6 +119,9 @@ async def process_loop():
             if sleep_for > 0:
                 await asyncio.sleep(sleep_for)
     finally:
+        em540_master.stop_listeners()
+        em540_slave.stop()
+        ts65a_slave.stop()
         if mqtt_bridge is not None:
             mqtt_bridge.stop()
         await em540_master.disconnect()

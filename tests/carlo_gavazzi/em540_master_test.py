@@ -89,6 +89,7 @@ class TestEm540Master(unittest.TestCase):
         # Replace the client created by the constructor with our mock
         self.master._client = self.mock_client
         # Bypass initial energy-read gate for tests not focused on energy chunking
+        self.master._static_data_valid = True
         self.master._energy_initial_read_complete = True
 
     # -----------------------------------------------------------------------
@@ -267,6 +268,9 @@ class TestEm540Master(unittest.TestCase):
 
     def test_static_read_is_retried_until_success(self):
         """Static register reads should retry on later connects until they succeed."""
+        # Reset static data valid to False to test startup behavior
+        self.master._static_data_valid = False
+        
         type(self.mock_client).connected = PropertyMock(return_value=True)
         bad_result = MagicMock()
         bad_result.isError.return_value = True
@@ -312,6 +316,34 @@ class TestEm540Master(unittest.TestCase):
         self.assertEqual(post_ms, 3.0)
         self.assertGreaterEqual(non_read_ms, 0.0)
 
+    def test_tick_overrun_ignores_jitter_within_margin(self):
+        """A cycle exceeding the budget but within the jitter margin must not count as an overrun."""
+        self.config.update_interval = 0.1  # 100ms budget; margin fraction 0.5 -> 50ms slack
+
+        # 130ms cycle: over budget (100ms) but under budget + margin (150ms).
+        cycle_start = time.perf_counter() - 0.130
+        self.master._update_timing_stats(
+            cycle_start=cycle_start,
+            modbus_read_ms=120.0,
+            post_read_processing_ms=5.0,
+        )
+
+        self.assertEqual(self.master._stats.tick_overrun_count, 0)
+
+    def test_tick_overrun_counts_when_beyond_margin(self):
+        """A cycle exceeding the budget plus jitter margin must count as an overrun."""
+        self.config.update_interval = 0.1  # 100ms budget; margin fraction 0.5 -> 50ms slack
+
+        # 180ms cycle: beyond budget + margin (150ms).
+        cycle_start = time.perf_counter() - 0.180
+        self.master._update_timing_stats(
+            cycle_start=cycle_start,
+            modbus_read_ms=170.0,
+            post_read_processing_ms=5.0,
+        )
+
+        self.assertEqual(self.master._stats.tick_overrun_count, 1)
+
     def test_refresh_client_runtime_config_uses_live_shared_config_values(self):
         self.mock_client.timeout = 1.0
         self.mock_client.retries = 0
@@ -340,7 +372,8 @@ class TestSkipNRead(unittest.TestCase):
         self.config = _make_config()
         self.master = Em540Master(self.config)
         self.master._client = self.mock_client
-        # Bypass initial energy-read gate for testing chunked read mechanics
+        # Bypass initial startup gates for testing chunked read mechanics
+        self.master._static_data_valid = True
         self.master._energy_initial_read_complete = True
 
         self.frame = self.master.data.frame
@@ -578,6 +611,8 @@ class TestSkipNRead(unittest.TestCase):
 
         # Reset the gate to False (simulating fresh startup)
         self.master._energy_initial_read_complete = False
+        # Reset static data valid to False to simulate startup
+        self.master._static_data_valid = False
         # Reset dyn_reg_read_counter so energy skip fires on first tick
         self.master._dyn_reg_read_counter = 0
 
@@ -597,8 +632,9 @@ class TestSkipNRead(unittest.TestCase):
             self.mock_client.read_holding_registers = AsyncMock(side_effect=responses)
             asyncio.run(self.master.acquire_data())
 
-        # Primary data DOES publish (data_seq advances) even before energy completes
-        self.assertGreater(self.master._data_seq, initial_seq)
+        # Data is NOT published (data_seq does not advance) until energy read completes.
+        # This prevents momentary zero values in downstream consumers like Home Assistant.
+        self.assertEqual(self.master._data_seq, initial_seq)
         # But the energy gate remains closed
         self.assertFalse(self.master._energy_initial_read_complete)
 
@@ -607,10 +643,13 @@ class TestSkipNRead(unittest.TestCase):
         self.mock_client.read_holding_registers = AsyncMock(
             side_effect=_build_continuation_tick_responses(self.frame, num_chunks - 1)
         )
+        # Mark static data as valid so publisher gate opens after energy read completes
+        self.master._static_data_valid = True
         asyncio.run(self.master.acquire_data())
 
-        # Now the gate should be open
+        # Now the gate should be open and data should have been published
         self.assertTrue(self.master._energy_initial_read_complete)
+        self.assertGreater(self.master._data_seq, initial_seq)
 
 
 class TestListenerWorker(unittest.TestCase):
@@ -628,7 +667,8 @@ class TestListenerWorker(unittest.TestCase):
         self.config = _make_config()
         self.master = Em540Master(self.config)
         self.master._client = self.mock_client
-        # Bypass initial energy-read gate for listener tests
+        # Bypass initial startup gates for listener tests
+        self.master._static_data_valid = True
         self.master._energy_initial_read_complete = True
 
     def test_listener_worker_receives_latest_snapshot(self):
