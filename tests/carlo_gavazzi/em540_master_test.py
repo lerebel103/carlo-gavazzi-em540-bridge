@@ -270,7 +270,7 @@ class TestEm540Master(unittest.TestCase):
         """Static register reads should retry on later connects until they succeed."""
         # Reset static data valid to False to test startup behavior
         self.master._static_data_valid = False
-        
+
         type(self.mock_client).connected = PropertyMock(return_value=True)
         bad_result = MagicMock()
         bad_result.isError.return_value = True

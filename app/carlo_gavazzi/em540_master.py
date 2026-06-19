@@ -753,7 +753,6 @@ class Em540Master:
                     )
                     os._exit(1)
 
-
                 # Store the read values
                 reg_map[reg_addr].values = result.registers
         except ModbusIOException as ex:
