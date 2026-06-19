@@ -77,6 +77,18 @@ async def process_loop():
     await em540_slave.start()
     await ts65a_slave.start()
 
+    # Startup is complete and all long-lived objects (config, register maps, servers,
+    # listener threads) now exist. Flush any startup garbage, then freeze the surviving
+    # objects into a permanent generation that the cyclic collector never scans again.
+    # This removes those objects from the cost of every future full (gen-2) collection —
+    # the only collection large enough to cause a multi-millisecond pause that could
+    # threaten the 10Hz tick budget. Must run AFTER init: freezing while transient
+    # startup garbage is still alive would make that garbage permanent.
+    import gc
+
+    gc.collect()
+    gc.freeze()
+
     initial_interval = state.em540_master.update_interval
     start_time = time.perf_counter()
     next_call_time = start_time + initial_interval
@@ -132,14 +144,18 @@ async def main():
     global config_manager
 
     # Real-time GC tuning (intentional, retained optimisation):
-    # The tick loop targets 10Hz, so latency spikes from garbage collection directly
-    # translate into tick jitter/overruns. CPython's default gen-0 threshold of 700
-    # allocations triggers very frequent young-generation sweeps — multiple times per
-    # second under our per-tick allocation rate. Raising gen-0 to 5000 batches these
-    # collections so they happen roughly every few seconds during idle gaps between
-    # ticks rather than mid-tick. gen-1/gen-2 thresholds are left at defaults so cyclic
-    # garbage is still reclaimed and memory does not grow unbounded. We deliberately do
-    # NOT disable GC entirely, which would risk unbounded growth under connection churn.
+    # The tick loop targets 10Hz, so cyclic-GC pauses translate directly into tick
+    # jitter/overruns. Note that refcounting already frees the bulk of per-tick garbage
+    # (acyclic temporaries) immediately, independent of these thresholds; the cyclic
+    # collector only reclaims reference cycles. Raising the gen-0 threshold from the
+    # default 700 to 5000 makes young-generation collections less frequent (fewer, but
+    # slightly larger, sweeps) rather than relocating them out of the tick — a collection
+    # fires when the allocation watermark is crossed, which is typically mid-tick during
+    # parsing. gen-1/gen-2 thresholds stay at defaults so cyclic garbage is still
+    # reclaimed and memory stays bounded. We deliberately do NOT disable GC entirely,
+    # which would risk unbounded growth under connection churn. The larger worst-case
+    # pause (a full gen-2 collection) is addressed separately via gc.freeze() once
+    # startup completes (see process_loop).
     import gc
 
     gc.set_threshold(5000, 10, 10)
