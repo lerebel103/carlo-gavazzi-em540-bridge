@@ -100,15 +100,21 @@ class IdleConnectionReaper:
         # Enforce connection cap
         if self._max_connections > 0:
             active = getattr(self._server, "active_connections", None)
-            # active_connections includes the new handler by the time we get here
             active_count = len(active) if active else 0
-            if active_count > self._max_connections:
+            # pymodbus may or may not have inserted the new handler into
+            # active_connections by the time this callback runs, and the ordering
+            # is not guaranteed across versions. Count only the *other* connections
+            # (excluding this new handler) so the cap is enforced consistently:
+            # reject when there are already max_connections established connections.
+            handler_already_tracked = bool(active) and handler.unique_id in active
+            existing_count = active_count - (1 if handler_already_tracked else 0)
+            if existing_count >= self._max_connections:
                 self._rejected_connection_count += 1
                 logger.warning(
                     "[%s] Rejecting connection %s: at capacity (%d/%d, %d rejected total).",
                     self._label,
                     handler.unique_id,
-                    active_count,
+                    existing_count,
                     self._max_connections,
                     self._rejected_connection_count,
                 )
@@ -125,6 +131,20 @@ class IdleConnectionReaper:
                         handler.unique_id,
                         exc_info=True,
                     )
+                # Best-effort removal from active_connections: close() may not trigger
+                # the server's normal connection-lost cleanup, which would otherwise
+                # leave the rejected handler counted as active and keep the server
+                # permanently "at capacity".
+                if active is not None:
+                    try:
+                        active.pop(handler.unique_id, None)
+                    except Exception:
+                        logger.debug(
+                            "[%s] Error removing rejected connection %s from active_connections",
+                            self._label,
+                            handler.unique_id,
+                            exc_info=True,
+                        )
                 return handler
 
         # Record connection birth

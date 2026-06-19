@@ -173,6 +173,45 @@ class TestIdleConnectionReaper(unittest.TestCase):
         # Rejected connection should NOT be tracked for idle reaping
         self.assertNotIn("conn-3", reaper._last_activity)
 
+    def test_connection_cap_consistent_when_handler_not_yet_in_active(self):
+        """Cap must hold even if pymodbus inserts the handler into active_connections
+        *after* this callback runs (the count then excludes the new handler)."""
+        server = _make_mock_server()
+        reaper = IdleConnectionReaper(server, idle_timeout=1.0, max_connections=2, server_label="test-order")
+        reaper.install()
+
+        # Two established connections already present, new handler NOT yet inserted.
+        server.active_connections["conn-1"] = _make_mock_handler("conn-1")
+        server.active_connections["conn-2"] = _make_mock_handler("conn-2")
+
+        handler3 = _make_mock_handler("conn-3")
+        reaper._original_callback_new_connection.return_value = handler3
+        # Note: conn-3 deliberately NOT added to active_connections before the call.
+        server.callback_new_connection()
+
+        # With 2 existing established connections and a cap of 2, the 3rd must be rejected
+        # even though active_connections does not yet contain it.
+        handler3.close.assert_called_once()
+        self.assertEqual(reaper.rejected_connection_count, 1)
+
+    def test_rejected_connection_removed_from_active_connections(self):
+        """A rejected handler must be popped from active_connections so it does not
+        keep the server permanently at capacity."""
+        server = _make_mock_server()
+        reaper = IdleConnectionReaper(server, idle_timeout=1.0, max_connections=1, server_label="test-pop")
+        reaper.install()
+
+        server.active_connections["conn-1"] = _make_mock_handler("conn-1")
+
+        handler2 = _make_mock_handler("conn-2")
+        reaper._original_callback_new_connection.return_value = handler2
+        server.active_connections["conn-2"] = handler2  # pymodbus inserted it
+        server.callback_new_connection()
+
+        handler2.close.assert_called_once()
+        # The rejected handler must no longer occupy a slot.
+        self.assertNotIn("conn-2", server.active_connections)
+
     def test_connection_accepted_after_disconnect_frees_slot(self):
         """After a disconnect frees a slot, new connections should be accepted."""
         server = _make_mock_server()
