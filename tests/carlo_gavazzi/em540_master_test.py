@@ -318,13 +318,13 @@ class TestEm540Master(unittest.TestCase):
 
     def test_tick_overrun_ignores_jitter_within_margin(self):
         """A cycle exceeding the budget but within the jitter margin must not count as an overrun."""
-        self.config.update_interval = 0.1  # 100ms budget; margin fraction 0.5 -> 50ms slack
+        self.config.update_interval = 0.1  # 100ms budget; margin fraction 0.25 -> 25ms slack
 
-        # 130ms cycle: over budget (100ms) but under budget + margin (150ms).
-        cycle_start = time.perf_counter() - 0.130
+        # 120ms cycle: over budget (100ms) but under budget + margin (125ms).
+        cycle_start = time.perf_counter() - 0.120
         self.master._update_timing_stats(
             cycle_start=cycle_start,
-            modbus_read_ms=120.0,
+            modbus_read_ms=110.0,
             post_read_processing_ms=5.0,
         )
 
@@ -332,13 +332,13 @@ class TestEm540Master(unittest.TestCase):
 
     def test_tick_overrun_counts_when_beyond_margin(self):
         """A cycle exceeding the budget plus jitter margin must count as an overrun."""
-        self.config.update_interval = 0.1  # 100ms budget; margin fraction 0.5 -> 50ms slack
+        self.config.update_interval = 0.1  # 100ms budget; margin fraction 0.25 -> 25ms slack
 
-        # 180ms cycle: beyond budget + margin (150ms).
-        cycle_start = time.perf_counter() - 0.180
+        # 130ms cycle: beyond budget + margin (125ms).
+        cycle_start = time.perf_counter() - 0.130
         self.master._update_timing_stats(
             cycle_start=cycle_start,
-            modbus_read_ms=170.0,
+            modbus_read_ms=120.0,
             post_read_processing_ms=5.0,
         )
 
