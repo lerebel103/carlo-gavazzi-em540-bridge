@@ -602,8 +602,10 @@ class TestSkipNRead(unittest.TestCase):
     def test_energy_initial_read_complete_tracks_full_cycle(self):
         """_energy_initial_read_complete becomes True only after all chunks read.
 
-        Primary data publishes on every successful tick regardless of the energy gate.
-        The gate only tracks whether the first full energy read has completed.
+        Publication (data_seq advance / listener notify) is held back until the
+        initial full energy read completes, so downstream consumers never see
+        momentary zero energy values. This test verifies the gate stays closed
+        across partial energy reads and only opens once the final chunk is read.
         """
         from app.carlo_gavazzi.em540_data import ENERGY_BLOCK_CHUNK_SIZE, ENERGY_BLOCK_TOTAL_SIZE
 

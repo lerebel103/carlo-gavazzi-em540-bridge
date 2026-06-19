@@ -84,6 +84,18 @@ class IdleConnectionReaper:
         self._original_callback_new_connection = self._server.callback_new_connection
         self._server.callback_new_connection = self._wrapped_callback_new_connection  # type: ignore[method-assign]
 
+    def _pop_rejected_handler(self, active: dict, unique_id) -> None:
+        """Best-effort removal of a rejected handler from active_connections."""
+        try:
+            active.pop(unique_id, None)
+        except Exception:
+            logger.debug(
+                "[%s] Error removing rejected connection %s from active_connections",
+                self._label,
+                unique_id,
+                exc_info=True,
+            )
+
     def _wrapped_callback_new_connection(self):
         """Intercept new connection creation to wrap trace_pdu with activity tracking.
 
@@ -135,16 +147,22 @@ class IdleConnectionReaper:
                 # the server's normal connection-lost cleanup, which would otherwise
                 # leave the rejected handler counted as active and keep the server
                 # permanently "at capacity".
+                #
+                # The insertion ordering is not guaranteed: pymodbus may insert this
+                # handler into active_connections before OR after this callback
+                # returns. An immediate pop handles the insert-before case; a
+                # deferred pop scheduled on the event loop handles the insert-after
+                # case (it runs once control returns to the loop, by which point the
+                # handler has been inserted).
                 if active is not None:
+                    self._pop_rejected_handler(active, handler.unique_id)
                     try:
-                        active.pop(handler.unique_id, None)
-                    except Exception:
-                        logger.debug(
-                            "[%s] Error removing rejected connection %s from active_connections",
-                            self._label,
-                            handler.unique_id,
-                            exc_info=True,
-                        )
+                        loop = asyncio.get_running_loop()
+                        loop.call_soon(self._pop_rejected_handler, active, handler.unique_id)
+                    except RuntimeError:
+                        # No running loop (should not happen in the server context);
+                        # the immediate pop above is the best we can do.
+                        pass
                 return handler
 
         # Record connection birth

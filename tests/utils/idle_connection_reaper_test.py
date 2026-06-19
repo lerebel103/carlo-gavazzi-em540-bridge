@@ -1,5 +1,6 @@
 """Tests for IdleConnectionReaper."""
 
+import asyncio
 import time
 import unittest
 from unittest.mock import MagicMock, patch
@@ -210,6 +211,32 @@ class TestIdleConnectionReaper(unittest.TestCase):
 
         handler2.close.assert_called_once()
         # The rejected handler must no longer occupy a slot.
+        self.assertNotIn("conn-2", server.active_connections)
+
+    def test_rejected_connection_removed_via_deferred_pop_when_inserted_after(self):
+        """If pymodbus inserts the rejected handler into active_connections *after*
+        the callback returns, the deferred pop scheduled on the loop still removes it."""
+        server = _make_mock_server()
+        reaper = IdleConnectionReaper(server, idle_timeout=1.0, max_connections=1, server_label="test-deferred")
+        reaper.install()
+
+        server.active_connections["conn-1"] = _make_mock_handler("conn-1")
+
+        handler2 = _make_mock_handler("conn-2")
+        reaper._original_callback_new_connection.return_value = handler2
+
+        async def scenario():
+            # Insert-after ordering: conn-2 is NOT in active_connections yet.
+            server.callback_new_connection()
+            # Simulate pymodbus inserting the handler after the callback returned.
+            server.active_connections["conn-2"] = handler2
+            # Yield control so the deferred call_soon pop runs.
+            await asyncio.sleep(0)
+
+        asyncio.run(scenario())
+
+        handler2.close.assert_called_once()
+        # Even though it was inserted after the callback, the deferred pop removed it.
         self.assertNotIn("conn-2", server.active_connections)
 
     def test_connection_accepted_after_disconnect_frees_slot(self):
