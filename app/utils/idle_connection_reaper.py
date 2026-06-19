@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 
 # Default idle timeout in seconds. Connections with no PDU activity for
 # longer than this are closed.
-DEFAULT_IDLE_TIMEOUT: float = 30.0
+DEFAULT_IDLE_TIMEOUT: float = 60.0
 
 # Default maximum concurrent connections per server. 0 = unlimited.
 DEFAULT_MAX_CONNECTIONS: int = 15
