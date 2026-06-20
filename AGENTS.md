@@ -80,6 +80,8 @@ Notes:
 
 ## Change Guidance
 
+- **Do not edit code without explicit user permission.** Always propose changes and wait
+  for approval before modifying any source files. Reading and analysing code is fine.
 - Optimize root causes before micro-optimizing parsing code.
 - Prefer reducing upstream Modbus I/O, allocations, and contention in hot paths.
 - Be careful when changing reconnect logic; recovery must not reintroduce blocking behavior.

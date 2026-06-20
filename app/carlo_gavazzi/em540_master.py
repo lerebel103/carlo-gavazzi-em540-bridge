@@ -49,7 +49,10 @@ class Em540MasterStats:
 
     def changed(self) -> None:
         for listener in self._listeners:
-            listener(self)
+            try:
+                listener(self)
+            except Exception:
+                logger.debug("Stats listener raised an exception", exc_info=True)
 
     def add_listener(self, listener: Callable[["Em540MasterStats"], None]) -> None:
         self._listeners.append(listener)
@@ -71,6 +74,13 @@ class Em540Master:
 
     # Interval between repeated "still disconnected" log messages (seconds).
     _RECONNECT_LOG_INTERVAL: float = 30.0
+
+    # Fraction of the per-tick budget allowed as jitter before a cycle is counted as an
+    # overrun. A single cycle's wall-clock duration includes Modbus I/O round-trip time,
+    # which naturally jitters. Without this margin, transient blips that the scheduler
+    # fully absorbs on the next tick would inflate the overrun count. Only cycles that
+    # exceed budget + margin are counted as genuine overload pressure.
+    _TICK_OVERRUN_MARGIN_FRACTION: float = 0.5
 
     def __init__(self, config) -> None:
         self._config = config
@@ -100,6 +110,13 @@ class Em540Master:
         self._energy_chunk_pending: int = -1  # -1 = no chunk pending, 1..N-1 = next chunk index to read
         self._energy_chunk_rest: bool = False  # True = skip this tick's chunk read (rest tick)
         self._energy_initial_read_complete: bool = False  # Gate: don't publish until first full energy read
+        self._fatal_error: threading.Event = threading.Event()
+
+        # Register count mismatch tracking. Transient mismatches (e.g. stale RTU
+        # responses after reconnection) are tolerated and discarded. If mismatches
+        # persist consecutively, the stream is considered unrecoverably corrupt.
+        self._consecutive_reg_mismatch: int = 0
+        self._MAX_CONSECUTIVE_REG_MISMATCH: int = 10
 
         # Reconnect log-spam suppression state
         self._consecutive_connect_failures: int = 0
@@ -119,12 +136,16 @@ class Em540Master:
             )
         elif config.mode == "tcp":
             # Create Modbus TCP client
+            # reconnect_delay=0 disables pymodbus's internal do_reconnect() task.
+            # The tick loop in process_loop owns the connection lifecycle exclusively
+            # to avoid dual-reconnect races that cause resource exhaustion.
             self._client = AsyncModbusTcpClient(
                 host=self._config.host,
                 port=self._config.port,
                 framer=FramerType.RTU,
                 timeout=config.timeout,
                 retries=config.retries,
+                reconnect_delay=0,
             )
         else:
             raise ValueError(f"Invalid mode '{config.mode}' in configuration, must be 'tcp' or 'serial'")
@@ -197,8 +218,6 @@ class Em540Master:
                 )
             else:
                 logger.info("Connected to EM540.")
-            self._consecutive_connect_failures = 0
-
             if not self._static_data_valid:
                 logger.debug("Reading static registers from EM540...")
                 frame = self._front_data.frame
@@ -211,10 +230,14 @@ class Em540Master:
                         self._client.close()
                     except Exception:
                         logger.debug("Failed to close EM540 client after static read failure", exc_info=True)
+                    self._record_connect_failure(time.perf_counter())
+                    return
                 else:
                     self._static_data_valid = True
                     # Keep both buffers aligned so skipped reads in dynamic maps keep prior values.
                     self._copy_meter_data(self._front_data, self._back_data)
+            # Connection fully ready (TCP connected and static data available).
+            self._consecutive_connect_failures = 0
         else:
             if is_first_attempt:
                 logger.warning("Failed to connect to EM540.")
@@ -274,6 +297,16 @@ class Em540Master:
         with self._condition:
             self._condition.notify_all()
 
+    def stop_listeners(self) -> None:
+        """Signal all listener threads to stop and unblock any threads waiting on the condition."""
+        with self._condition:
+            self._listener_stop = True
+            self._condition.notify_all()
+
+    @property
+    def has_fatal_error(self) -> bool:
+        return self._fatal_error.is_set()
+
     @property
     def connected(self) -> bool:
         return self._client.connected
@@ -285,6 +318,8 @@ class Em540Master:
 
         # No point reading if we are not connected
         if not self._client.connected:
+            self._energy_chunk_pending = -1
+            self._energy_chunk_rest = False
             for listener in self._listeners:
                 await listener.read_failed()
             self._update_timing_stats(cycle_start, modbus_read_ms, post_read_processing_ms)
@@ -299,15 +334,33 @@ class Em540Master:
         self._dyn_reg_read_counter += 1
         read_start = time.perf_counter()
 
-        # --- Chunked energy block read logic ---
-        # The energy block (0x0500, 64 regs) is split into four 16-register reads
-        # interlaced with primary-only rest ticks to allow jitter recovery.
+        # --- Primary block read (critical path) ---
+        # Read the primary block FIRST. This contains real-time power/voltage/current
+        # data that downstream consumers depend on at 10Hz. Energy chunk failures must
+        # never prevent primary data from reaching listeners.
+        is_ok: bool = await self._read_primary_block(frame)
+
+        if not is_ok:
+            self._energy_chunk_pending = -1
+            self._energy_chunk_rest = False
+            modbus_read_ms = (time.perf_counter() - read_start) * 1000.0
+            for listener in self._listeners:
+                await listener.read_failed()
+            self._update_timing_stats(cycle_start, modbus_read_ms, post_read_processing_ms)
+            return False
+
+        # --- Chunked energy block read logic (best-effort, non-blocking) ---
+        # The energy block (0x0500, 64 regs) is split into chunks that are read
+        # on alternating ticks with primary-only rest ticks to allow jitter recovery.
         #
         # Scheduling:
         #   - When skip_n_read fires, we read chunk 0 on that tick.
         #   - After each chunk read, we rest for one tick (primary-only) before
         #     reading the next chunk. This gives lighter ticks room to absorb jitter.
-        #   - Pattern: chunk0, rest, chunk1, rest, chunk2, rest, chunk3, then idle.
+        #   - Pattern: chunk0, rest, chunk1, rest, ..., chunkN, then idle.
+        #
+        # Energy chunk failures do NOT abort the tick — primary data still publishes.
+        # The chunk sequence resets on failure and retries on the next skip-counter fire.
 
         energy_reg_desc = frame.dynamic_reg_map[_ENERGY_BLOCK_ADDR]
         skip_n_read = energy_reg_desc.skip_n_read
@@ -323,7 +376,6 @@ class Em540Master:
             if self._energy_chunk_rest:
                 # Rest tick — skip the chunk read, just backfill and let primary run alone
                 self._energy_chunk_rest = False
-                energy_read_ok = True
                 self._backfill_energy_from_front(frame)
             else:
                 # Read tick — seed from front then read the pending chunk
@@ -340,9 +392,13 @@ class Em540Master:
                         self._energy_chunk_rest = False
                         if not self._energy_initial_read_complete:
                             self._energy_initial_read_complete = True
+                            logger.info("Initial full energy register read complete.")
                 else:
+                    # Chunk failed — reset sequence but DON'T abort the tick.
+                    # Primary data already read successfully above.
                     self._energy_chunk_pending = -1
                     self._energy_chunk_rest = False
+                    self._backfill_energy_from_front(frame)
         elif energy_skip_fires:
             # Start a new chunked energy read: read chunk 0 this tick.
             # Seed the back buffer's energy values from front first so that any chunks
@@ -357,53 +413,40 @@ class Em540Master:
                     self._energy_chunk_pending = -1
                     if not self._energy_initial_read_complete:
                         self._energy_initial_read_complete = True
+                        logger.info("Initial full energy register read complete.")
             else:
                 self._energy_chunk_pending = -1
                 self._backfill_energy_from_front(frame)
         else:
             # No energy read this tick — backfill energy values from front buffer
-            energy_read_ok = True
             self._backfill_energy_from_front(frame)
 
-        # If the energy chunk read failed (connection closed), abort the tick early.
-        if not energy_read_ok:
-            modbus_read_ms = (time.perf_counter() - read_start) * 1000.0
-            for listener in self._listeners:
-                await listener.read_failed()
-            self._update_timing_stats(cycle_start, modbus_read_ms, post_read_processing_ms)
-            return False
-
-        # Always read the primary block
-        is_ok: bool = await self._read_primary_block(frame)
         modbus_read_ms = (time.perf_counter() - read_start) * 1000.0
 
-        if is_ok:
-            process_start = time.perf_counter()
-            try:
-                self._back_data.update_from_frame()
-            except (struct.error, ValueError, OverflowError) as e:
-                logger.warning("Corrupt frame data, dropping cycle: %s", e)
-                is_ok = False
-                for listener in self._listeners:
-                    await listener.read_failed()
-
-            if is_ok:
-                # Don't publish until the first full energy read cycle completes.
-                # Otherwise listeners see zero-filled energy registers on startup.
-                if not self._energy_initial_read_complete:
-                    logger.debug("Holding back frame: initial energy read not yet complete.")
-                else:
-                    # Atomic swap so listeners always read a coherent, latest snapshot.
-                    with self._condition:
-                        self._front_data, self._back_data = self._back_data, self._front_data
-                        self._data_seq += 1
-                        self._condition.notify_all()
-            post_read_processing_ms = (time.perf_counter() - process_start) * 1000.0
-        else:
-            # Now notify listeners
+        # --- Post-read processing and publication ---
+        process_start = time.perf_counter()
+        try:
+            self._back_data.update_from_frame()
+        except (struct.error, ValueError, OverflowError) as e:
+            logger.warning("Corrupt frame data, dropping cycle: %s", e)
+            is_ok = False
             for listener in self._listeners:
                 await listener.read_failed()
 
+        if is_ok:
+            # Swap buffers under the condition lock so the front buffer stays immutable
+            # for listener threads (which read _front_data under _condition). The swap is
+            # always performed so partial energy chunks are preserved across ticks via
+            # _backfill_energy_from_front. Only advance the sequence and wake listeners
+            # once we have static data AND a complete initial energy read, so downstream
+            # consumers never observe a frame with zero energy values on startup.
+            with self._condition:
+                self._front_data, self._back_data = self._back_data, self._front_data
+                if self._static_data_valid and self._energy_initial_read_complete:
+                    self._data_seq += 1
+                    self._condition.notify_all()
+
+        post_read_processing_ms = (time.perf_counter() - process_start) * 1000.0
         self._update_timing_stats(cycle_start, modbus_read_ms, post_read_processing_ms)
 
         return is_ok
@@ -426,34 +469,33 @@ class Em540Master:
                     num_registers,
                     result,
                 )
-                try:
-                    self._client.close()
-                except Exception:
-                    logger.debug("Failed to close EM540 client after read error", exc_info=True)
                 return False
 
             if len(result.registers) != num_registers:
-                logger.fatal(
-                    f"Expected {num_registers} registers but got {len(result.registers)} "
-                    f"for address {hex(_DYNAMIC_PRIMARY_BLOCK_ADDR)}"
+                self._consecutive_reg_mismatch += 1
+                logger.warning(
+                    "Register count mismatch: expected %d but got %d for address %s (consecutive: %d/%d)",
+                    num_registers,
+                    len(result.registers),
+                    hex(_DYNAMIC_PRIMARY_BLOCK_ADDR),
+                    self._consecutive_reg_mismatch,
+                    self._MAX_CONSECUTIVE_REG_MISMATCH,
                 )
-                os._exit(1)
+                if self._consecutive_reg_mismatch >= self._MAX_CONSECUTIVE_REG_MISMATCH:
+                    logger.critical(
+                        "Persistent register count mismatch (%d consecutive), stream unrecoverable — exiting.",
+                        self._consecutive_reg_mismatch,
+                    )
+                    os._exit(1)
+                return False
 
-            self._bad_read_count = 0
+            self._consecutive_reg_mismatch = 0
             reg_desc.values = result.registers
         except ModbusIOException as ex:
             logger.warning("Modbus IO error reading primary registers from EM540: %s", ex)
-            try:
-                self._client.close()
-            except Exception:
-                logger.debug("Failed to close EM540 client after ModbusIOException", exc_info=True)
             return False
         except ModbusException as ex:
             logger.warning("Modbus error reading primary registers from EM540: %s", ex)
-            try:
-                self._client.close()
-            except Exception:
-                logger.debug("Failed to close EM540 client after ModbusException", exc_info=True)
             return False
 
         return True
@@ -491,34 +533,36 @@ class Em540Master:
                     num_registers,
                     result,
                 )
-                try:
-                    self._client.close()
-                except Exception:
-                    logger.debug("Failed to close EM540 client after energy chunk read error", exc_info=True)
                 return False
 
             if len(result.registers) != num_registers:
-                logger.fatal(
-                    f"Expected {num_registers} registers but got {len(result.registers)} "
-                    f"for energy chunk {chunk_index} at address {hex(start_addr)}"
+                self._consecutive_reg_mismatch += 1
+                logger.warning(
+                    "Register count mismatch: expected %d but got %d for energy chunk %d "
+                    "at address %s (consecutive: %d/%d)",
+                    num_registers,
+                    len(result.registers),
+                    chunk_index,
+                    hex(start_addr),
+                    self._consecutive_reg_mismatch,
+                    self._MAX_CONSECUTIVE_REG_MISMATCH,
                 )
-                os._exit(1)
+                if self._consecutive_reg_mismatch >= self._MAX_CONSECUTIVE_REG_MISMATCH:
+                    logger.critical(
+                        "Persistent register count mismatch (%d consecutive), stream unrecoverable — exiting.",
+                        self._consecutive_reg_mismatch,
+                    )
+                    os._exit(1)
+                return False
 
+            self._consecutive_reg_mismatch = 0
             # Write chunk data into the correct slice of the energy register values
             reg_desc.values[chunk_offset : chunk_offset + num_registers] = result.registers
         except ModbusIOException as ex:
             logger.warning("Modbus IO error reading energy chunk %d from EM540: %s", chunk_index, ex)
-            try:
-                self._client.close()
-            except Exception:
-                logger.debug("Failed to close EM540 client after ModbusIOException", exc_info=True)
             return False
         except ModbusException as ex:
             logger.warning("Modbus error reading energy chunk %d from EM540: %s", chunk_index, ex)
-            try:
-                self._client.close()
-            except Exception:
-                logger.debug("Failed to close EM540 client after ModbusException", exc_info=True)
             return False
 
         return True
@@ -526,11 +570,10 @@ class Em540Master:
     def _backfill_energy_from_front(self, frame) -> None:
         """Copy energy register values from the front buffer to keep them current when not reading.
 
-        Skip backfill during the initial energy read cycle (gate closed) because the
-        front buffer contains all zeros and would overwrite chunks already read.
+        This propagates previously-read energy chunks across buffer swaps so that
+        partial energy data accumulates correctly during the initial read sequence
+        and energy values stay current between read cycles after completion.
         """
-        if not self._energy_initial_read_complete:
-            return
         front_energy = self._front_data.frame.dynamic_reg_map.get(_ENERGY_BLOCK_ADDR)
         if front_energy is not None:
             frame.dynamic_reg_map[_ENERGY_BLOCK_ADDR].values = list(front_energy.values)
@@ -563,7 +606,11 @@ class Em540Master:
             else:
                 self._stats.tick_headroom_ms_min = min(self._stats.tick_headroom_ms_min, headroom_ms)
 
-            if headroom_ms < 0:
+            # Only count an overrun when the cycle exceeds the budget by more than the
+            # jitter margin. This filters transient I/O jitter that the scheduler absorbs
+            # on the following tick, leaving the counter to reflect genuine overload.
+            overrun_threshold_ms = tick_budget_ms * self._TICK_OVERRUN_MARGIN_FRACTION
+            if headroom_ms < -overrun_threshold_ms:
                 self._stats.tick_overrun_count += 1
 
         # Timing stats are expected to update continuously for diagnostics consumers.
@@ -631,18 +678,24 @@ class Em540Master:
                 try:
                     loop.run_until_complete(listener.new_data(snapshot))
                     num_errors = 0
-                except Exception as e:
-                    logger.critical("Listener worker failure, starting error counting", exc_info=True)
-                    logger.exception(e)
+                except Exception:
                     num_errors += 1
+                    if num_errors <= 3 or num_errors % 10 == 0:
+                        logger.critical("Listener worker failure (%d consecutive errors)", num_errors, exc_info=True)
 
                 if num_errors > 10:
                     logger.critical("Too many successive listener errors, restarting.")
                     break
+        except Exception:
+            logger.critical("Listener thread crashed unexpectedly", exc_info=True)
         finally:
             loop.close()
 
-        os._exit(2)
+        # Only reached via break (too many errors) or except (crash), never via
+        # the clean return paths (stop_listeners / listener removal).
+        if not self._listener_stop:
+            logger.critical("Listener thread terminated unrecoverably, signalling process shutdown.")
+            self._fatal_error.set()
 
     async def _read_registers(
         self,
@@ -696,11 +749,6 @@ class Em540Master:
                         num_registers,
                         result,
                     )
-                    if dyn_reg:
-                        try:
-                            self._client.close()
-                        except Exception:
-                            logger.debug("Failed to close EM540 client after read error", exc_info=True)
                     return False
 
                 # Check if we received the expected number of registers
@@ -713,25 +761,13 @@ class Em540Master:
                     )
                     os._exit(1)
 
-                self._bad_read_count = 0
-
                 # Store the read values
                 reg_map[reg_addr].values = result.registers
         except ModbusIOException as ex:
             logger.warning("Modbus IO error reading registers from EM540: %s", ex)
-            if dyn_reg:
-                try:
-                    self._client.close()
-                except Exception:
-                    logger.debug("Failed to close EM540 client after ModbusIOException", exc_info=True)
             return False
         except ModbusException as ex:
             logger.warning("Modbus error reading registers from EM540: %s", ex)
-            if dyn_reg:
-                try:
-                    self._client.close()
-                except Exception:
-                    logger.debug("Failed to close EM540 client after ModbusException", exc_info=True)
             return False
 
         return True

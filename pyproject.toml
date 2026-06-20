@@ -5,7 +5,12 @@ requires-python = ">=3.14"
 
 [tool.ruff]
 line-length = 120
-target-version = "py314"
+# NOTE: Pinned to py313 (not py314) as a workaround for a ruff formatter bug where,
+# under target-version = "py314", `except (A, B):` is incorrectly rewritten to the
+# invalid `except A, B:` (SyntaxError on CPython 3.x). Reproduced on ruff 0.15.10-0.15.18.
+# The code itself still runs on Python 3.14 (see requires-python); target-version only
+# affects ruff's lint/format assumptions and py313 formatting is forward-compatible.
+target-version = "py313"
 exclude = [
     ".venv",
     "__pycache__",

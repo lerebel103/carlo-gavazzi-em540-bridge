@@ -18,15 +18,17 @@ services:
       - 5001:5001  # Modbus TCP
       - 5002:5002  # Modbus RTU-over-TCP
       - 5003:5003  # Fronius TS-65-A emulation
-    # Resource limits (adjust based on your hardware)
+    # Resource limits — steady-state RSS is ~50-60MB. The 128M cap ensures
+    # the OOM killer fires early if there's a leak, before the Pi is under
+    # system-wide memory pressure that would freeze the host.
     deploy:
       resources:
         limits:
           cpus: '1'
-          memory: 256M
+          memory: 128M
         reservations:
           cpus: '0.5'
-          memory: 128M
+          memory: 64M
     # Container logging (limit log file size to prevent disk bloat)
     logging:
       driver: json-file

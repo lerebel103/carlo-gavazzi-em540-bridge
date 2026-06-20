@@ -3,6 +3,9 @@
 Periodically scans a ModbusTcpServer's active connections and closes any
 that have not seen Modbus PDU activity within a configurable timeout.
 
+Also enforces a maximum connection limit — new connections beyond the cap
+are immediately closed to prevent resource exhaustion on constrained hosts.
+
 This prevents half-open or abandoned TCP connections from accumulating
 and exhausting connection slots on the downstream slave bridges.
 """
@@ -21,39 +24,54 @@ logger = logging.getLogger(__name__)
 # longer than this are closed.
 DEFAULT_IDLE_TIMEOUT: float = 60.0
 
+# Default maximum concurrent connections per server. 0 = unlimited.
+DEFAULT_MAX_CONNECTIONS: int = 15
+
 # How often the reaper checks for idle connections (seconds).
 _SCAN_INTERVAL: float = 10.0
 
 
 class IdleConnectionReaper:
-    """Tracks per-connection activity and closes idle ones.
+    """Tracks per-connection activity, closes idle ones, and enforces a connection cap.
 
     Usage:
-        1. Create an instance with the target server, timeout, and a label.
+        1. Create an instance with the target server, timeout, max connections, and a label.
         2. Call `install()` to monkey-patch the server's callback_new_connection
-           so that each new handler gets per-connection PDU activity tracking.
+           so that each new handler gets per-connection PDU activity tracking
+           and the connection cap is enforced.
         3. Call `start(loop)` to begin periodic scanning on the server's event loop.
         4. Call `stop()` to cancel the scanning task.
 
     The reaper intercepts each new connection handler to wrap its trace_pdu
     callback with per-connection activity tracking. On each scan, connections
     that have exceeded the idle timeout are closed.
+
+    When max_connections is reached, new connections are immediately closed
+    with a log warning. This prevents resource exhaustion from runaway clients.
     """
 
     def __init__(
         self,
         server: ModbusTcpServer,
         idle_timeout: float = DEFAULT_IDLE_TIMEOUT,
+        max_connections: int = DEFAULT_MAX_CONNECTIONS,
         server_label: str = "",
     ) -> None:
         self._server = server
         self._idle_timeout = idle_timeout
+        self._max_connections = max_connections
         self._label = server_label or "modbus-server"
         # Maps connection unique_id -> last activity monotonic timestamp
         self._last_activity: dict[str, float] = {}
         self._task: asyncio.Task | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
         self._original_callback_new_connection: Callable | None = None
+        self._rejected_connection_count: int = 0
+
+    @property
+    def rejected_connection_count(self) -> int:
+        """Total number of connections rejected due to the max-connections cap."""
+        return self._rejected_connection_count
 
     def install(self) -> None:
         """Patch the server to track per-connection PDU activity.
@@ -66,9 +84,86 @@ class IdleConnectionReaper:
         self._original_callback_new_connection = self._server.callback_new_connection
         self._server.callback_new_connection = self._wrapped_callback_new_connection  # type: ignore[method-assign]
 
+    def _pop_rejected_handler(self, active: dict, unique_id) -> None:
+        """Best-effort removal of a rejected handler from active_connections."""
+        try:
+            active.pop(unique_id, None)
+        except Exception:
+            logger.debug(
+                "[%s] Error removing rejected connection %s from active_connections",
+                self._label,
+                unique_id,
+                exc_info=True,
+            )
+
     def _wrapped_callback_new_connection(self):
-        """Intercept new connection creation to wrap trace_pdu with activity tracking."""
+        """Intercept new connection creation to wrap trace_pdu with activity tracking.
+
+        Also enforces the max-connections cap: if the limit is reached, the new
+        connection is immediately closed after creation.
+
+        Note: pymodbus expects this factory to return a protocol handler instance,
+        so the handler is always returned even when rejected. In the rejection path
+        the handler has already been closed and its disconnect callback invoked, so
+        the returned object is inert and will not service requests.
+        """
         handler = self._original_callback_new_connection()
+
+        # Enforce connection cap
+        if self._max_connections > 0:
+            active = getattr(self._server, "active_connections", None)
+            active_count = len(active) if active else 0
+            # pymodbus may or may not have inserted the new handler into
+            # active_connections by the time this callback runs, and the ordering
+            # is not guaranteed across versions. Count only the *other* connections
+            # (excluding this new handler) so the cap is enforced consistently:
+            # reject when there are already max_connections established connections.
+            handler_already_tracked = bool(active) and handler.unique_id in active
+            existing_count = active_count - (1 if handler_already_tracked else 0)
+            if existing_count >= self._max_connections:
+                self._rejected_connection_count += 1
+                logger.warning(
+                    "[%s] Rejecting connection %s: at capacity (%d/%d, %d rejected total).",
+                    self._label,
+                    handler.unique_id,
+                    existing_count,
+                    self._max_connections,
+                    self._rejected_connection_count,
+                )
+                try:
+                    handler.close()
+                    try:
+                        handler.callback_disconnected(None)
+                    except Exception:
+                        pass
+                except Exception:
+                    logger.debug(
+                        "[%s] Error closing rejected connection %s",
+                        self._label,
+                        handler.unique_id,
+                        exc_info=True,
+                    )
+                # Best-effort removal from active_connections: close() may not trigger
+                # the server's normal connection-lost cleanup, which would otherwise
+                # leave the rejected handler counted as active and keep the server
+                # permanently "at capacity".
+                #
+                # The insertion ordering is not guaranteed: pymodbus may insert this
+                # handler into active_connections before OR after this callback
+                # returns. An immediate pop handles the insert-before case; a
+                # deferred pop scheduled on the event loop handles the insert-after
+                # case (it runs once control returns to the loop, by which point the
+                # handler has been inserted).
+                if active is not None:
+                    self._pop_rejected_handler(active, handler.unique_id)
+                    try:
+                        loop = asyncio.get_running_loop()
+                        loop.call_soon(self._pop_rejected_handler, active, handler.unique_id)
+                    except RuntimeError:
+                        # No running loop (should not happen in the server context);
+                        # the immediate pop above is the best we can do.
+                        pass
+                return handler
 
         # Record connection birth
         conn_id = handler.unique_id

@@ -94,7 +94,7 @@ def _wait_for_port(port: int, timeout: float = 3.0):
         s.settimeout(0.1)
         try:
             s.connect(("127.0.0.1", port))
-        except ConnectionRefusedError, OSError:
+        except (ConnectionRefusedError, OSError):
             pass
         else:
             s.close()
@@ -137,7 +137,7 @@ def _flood_connections(host: str, port: int, count: int, timeout: float = 1.0) -
             # (simulates a client that opens, sends, and hangs)
             s.setblocking(False)
             sockets.append(s)
-        except ConnectionRefusedError, OSError:
+        except (ConnectionRefusedError, OSError):
             s.close()
             break
     return sockets

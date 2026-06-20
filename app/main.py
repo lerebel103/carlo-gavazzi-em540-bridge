@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 import argparse
 import asyncio
-import gc
 import logging
 import time
 from contextlib import contextmanager
@@ -87,6 +86,10 @@ async def process_loop():
 
     try:
         while True:
+            if em540_master.has_fatal_error:
+                logger.critical("A listener thread encountered unrecoverable errors, initiating shutdown.")
+                break
+
             read_interval = max(0.001, float(state.em540_master.update_interval))
             current_time = time.perf_counter()
             if current_time >= next_call_time:
@@ -116,6 +119,9 @@ async def process_loop():
             if sleep_for > 0:
                 await asyncio.sleep(sleep_for)
     finally:
+        em540_master.stop_listeners()
+        em540_slave.stop()
+        ts65a_slave.stop()
         if mqtt_bridge is not None:
             mqtt_bridge.stop()
         await em540_master.disconnect()
@@ -125,10 +131,22 @@ async def process_loop():
 async def main():
     global config_manager
 
-    # Optimize GC for real-time performance: disable automatic GC and set high thresholds
-    # to prevent collection pauses from interfering with the 10Hz tick loop.
-    gc.disable()
-    gc.set_threshold(100000, 10, 10)  # Extremely high thresholds; manual collection occurs only during idle periods
+    # Real-time GC tuning (intentional, retained optimisation):
+    # The tick loop targets 10Hz, so cyclic-GC pauses translate directly into tick
+    # jitter/overruns. Note that refcounting already frees the bulk of per-tick garbage
+    # (acyclic temporaries) immediately, independent of these thresholds; the cyclic
+    # collector only reclaims reference cycles. Raising the gen-0 threshold from the
+    # default 700 to 5000 makes young-generation collections less frequent (fewer, but
+    # slightly larger, sweeps) rather than relocating them out of the tick — a collection
+    # fires when the allocation watermark is crossed, which is typically mid-tick during
+    # parsing. gen-1/gen-2 thresholds stay at defaults so cyclic garbage is still
+    # reclaimed and memory stays bounded. We deliberately do NOT disable GC entirely,
+    # which would risk unbounded growth under connection churn. An occasional
+    # gen-2 pause (a few ms) is acceptable; it may cause a single tick overrun
+    # but the scheduler absorbs it on the next tick.
+    import gc
+
+    gc.set_threshold(5000, 10, 10)
 
     args = parse_args()
     config_manager = ConfigManager(args.config)
