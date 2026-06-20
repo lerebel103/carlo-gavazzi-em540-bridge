@@ -80,7 +80,7 @@ class Em540Master:
     # which naturally jitters. Without this margin, transient blips that the scheduler
     # fully absorbs on the next tick would inflate the overrun count. Only cycles that
     # exceed budget + margin are counted as genuine overload pressure.
-    _TICK_OVERRUN_MARGIN_FRACTION: float = 0.25
+    _TICK_OVERRUN_MARGIN_FRACTION: float = 0.5
 
     def __init__(self, config) -> None:
         self._config = config
