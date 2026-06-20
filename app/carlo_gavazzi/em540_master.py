@@ -489,6 +489,7 @@ class Em540Master:
                     os._exit(1)
                 return False
 
+            self._consecutive_reg_mismatch = 0
             reg_desc.values = result.registers
         except ModbusIOException as ex:
             logger.warning("Modbus IO error reading primary registers from EM540: %s", ex)
@@ -690,8 +691,11 @@ class Em540Master:
         finally:
             loop.close()
 
-        logger.critical("Listener thread terminated unrecoverably, signalling process shutdown.")
-        self._fatal_error.set()
+        # Only reached via break (too many errors) or except (crash), never via
+        # the clean return paths (stop_listeners / listener removal).
+        if not self._listener_stop:
+            logger.critical("Listener thread terminated unrecoverably, signalling process shutdown.")
+            self._fatal_error.set()
 
     async def _read_registers(
         self,
