@@ -23,10 +23,10 @@ services:
       resources:
         limits:
           cpus: '1'
-          memory: 256M
+          memory: 128M
         reservations:
           cpus: '0.5'
-          memory: 128M
+          memory: 64M
     # Container logging (limit log file size to prevent disk bloat)
     logging:
       driver: json-file
