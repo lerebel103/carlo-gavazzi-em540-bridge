@@ -452,9 +452,7 @@ class TestSkipNRead(unittest.TestCase):
         """Primary block (skip_n_read=0) is read on every cycle."""
         for cycle in range(1, 6):
             self.mock_client.read_holding_registers.reset_mock()
-            self.mock_client.read_holding_registers = AsyncMock(
-                side_effect=_build_first_tick_responses(self.frame)
-            )
+            self.mock_client.read_holding_registers = AsyncMock(side_effect=_build_first_tick_responses(self.frame))
             with patch.object(self.master._condition, "notify"):
                 result = asyncio.run(self.master.acquire_data())
 
@@ -477,9 +475,7 @@ class TestSkipNRead(unittest.TestCase):
 
         initial_seq = self.master._data_seq
 
-        self.mock_client.read_holding_registers = AsyncMock(
-            side_effect=_build_first_tick_responses(self.frame)
-        )
+        self.mock_client.read_holding_registers = AsyncMock(side_effect=_build_first_tick_responses(self.frame))
         asyncio.run(self.master.acquire_data())
 
         # Gate should open immediately after the single-chunk read
@@ -501,9 +497,7 @@ class TestSkipNRead(unittest.TestCase):
         energy_result.isError.return_value = False
         energy_result.registers = energy_values
 
-        self.mock_client.read_holding_registers = AsyncMock(
-            side_effect=[primary_result, energy_result]
-        )
+        self.mock_client.read_holding_registers = AsyncMock(side_effect=[primary_result, energy_result])
 
         with patch("app.carlo_gavazzi.meter_data.MeterData.update_from_frame", return_value=None):
             with patch.object(self.master._condition, "notify"):
@@ -525,9 +519,7 @@ class TestSkipNRead(unittest.TestCase):
         energy_error = MagicMock()
         energy_error.isError.return_value = True
 
-        self.mock_client.read_holding_registers = AsyncMock(
-            side_effect=[primary_result, energy_error]
-        )
+        self.mock_client.read_holding_registers = AsyncMock(side_effect=[primary_result, energy_error])
 
         with patch("app.carlo_gavazzi.meter_data.MeterData.update_from_frame", return_value=None):
             with patch.object(self.master._condition, "notify"):
