@@ -452,14 +452,20 @@ class TestSkipNRead(unittest.TestCase):
         """Primary block (skip_n_read=0) is read on every cycle."""
         for cycle in range(1, 6):
             self.mock_client.read_holding_registers.reset_mock()
-            self.mock_client.read_holding_registers = AsyncMock(side_effect=_build_first_tick_responses(self.frame))
+            if cycle == 1:
+                # First cycle: energy fires (counter=1 exception) so primary + energy
+                self.mock_client.read_holding_registers = AsyncMock(side_effect=_build_first_tick_responses(self.frame))
+            else:
+                # Subsequent cycles within skip window: primary only
+                self.mock_client.read_holding_registers = AsyncMock(
+                    side_effect=_build_primary_only_responses(self.frame)
+                )
             with patch.object(self.master._condition, "notify"):
                 result = asyncio.run(self.master.acquire_data())
 
             self.assertTrue(result, f"Cycle {cycle} should succeed")
             addresses = self._get_read_addresses()
             self.assertIn(0x0000, addresses, f"Cycle {cycle}: 0x0000 should always be read")
-            self.assertIn(0x0500, addresses, f"Cycle {cycle}: 0x0500 should always be read")
 
     # -----------------------------------------------------------------------
     # Startup gate: energy_initial_read_complete opens after first full read
@@ -572,9 +578,12 @@ class TestListenerWorker(unittest.TestCase):
         """Slow consumers should increment missed-update metrics when sequence jumps occur."""
         frame = self.master.data.frame
 
-        # With single-chunk config, every tick reads primary + full energy block.
-        # Provide enough responses for 3 ticks.
-        responses = _build_first_tick_responses(frame) * 3
+        # With skip_n_read=9, tick 1 reads primary + energy, ticks 2-3 read primary only.
+        responses = (
+            _build_first_tick_responses(frame)
+            + _build_primary_only_responses(frame)
+            + _build_primary_only_responses(frame)
+        )
         self.mock_client.read_holding_registers = AsyncMock(side_effect=responses)
 
         stats_updates = []
