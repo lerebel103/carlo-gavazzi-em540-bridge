@@ -126,7 +126,8 @@ class TestEm540Master(unittest.TestCase):
         result = asyncio.run(self.master.acquire_data())
 
         self.assertFalse(result)
-        self.mock_client.close.assert_called()
+        # close() is NOT called on read errors — pymodbus owns connection lifecycle
+        self.mock_client.close.assert_not_called()
         listener.read_failed.assert_awaited_once()
 
     # -----------------------------------------------------------------------
@@ -199,10 +200,10 @@ class TestEm540Master(unittest.TestCase):
         self.assertFalse(result)
 
     # -----------------------------------------------------------------------
-    # Requirement 9.5: ModbusException → closes client, returns False
+    # Requirement 9.5: ModbusException → returns False (no close)
     # -----------------------------------------------------------------------
-    def test_modbus_exception_closes_client_and_returns_false(self):
-        """Requirement 9.5 – ModbusException closes client and returns False."""
+    def test_modbus_exception_returns_false_without_closing(self):
+        """Requirement 9.5 – ModbusException returns False without closing client."""
         type(self.mock_client).connected = PropertyMock(return_value=True)
 
         self.mock_client.read_holding_registers = AsyncMock(side_effect=ModbusException("connection lost"))
@@ -210,7 +211,8 @@ class TestEm540Master(unittest.TestCase):
         result = asyncio.run(self.master.acquire_data())
 
         self.assertFalse(result)
-        self.mock_client.close.assert_called_once()
+        # close() is NOT called — pymodbus owns connection lifecycle via timeouts
+        self.mock_client.close.assert_not_called()
 
     # -----------------------------------------------------------------------
     # Requirement 10.1: successful acquire notifies via Condition
@@ -396,8 +398,10 @@ class TestEm540Master(unittest.TestCase):
 class TestSkipNRead(unittest.TestCase):
     """Validates: energy block read behaviour with current chunk configuration.
 
-    With ENERGY_BLOCK_CHUNK_SIZE == ENERGY_BLOCK_TOTAL_SIZE and skip_n_read=0,
-    the energy block is read as a single chunk on every tick alongside the primary block.
+    With ENERGY_BLOCK_CHUNK_SIZE == ENERGY_BLOCK_TOTAL_SIZE (single chunk) and
+    skip_n_read=9, the energy block is read as a single chunk every ~1s (every
+    10th tick at 10Hz). The first tick always reads energy (counter=1 exception),
+    then subsequent ticks within the skip window read primary only.
     """
 
     @patch("app.carlo_gavazzi.em540_master.AsyncModbusTcpClient")

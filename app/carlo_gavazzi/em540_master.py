@@ -136,12 +136,16 @@ class Em540Master:
             )
         elif config.mode == "tcp":
             # Create Modbus TCP client
+            # reconnect_delay=0 disables pymodbus's internal do_reconnect() task.
+            # The tick loop in process_loop owns the connection lifecycle exclusively
+            # to avoid dual-reconnect races that cause resource exhaustion.
             self._client = AsyncModbusTcpClient(
                 host=self._config.host,
                 port=self._config.port,
                 framer=FramerType.RTU,
                 timeout=config.timeout,
                 retries=config.retries,
+                reconnect_delay=0,
             )
         else:
             raise ValueError(f"Invalid mode '{config.mode}' in configuration, must be 'tcp' or 'serial'")
@@ -465,10 +469,6 @@ class Em540Master:
                     num_registers,
                     result,
                 )
-                try:
-                    self._client.close()
-                except Exception:
-                    logger.debug("Failed to close EM540 client after read error", exc_info=True)
                 return False
 
             if len(result.registers) != num_registers:
@@ -489,21 +489,12 @@ class Em540Master:
                     os._exit(1)
                 return False
 
-            self._consecutive_reg_mismatch = 0
             reg_desc.values = result.registers
         except ModbusIOException as ex:
             logger.warning("Modbus IO error reading primary registers from EM540: %s", ex)
-            try:
-                self._client.close()
-            except Exception:
-                logger.debug("Failed to close EM540 client after ModbusIOException", exc_info=True)
             return False
         except ModbusException as ex:
             logger.warning("Modbus error reading primary registers from EM540: %s", ex)
-            try:
-                self._client.close()
-            except Exception:
-                logger.debug("Failed to close EM540 client after ModbusException", exc_info=True)
             return False
 
         return True
@@ -541,10 +532,6 @@ class Em540Master:
                     num_registers,
                     result,
                 )
-                try:
-                    self._client.close()
-                except Exception:
-                    logger.debug("Failed to close EM540 client after energy chunk read error", exc_info=True)
                 return False
 
             if len(result.registers) != num_registers:
@@ -572,17 +559,9 @@ class Em540Master:
             reg_desc.values[chunk_offset : chunk_offset + num_registers] = result.registers
         except ModbusIOException as ex:
             logger.warning("Modbus IO error reading energy chunk %d from EM540: %s", chunk_index, ex)
-            try:
-                self._client.close()
-            except Exception:
-                logger.debug("Failed to close EM540 client after ModbusIOException", exc_info=True)
             return False
         except ModbusException as ex:
             logger.warning("Modbus error reading energy chunk %d from EM540: %s", chunk_index, ex)
-            try:
-                self._client.close()
-            except Exception:
-                logger.debug("Failed to close EM540 client after ModbusException", exc_info=True)
             return False
 
         return True
@@ -766,11 +745,6 @@ class Em540Master:
                         num_registers,
                         result,
                     )
-                    if dyn_reg:
-                        try:
-                            self._client.close()
-                        except Exception:
-                            logger.debug("Failed to close EM540 client after read error", exc_info=True)
                     return False
 
                 # Check if we received the expected number of registers
@@ -787,19 +761,9 @@ class Em540Master:
                 reg_map[reg_addr].values = result.registers
         except ModbusIOException as ex:
             logger.warning("Modbus IO error reading registers from EM540: %s", ex)
-            if dyn_reg:
-                try:
-                    self._client.close()
-                except Exception:
-                    logger.debug("Failed to close EM540 client after ModbusIOException", exc_info=True)
             return False
         except ModbusException as ex:
             logger.warning("Modbus error reading registers from EM540: %s", ex)
-            if dyn_reg:
-                try:
-                    self._client.close()
-                except Exception:
-                    logger.debug("Failed to close EM540 client after ModbusException", exc_info=True)
             return False
 
         return True
