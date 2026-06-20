@@ -86,14 +86,13 @@ _EM530_STATIC_REGISTER_SPECS = ((0x1003, "CT ratio", 2, 0),)
 
 _DYNAMIC_REGISTER_SPECS = (
     (_DYNAMIC_PRIMARY_BLOCK_ADDR, "Meter Data1", 0x34, 0),
-    (_ENERGY_BLOCK_ADDR, "Meter Data3", 0x053E - 0x0500 + 2, 4),
+    (_ENERGY_BLOCK_ADDR, "Meter Data3", 0x053E - 0x0500 + 2, 0),
 )
 
-# The energy block (0x0500) is 64 registers but too large to read in a single tick
-# without causing overruns at 10Hz. Split into eight 8-register chunks that are read
-# on alternating ticks (interlaced with primary-only rest ticks) to spread the I/O
-# cost and allow jitter recovery between heavier reads.
-ENERGY_BLOCK_CHUNK_SIZE = 8
+# The energy block (0x0500) is 64 registers. For performance baselining, read as a
+# single chunk every loop. Chunk size and skip_n_read can be tuned later if overruns
+# are observed.
+ENERGY_BLOCK_CHUNK_SIZE = 0x053E - 0x0500 + 2  # 64 registers (whole block)
 ENERGY_BLOCK_TOTAL_SIZE = 0x053E - 0x0500 + 2  # 64 registers
 
 _ADDITIONAL_REMAPPED_REGISTER_SPECS = (

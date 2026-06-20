@@ -112,6 +112,12 @@ class Em540Master:
         self._energy_initial_read_complete: bool = False  # Gate: don't publish until first full energy read
         self._fatal_error: threading.Event = threading.Event()
 
+        # Register count mismatch tracking. Transient mismatches (e.g. stale RTU
+        # responses after reconnection) are tolerated and discarded. If mismatches
+        # persist consecutively, the stream is considered unrecoverably corrupt.
+        self._consecutive_reg_mismatch: int = 0
+        self._MAX_CONSECUTIVE_REG_MISMATCH: int = 10
+
         # Reconnect log-spam suppression state
         self._consecutive_connect_failures: int = 0
         self._first_failure_time: float = 0.0
@@ -466,12 +472,24 @@ class Em540Master:
                 return False
 
             if len(result.registers) != num_registers:
-                logger.fatal(
-                    f"Expected {num_registers} registers but got {len(result.registers)} "
-                    f"for address {hex(_DYNAMIC_PRIMARY_BLOCK_ADDR)}"
+                self._consecutive_reg_mismatch += 1
+                logger.warning(
+                    "Register count mismatch: expected %d but got %d for address %s (consecutive: %d/%d)",
+                    num_registers,
+                    len(result.registers),
+                    hex(_DYNAMIC_PRIMARY_BLOCK_ADDR),
+                    self._consecutive_reg_mismatch,
+                    self._MAX_CONSECUTIVE_REG_MISMATCH,
                 )
-                os._exit(1)
+                if self._consecutive_reg_mismatch >= self._MAX_CONSECUTIVE_REG_MISMATCH:
+                    logger.critical(
+                        "Persistent register count mismatch (%d consecutive), stream unrecoverable — exiting.",
+                        self._consecutive_reg_mismatch,
+                    )
+                    os._exit(1)
+                return False
 
+            self._consecutive_reg_mismatch = 0
             reg_desc.values = result.registers
         except ModbusIOException as ex:
             logger.warning("Modbus IO error reading primary registers from EM540: %s", ex)
@@ -530,12 +548,26 @@ class Em540Master:
                 return False
 
             if len(result.registers) != num_registers:
-                logger.fatal(
-                    f"Expected {num_registers} registers but got {len(result.registers)} "
-                    f"for energy chunk {chunk_index} at address {hex(start_addr)}"
+                self._consecutive_reg_mismatch += 1
+                logger.warning(
+                    "Register count mismatch: expected %d but got %d for energy chunk %d "
+                    "at address %s (consecutive: %d/%d)",
+                    num_registers,
+                    len(result.registers),
+                    chunk_index,
+                    hex(start_addr),
+                    self._consecutive_reg_mismatch,
+                    self._MAX_CONSECUTIVE_REG_MISMATCH,
                 )
-                os._exit(1)
+                if self._consecutive_reg_mismatch >= self._MAX_CONSECUTIVE_REG_MISMATCH:
+                    logger.critical(
+                        "Persistent register count mismatch (%d consecutive), stream unrecoverable — exiting.",
+                        self._consecutive_reg_mismatch,
+                    )
+                    os._exit(1)
+                return False
 
+            self._consecutive_reg_mismatch = 0
             # Write chunk data into the correct slice of the energy register values
             reg_desc.values[chunk_offset : chunk_offset + num_registers] = result.registers
         except ModbusIOException as ex:
