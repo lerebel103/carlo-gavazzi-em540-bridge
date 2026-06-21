@@ -398,10 +398,9 @@ class TestEm540Master(unittest.TestCase):
 class TestSkipNRead(unittest.TestCase):
     """Validates: energy block read behaviour with current chunk configuration.
 
-    With ENERGY_BLOCK_CHUNK_SIZE == ENERGY_BLOCK_TOTAL_SIZE (single chunk) and
-    skip_n_read=9, the energy block is read as a single chunk every ~1s (every
-    10th tick at 10Hz). The first tick always reads energy (counter=1 exception),
-    then subsequent ticks within the skip window read primary only.
+    With ENERGY_BLOCK_CHUNK_SIZE=32 (2 chunks) and skip_n_read=9, the energy
+    block is read across 3 ticks every ~1s: chunk0, rest, chunk1. The rest tick
+    ensures each energy chunk read is separated by a primary-only tick.
     """
 
     @patch("app.carlo_gavazzi.em540_master.AsyncModbusTcpClient")
@@ -431,10 +430,10 @@ class TestSkipNRead(unittest.TestCase):
         ]
 
     # -----------------------------------------------------------------------
-    # Every tick reads both primary and energy block
+    # First tick reads primary + energy chunk 0
     # -----------------------------------------------------------------------
-    def test_every_tick_reads_primary_and_energy(self):
-        """Every tick reads both primary block and the full energy block."""
+    def test_first_tick_reads_primary_and_energy_chunk0(self):
+        """First tick reads primary block and energy chunk 0."""
         responses = _build_first_tick_responses(self.frame)
         self.mock_client.read_holding_registers = AsyncMock(side_effect=responses)
 
@@ -446,21 +445,27 @@ class TestSkipNRead(unittest.TestCase):
         addresses = self._get_read_addresses()
         self.assertIn(0x0000, addresses)
         self.assertIn(0x0500, addresses)
-        # Single chunk = whole block, so no pending chunks after
-        self.assertEqual(self.master._energy_chunk_pending, -1)
+        # With 2 chunks, chunk 1 is pending after chunk 0
+        self.assertEqual(self.master._energy_chunk_pending, 1)
 
     # -----------------------------------------------------------------------
     # Primary block is always read on every cycle
     # -----------------------------------------------------------------------
     def test_primary_block_reads_every_cycle(self):
         """Primary block (skip_n_read=0) is read on every cycle."""
+        # With 2 chunks: tick1=primary+chunk0, tick2=rest(primary), tick3=primary+chunk1, tick4+=primary
         for cycle in range(1, 6):
             self.mock_client.read_holding_registers.reset_mock()
             if cycle == 1:
-                # First cycle: energy fires (counter=1 exception) so primary + energy
+                # First cycle: energy fires, read primary + chunk 0
                 self.mock_client.read_holding_registers = AsyncMock(side_effect=_build_first_tick_responses(self.frame))
+            elif not self.master._energy_chunk_rest and self.master._energy_chunk_pending > 0:
+                # Chunk read tick: primary + pending chunk
+                self.mock_client.read_holding_registers = AsyncMock(
+                    side_effect=_build_continuation_tick_responses(self.frame, self.master._energy_chunk_pending)
+                )
             else:
-                # Subsequent cycles within skip window: primary only
+                # Rest tick or idle: primary only
                 self.mock_client.read_holding_registers = AsyncMock(
                     side_effect=_build_primary_only_responses(self.frame)
                 )
@@ -475,9 +480,10 @@ class TestSkipNRead(unittest.TestCase):
     # Startup gate: energy_initial_read_complete opens after first full read
     # -----------------------------------------------------------------------
     def test_energy_initial_read_complete_tracks_full_cycle(self):
-        """_energy_initial_read_complete becomes True after the full energy block is read.
+        """_energy_initial_read_complete becomes True after all energy chunks are read.
 
-        With a single chunk configuration, this happens on the very first successful tick.
+        With 2 chunks: chunk 0 on tick 1, rest on tick 2, chunk 1 on tick 3.
+        Gate opens after tick 3.
         """
         # Reset the gate to False (simulating fresh startup)
         self.master._energy_initial_read_complete = False
@@ -485,10 +491,23 @@ class TestSkipNRead(unittest.TestCase):
 
         initial_seq = self.master._data_seq
 
+        # Tick 1: primary + chunk 0
         self.mock_client.read_holding_registers = AsyncMock(side_effect=_build_first_tick_responses(self.frame))
         asyncio.run(self.master.acquire_data())
+        self.assertFalse(self.master._energy_initial_read_complete)
 
-        # Gate should open immediately after the single-chunk read
+        # Tick 2: rest (primary only)
+        self.mock_client.read_holding_registers = AsyncMock(side_effect=_build_primary_only_responses(self.frame))
+        asyncio.run(self.master.acquire_data())
+        self.assertFalse(self.master._energy_initial_read_complete)
+
+        # Tick 3: primary + chunk 1 (final chunk)
+        self.mock_client.read_holding_registers = AsyncMock(
+            side_effect=_build_continuation_tick_responses(self.frame, 1)
+        )
+        asyncio.run(self.master.acquire_data())
+
+        # Gate should now be open
         self.assertTrue(self.master._energy_initial_read_complete)
         self.assertGreater(self.master._data_seq, initial_seq)
 
@@ -497,25 +516,50 @@ class TestSkipNRead(unittest.TestCase):
     # -----------------------------------------------------------------------
     def test_energy_values_written_to_register_map(self):
         """Energy block read values are correctly stored in the register map."""
-        from app.carlo_gavazzi.em540_data import ENERGY_BLOCK_TOTAL_SIZE
+        from app.carlo_gavazzi.em540_data import ENERGY_BLOCK_CHUNK_SIZE, ENERGY_BLOCK_TOTAL_SIZE
 
         primary_reg = self.frame.dynamic_reg_map[0x0000]
         primary_result = _make_successful_result(len(primary_reg.values))
 
-        energy_values = list(range(300, 300 + ENERGY_BLOCK_TOTAL_SIZE))
-        energy_result = MagicMock()
-        energy_result.isError.return_value = False
-        energy_result.registers = energy_values
+        # Build distinct values for each chunk
+        chunk0_values = list(range(300, 300 + ENERGY_BLOCK_CHUNK_SIZE))
+        chunk1_size = ENERGY_BLOCK_TOTAL_SIZE - ENERGY_BLOCK_CHUNK_SIZE
+        chunk1_values = list(range(400, 400 + chunk1_size))
 
-        self.mock_client.read_holding_registers = AsyncMock(side_effect=[primary_result, energy_result])
+        chunk0_result = MagicMock()
+        chunk0_result.isError.return_value = False
+        chunk0_result.registers = chunk0_values
 
+        chunk1_result = MagicMock()
+        chunk1_result.isError.return_value = False
+        chunk1_result.registers = chunk1_values
+
+        # Tick 1: primary + chunk 0
+        self.mock_client.read_holding_registers = AsyncMock(side_effect=[primary_result, chunk0_result])
+        with patch("app.carlo_gavazzi.meter_data.MeterData.update_from_frame", return_value=None):
+            with patch.object(self.master._condition, "notify"):
+                asyncio.run(self.master.acquire_data())
+
+        # Tick 2: rest (primary only)
+        self.mock_client.read_holding_registers = AsyncMock(
+            side_effect=[_make_successful_result(len(primary_reg.values))]
+        )
+        with patch("app.carlo_gavazzi.meter_data.MeterData.update_from_frame", return_value=None):
+            with patch.object(self.master._condition, "notify"):
+                asyncio.run(self.master.acquire_data())
+
+        # Tick 3: primary + chunk 1
+        self.mock_client.read_holding_registers = AsyncMock(
+            side_effect=[_make_successful_result(len(primary_reg.values)), chunk1_result]
+        )
         with patch("app.carlo_gavazzi.meter_data.MeterData.update_from_frame", return_value=None):
             with patch.object(self.master._condition, "notify"):
                 result = asyncio.run(self.master.acquire_data())
 
         self.assertTrue(result)
         stored = self.master.data.frame.dynamic_reg_map[0x0500].values
-        self.assertEqual(stored, energy_values)
+        self.assertEqual(stored[:ENERGY_BLOCK_CHUNK_SIZE], chunk0_values)
+        self.assertEqual(stored[ENERGY_BLOCK_CHUNK_SIZE:], chunk1_values)
 
     # -----------------------------------------------------------------------
     # Energy chunk failure does not abort the tick (primary still publishes)
@@ -582,11 +626,12 @@ class TestListenerWorker(unittest.TestCase):
         """Slow consumers should increment missed-update metrics when sequence jumps occur."""
         frame = self.master.data.frame
 
-        # With skip_n_read=9, tick 1 reads primary + energy, ticks 2-3 read primary only.
+        # With 2 chunks and skip_n_read=9: tick 1 = primary+chunk0, tick 2 = rest(primary),
+        # tick 3 = primary+chunk1.
         responses = (
             _build_first_tick_responses(frame)
             + _build_primary_only_responses(frame)
-            + _build_primary_only_responses(frame)
+            + _build_continuation_tick_responses(frame, 1)
         )
         self.mock_client.read_holding_registers = AsyncMock(side_effect=responses)
 
