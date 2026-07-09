@@ -19,8 +19,9 @@ ENV PYTHONUNBUFFERED=1
 # Disable .pyc bytecode writing to avoid I/O delays in real-time tick loop
 ENV PYTHONDONTWRITEBYTECODE=1
 
-# Create non-root user for security
-RUN groupadd -r lerebel103 && useradd -r -g lerebel103 lerebel103
+# Create non-root user with home directory for security
+RUN groupadd -r lerebel103 && useradd -r -g lerebel103 -m -d /home/lerebel103 lerebel103
+ENV HOME=/home/lerebel103
 
 # Install uv (pinned for reproducible builds)
 COPY --from=ghcr.io/astral-sh/uv:0.11.28 /uv /uvx /bin/
