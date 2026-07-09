@@ -2,6 +2,21 @@
 name = "em540-bridge"
 version = "0.1.0"
 requires-python = ">=3.14"
+dependencies = [
+    "paho-mqtt>=2.1.0",
+    "pymodbus>=3.13.1",
+    "pyserial>=3.5",
+    "PyYAML>=6.0.3",
+    "uptime>=3.0.1",
+]
+
+[dependency-groups]
+dev = [
+    "ruff>=0.15.20",
+    "pytest>=9.1.1",
+    "pytest-xdist>=3.8.0",
+    "hypothesis>=6.155.7",
+]
 
 [tool.ruff]
 line-length = 120
