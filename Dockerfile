@@ -22,8 +22,8 @@ ENV PYTHONDONTWRITEBYTECODE=1
 # Create non-root user for security
 RUN groupadd -r lerebel103 && useradd -r -g lerebel103 lerebel103
 
-# Install uv
-COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
+# Install uv (pinned for reproducible builds)
+COPY --from=ghcr.io/astral-sh/uv:0.11.28 /uv /uvx /bin/
 
 # Copy dependency files for better Docker layer caching
 COPY pyproject.toml uv.lock ./
@@ -54,5 +54,5 @@ USER lerebel103
 # Set Python path
 ENV PYTHONPATH=/app
 
-# Default command
-CMD ["uv", "run", "--frozen", "python", "-m", "app", "--config", "/etc/carlo-gavazzi-em540-bridge/config.yaml"]
+# Default command (--no-sync skips redundant env check since deps are baked in at build)
+CMD ["uv", "run", "--frozen", "--no-sync", "python", "-m", "app", "--config", "/etc/carlo-gavazzi-em540-bridge/config.yaml"]
