@@ -32,6 +32,9 @@ COPY pyproject.toml uv.lock ./
 # Install production dependencies only (no dev group)
 RUN uv sync --frozen --no-dev --no-install-project
 
+# Disable uv cache at runtime (deps are baked in; avoids permission issues for non-root user)
+ENV UV_NO_CACHE=1
+
 # Copy application source code
 COPY app/ ./app/
 
