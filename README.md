@@ -34,7 +34,7 @@ readings (see `config-default.yaml`).
 - **Hardware:** RS485 to Modbus/RTU physical converter to connect the EM540 meter to your network.
 - **Meter configuration:** EM540 must be set to a baud rate of 57600 or higher to support a 100 ms read cycle.
 - **Software (Docker path):** Docker Engine with Docker Compose plugin.
-- **Software (manual path):** Python 3.13 and all dependencies listed in `requirements.txt`.
+- **Software (manual path):** Python 3.14 and [uv](https://docs.astral.sh/uv/) for dependency management.
 
 ## Install and Run with Docker Compose (Recommended)
 
@@ -56,12 +56,13 @@ Notes:
 
 ## Build and Run Manually (Without Docker)
 
-1. Install Python dependencies:
-	`pip install -r requirements.txt`
-2. Copy and edit configuration:
+1. Install [uv](https://docs.astral.sh/uv/getting-started/installation/).
+2. Install dependencies:
+	`uv sync`
+3. Copy and edit configuration:
 	`cp config-default.yaml config.yaml`
-3. Run the bridge:
-	`python -m app --config ./config.yaml`
+4. Run the bridge:
+	`uv run python -m app --config ./config.yaml`
 
 Optional helper commands:
 - Start stack with project Makefile: `make up`
@@ -70,10 +71,11 @@ Optional helper commands:
 
 ## Development
 
-- Install development dependencies: `pip install -r requirements-dev.txt`
-- Run tests (auto parallel when available): `make test`
-- Force serial tests: `make test-serial`
-- Force parallel tests: `make test-parallel`
+- Install all dependencies (including dev tools): `uv sync`
+- Run tests (parallel): `make test`
+- Run tests (serial): `make test-serial`
+- Lint: `make lint`
+- Format: `make format`
 
 ## Changelog
 

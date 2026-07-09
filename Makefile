@@ -50,6 +50,8 @@ logs:
 
 .PHONY: sync
 sync:
+	# Intentionally not --frozen: allows local env to reconcile after pyproject.toml edits.
+	# CI and Docker use --frozen for strict reproducibility.
 	uv sync
 
 .PHONY: lock
