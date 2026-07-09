@@ -58,7 +58,7 @@ Notes:
 
 1. Install [uv](https://docs.astral.sh/uv/getting-started/installation/).
 2. Install dependencies:
-	`uv sync`
+	`uv sync --no-install-project`
 3. Copy and edit configuration:
 	`cp config-default.yaml config.yaml`
 4. Run the bridge:
@@ -71,7 +71,7 @@ Optional helper commands:
 
 ## Development
 
-- Install all dependencies (including dev tools): `uv sync`
+- Install all dependencies (including dev tools): `uv sync --no-install-project`
 - Run tests (parallel): `make test`
 - Run tests (serial): `make test-serial`
 - Lint: `make lint`
