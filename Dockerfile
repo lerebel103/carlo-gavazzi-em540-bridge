@@ -20,7 +20,7 @@ ENV PYTHONUNBUFFERED=1
 ENV PYTHONDONTWRITEBYTECODE=1
 
 # Create non-root user with home directory for security
-RUN groupadd -r lerebel103 && useradd -r -g lerebel103 -m -d /home/lerebel103 lerebel103
+RUN groupadd -r lerebel103 && useradd -r -g lerebel103 -G dialout,tty -m -d /home/lerebel103 lerebel103
 ENV HOME=/home/lerebel103
 
 # Install uv (pinned for reproducible builds)
