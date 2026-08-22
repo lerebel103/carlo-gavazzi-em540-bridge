@@ -425,6 +425,40 @@ def test_end_to_end_serial_and_tcp_clients_observe_expected_data() -> None:
                     ),
                 )
 
+                # Publish a new upstream snapshot with changed dynamic values.
+                # Static registers stay the same because the master only refreshes
+                # them on reconnect, but downstream consumers should still track
+                # the evolving dynamic data.
+                updated_frame = make_em540_source_frame(seed=101)
+                for addr, reg in upstream.frame.static_reg_map.items():
+                    updated_frame.static_reg_map[addr].values = list(reg.values)
+                upstream.publish(updated_frame)
+
+                em540_validator = Em540Validator(upstream.frame)
+                ts65a_validator = Ts65aValidator(upstream.frame)
+                last_em540_error = ""
+                last_ts65a_error = ""
+
+                wait_for_condition(
+                    _em540_validated,
+                    timeout=120.0,
+                    message=(
+                        "downstream EM540 slaves did not converge to updated values within timeout"
+                        f"\nLast EM540 validation error: {last_em540_error}"
+                        f"{service.diagnostics()}"
+                    ),
+                )
+
+                wait_for_condition(
+                    _ts65a_validated,
+                    timeout=120.0,
+                    message=(
+                        "downstream TS65A slave did not converge to updated values within timeout"
+                        f"\nLast TS65A validation error: {last_ts65a_error}"
+                        f"{service.diagnostics()}"
+                    ),
+                )
+
                 # Simulate upstream outage and verify downstream paths fail closed
                 # with Modbus exceptions instead of serving stale/zero payloads.
                 upstream.stop()
