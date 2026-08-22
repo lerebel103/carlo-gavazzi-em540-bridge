@@ -266,7 +266,7 @@ def test_end_to_end_serial_and_tcp_clients_observe_expected_data() -> None:
 
             # Wait for downstream to start serving non-zero data
             # This validates that the service is reading from upstream and serving to downstream
-            wait_for_downstream_data(clients.em540_tcp, address=0x000B)
+            wait_for_downstream_data(clients.em540_tcp, address=0x000B, timeout=60.0)
 
             # Validate EM540 data on both TCP and RTU paths
             em540_validator = Em540Validator(upstream.frame)

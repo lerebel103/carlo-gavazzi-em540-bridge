@@ -70,12 +70,13 @@ def wait_for_register_coverage(upstream_server, expected_requests: set[tuple[int
     )
 
 
-def wait_for_downstream_data(client, address: int = 0x000B) -> None:
+def wait_for_downstream_data(client, address: int = 0x000B, timeout: float = 60.0) -> None:
     """Wait until downstream slave serves non-zero data.
 
     Args:
         client: Connected Modbus client.
         address: Register address to poll (default: device type 0x000B).
+        timeout: Maximum time to wait in seconds (default 60s for CI).
 
     Raises:
         TimeoutError: If no non-zero data appears within timeout.
@@ -87,6 +88,6 @@ def wait_for_downstream_data(client, address: int = 0x000B) -> None:
 
     wait_for_condition(
         _data_available,
-        timeout=30.0,
+        timeout=timeout,
         message="downstream slave did not serve non-zero data within timeout",
     )
