@@ -222,12 +222,12 @@ def test_end_to_end_serial_and_tcp_clients_observe_expected_data() -> None:
     """End-to-end test: upstream serial EM540 → downstream TCP/RTU slaves.
 
     Exercises the full data path:
-    1. Upstream virtual EM540 meter over serial (PTY)
-    2. Service reads upstream via Modbus RTU, transforms, stores
-    3. Downstream EM540 slaves serve over TCP and RTU
-    4. Downstream TS65A slave serves over TCP
-    5. TCP and RTU clients validate identical data
-    6. All register coverage (static, dynamic, remapped) validated
+    1. Downstream clients receive Modbus exceptions while upstream is unavailable
+    2. Upstream virtual EM540 meter starts over serial (PTY)
+    3. Service reads upstream via Modbus RTU, transforms, stores
+    4. Downstream EM540 slaves serve over TCP and RTU
+    5. Downstream TS65A slave serves over TCP
+    6. TCP and RTU clients validate identical data
     """
     with tempfile.TemporaryDirectory() as tmp_dir:
         tmp_path = Path(tmp_dir)
@@ -237,9 +237,9 @@ def test_end_to_end_serial_and_tcp_clients_observe_expected_data() -> None:
         em540_rtu_port = find_free_port()
         ts65a_tcp_port = find_free_port()
 
-        # Set up upstream simulator
+        # Set up upstream simulator (do not start yet).
+        # This allows us to assert downstream "not ready" behavior first.
         upstream = Em540UpstreamSimulator(frame_seed=100)
-        upstream.start()
 
         # Generate service config
         config_path = tmp_path / "config.yaml"
@@ -265,9 +265,21 @@ def test_end_to_end_serial_and_tcp_clients_observe_expected_data() -> None:
             clients = DownstreamClients(em540_tcp_port, em540_rtu_port, ts65a_tcp_port)
             clients.connect_all()
 
+            # Before upstream is available, downstream paths must return Modbus exceptions
+            # (never zero/uninitialized payloads).
+            em540_tcp_boot = clients.em540_tcp.read_holding_registers(0x0000, count=2, device_id=1)
+            em540_rtu_boot = clients.em540_rtu.read_holding_registers(0x0000, count=2, device_id=1)
+            ts65a_tcp_boot = clients.ts65a_tcp.read_holding_registers(40071, count=2, device_id=1)
+            assert em540_tcp_boot.isError(), "EM540 TCP should reject reads before upstream is ready"
+            assert em540_rtu_boot.isError(), "EM540 RTU should reject reads before upstream is ready"
+            assert ts65a_tcp_boot.isError(), "TS65A TCP should reject reads before upstream is ready"
+
+            # Start upstream after proving the not-ready behavior.
+            upstream.start()
+
             # Wait for downstream to start serving non-zero dynamic data.
             # Dynamic block readiness is less timing-sensitive than static overlays on CI.
-            wait_for_downstream_data(clients.em540_tcp, address=0x0000, timeout=60.0)
+            wait_for_downstream_data(clients.em540_tcp, address=0x0000, timeout=120.0)
 
             em540_validator = Em540Validator(upstream.frame)
 
