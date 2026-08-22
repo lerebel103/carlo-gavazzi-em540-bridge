@@ -66,7 +66,13 @@ class SerialCable:
                         data = os.read(key.fileobj, 4096)
                     except BlockingIOError:
                         continue
-                    except OSError:
+                    except OSError as exc:
+                        # Linux PTY masters can raise EIO/ENXIO until the
+                        # corresponding slave endpoint is opened. Keep the
+                        # relay alive so late-opened clients can recover.
+                        if exc.errno in (errno.EIO, errno.ENXIO):
+                            time.sleep(0.01)
+                            continue
                         return
                     if not data:
                         continue
