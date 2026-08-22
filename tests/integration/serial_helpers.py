@@ -41,15 +41,18 @@ class SerialCable:
         # path without hitting macOS EAGAIN from the parent holding the fd.
         os.close(left_slave)
         os.close(right_slave)
-        os.set_blocking(self._left_master, False)
-        os.set_blocking(self._right_master, False)
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._run, daemon=True, name=f"serial-cable-{label}")
         self._thread.start()
 
     def _write_all(self, fd: int, payload: bytes) -> None:
-        """Write payload to fd, handling potential partial writes."""
-        os.write(fd, payload)
+        """Write payload to fd, retrying until all bytes are forwarded."""
+        view = memoryview(payload)
+        while view:
+            written = os.write(fd, view)
+            if written <= 0:
+                raise RuntimeError(f"short write while relaying serial data on {self.label}")
+            view = view[written:]
 
     def _run(self) -> None:
         """Relay thread: forward bytes between left and right PTYs."""

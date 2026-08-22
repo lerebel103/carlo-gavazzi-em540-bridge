@@ -32,15 +32,15 @@ readings (see `config-default.yaml`).
 
 ## Configuration
 
-The master remains mutually exclusive: set [em540_master.mode](/Users/willycastelnau/Projects/Personal/carlo-gavazzi-em540-bridge.worktrees/modbus-slave-serial-adapter-support/app/config.py:36) to either `tcp` or `serial`.
-If your serial path echoes transmitted bytes, enable [em540_master.handle_local_echo](/Users/willycastelnau/Projects/Personal/carlo-gavazzi-em540-bridge.worktrees/modbus-slave-serial-adapter-support/app/config.py:42).
+The master remains mutually exclusive: set [em540_master.mode](app/config.py#L36) to either `tcp` or `serial`.
+If your serial path echoes transmitted bytes, enable [em540_master.handle_local_echo](app/config.py#L42).
 
 Each slave can expose the same internal model over multiple transports at once:
 
 - EM540 slave: TCP, RTU-over-TCP, optional serial RTU
 - TS65A slave: TCP, optional serial RTU
 
-See [config-default.yaml](/Users/willycastelnau/Projects/Personal/carlo-gavazzi-em540-bridge.worktrees/modbus-slave-serial-adapter-support/config-default.yaml) for the full sample layout.
+See [config-default.yaml](config-default.yaml) for the full sample layout.
 
 ## Requirements
 

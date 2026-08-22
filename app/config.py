@@ -209,7 +209,7 @@ class ConfigManager:
             if sub_config is None:
                 continue
 
-            self._populate_config(sub_config, section_data)
+            self._populate_config(sub_config, section_data, section_name)
 
         self._validate(state)
         self._state = state
@@ -279,13 +279,16 @@ class ConfigManager:
                 f"got {state.ts65a_slave.smoothing_num_points}"
             )
 
-    def _populate_config(self, target, section_data: dict) -> None:
+    def _populate_config(self, target, section_data: dict, path: str) -> None:
         for key, value in section_data.items():
+            field_path = f"{path}.{key}" if path else key
             if not hasattr(target, key):
                 continue
             current_value = getattr(target, key)
-            if is_dataclass(current_value) and isinstance(value, dict):
-                self._populate_config(current_value, value)
+            if is_dataclass(current_value):
+                if not isinstance(value, dict):
+                    raise ConfigError(f"{field_path} must be a mapping")
+                self._populate_config(current_value, value, field_path)
             else:
                 setattr(target, key, value)
 

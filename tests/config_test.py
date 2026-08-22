@@ -390,6 +390,14 @@ def test_invalid_serial_parity_raises(tmp_path, section):
         ConfigManager(path).load()
 
 
+@pytest.mark.parametrize("section", ["em540_slave", "ts65a_slave"])
+@pytest.mark.parametrize("value", [None, "invalid", 1])
+def test_nested_serial_config_must_be_mapping(tmp_path, section, value):
+    path = _make_config(tmp_path, {f"{section}.serial": value})
+    with pytest.raises(ConfigError, match=rf"{section}\.serial must be a mapping"):
+        ConfigManager(path).load()
+
+
 # -- pymodbus / root log_level validation --
 
 

@@ -13,6 +13,8 @@ def generate_config(
     em540_tcp_port: int,
     em540_rtu_port: int,
     ts65a_tcp_port: int,
+    em540_serial_port: str | None = None,
+    ts65a_serial_port: str | None = None,
 ) -> None:
     """Generate a complete service configuration file for testing.
 
@@ -46,7 +48,10 @@ def generate_config(
             "slave_id": 1,
             "update_timeout": 2.0,
             "log_level": "WARNING",
-            "serial": {"enabled": False},
+            "serial": {
+                "enabled": em540_serial_port is not None,
+                "port": em540_serial_port or "/dev/ttyUSB1",
+            },
         },
         "ts65a_slave": {
             "host": "127.0.0.1",
@@ -56,7 +61,10 @@ def generate_config(
             "grid_feed_in_hard_limit": -5000,
             "smoothing_num_points": 20,
             "log_level": "WARNING",
-            "serial": {"enabled": False},
+            "serial": {
+                "enabled": ts65a_serial_port is not None,
+                "port": ts65a_serial_port or "/dev/ttyUSB2",
+            },
         },
         "mqtt": {
             "enabled": False,

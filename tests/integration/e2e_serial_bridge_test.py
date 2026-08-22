@@ -16,7 +16,7 @@ from pathlib import Path
 
 import pytest
 from pymodbus import FramerType
-from pymodbus.client import ModbusTcpClient
+from pymodbus.client import ModbusSerialClient, ModbusTcpClient
 
 from app.carlo_gavazzi.meter_data import MeterData
 from app.fronius.ts65a_data import Ts65aMeterData
@@ -33,7 +33,7 @@ from .orchestration import (
     wait_for_condition,
     wait_for_downstream_data,
 )
-from .serial_helpers import ModbusRtuServer
+from .serial_helpers import ModbusRtuServer, SerialCable
 from .service_process import ServiceProcess
 from .test_data import (
     decode_ts65a_dynamic_values,
@@ -104,19 +104,46 @@ class DownstreamClients:
     both EM540 and TS65A slaves.
     """
 
-    def __init__(self, em540_tcp_port: int, em540_rtu_port: int, ts65a_tcp_port: int) -> None:
+    def __init__(
+        self,
+        em540_tcp_port: int,
+        em540_rtu_port: int,
+        ts65a_tcp_port: int,
+        em540_serial_port: str,
+        ts65a_serial_port: str,
+    ) -> None:
         self.em540_tcp = ModbusTcpClient(host="127.0.0.1", port=em540_tcp_port, framer=FramerType.SOCKET, timeout=2.0)
         self.em540_rtu = ModbusTcpClient(host="127.0.0.1", port=em540_rtu_port, framer=FramerType.RTU, timeout=2.0)
         self.ts65a_tcp = ModbusTcpClient(host="127.0.0.1", port=ts65a_tcp_port, framer=FramerType.SOCKET, timeout=2.0)
+        self.em540_serial = ModbusSerialClient(
+            port=em540_serial_port,
+            framer=FramerType.RTU,
+            baudrate=9600,
+            parity="N",
+            bytesize=8,
+            stopbits=1,
+            timeout=2.0,
+            handle_local_echo=False,
+        )
+        self.ts65a_serial = ModbusSerialClient(
+            port=ts65a_serial_port,
+            framer=FramerType.RTU,
+            baudrate=9600,
+            parity="N",
+            bytesize=8,
+            stopbits=1,
+            timeout=2.0,
+            handle_local_echo=False,
+        )
 
     def connect_all(self) -> None:
         """Connect all clients."""
-        for client in [self.em540_tcp, self.em540_rtu, self.ts65a_tcp]:
+        for client in [self.em540_tcp, self.em540_rtu, self.ts65a_tcp, self.em540_serial, self.ts65a_serial]:
             connect_modbus_client(client)
 
     def disconnect_all(self) -> None:
         """Disconnect all clients."""
-        for client in [self.em540_tcp, self.em540_rtu, self.ts65a_tcp]:
+        for client in [self.em540_tcp, self.em540_rtu, self.ts65a_tcp, self.em540_serial, self.ts65a_serial]:
             client.close()
 
 
@@ -140,6 +167,11 @@ class Em540Validator:
         """Validate EM540 RTU client against expected data."""
         reads = self._read_all_blocks(client)
         self._assert_all_blocks_match(reads, "RTU")
+
+    def validate_serial_client(self, client) -> None:
+        """Validate EM540 serial RTU client against expected data."""
+        reads = self._read_all_blocks(client)
+        self._assert_all_blocks_match(reads, "SERIAL")
 
     def _read_all_blocks(self, client) -> list[list[int]]:
         """Read all expected register blocks from a client."""
@@ -216,6 +248,15 @@ class Ts65aValidator:
         signature = read_holding_registers(client, 40000, 2)
         assert signature == [21365, 28243], f"TS65A signature mismatch: {signature}"
 
+    def validate_serial_client(self, client) -> None:
+        """Validate TS65A serial RTU client against expected data."""
+        ts65a_dynamic = read_holding_registers(client, 40071, 90)
+        ts65a_decoded = decode_ts65a_dynamic_values(ts65a_dynamic)
+        expected_decoded = self.compute_expected_values()
+        assert ts65a_decoded[:11] == pytest.approx(expected_decoded[:11], rel=1e-3, abs=1e-3), (
+            f"TS65A serial dynamic values mismatch: got {ts65a_decoded[:3]}... expected {expected_decoded[:3]}..."
+        )
+
 
 @pytest.mark.integration
 def test_end_to_end_serial_and_tcp_clients_observe_expected_data() -> None:
@@ -237,91 +278,117 @@ def test_end_to_end_serial_and_tcp_clients_observe_expected_data() -> None:
         em540_rtu_port = find_free_port()
         ts65a_tcp_port = find_free_port()
 
+        em540_serial = SerialCable("downstream-em540")
+        ts65a_serial = SerialCable("downstream-ts65a")
+
         # Set up upstream simulator
         upstream = Em540UpstreamSimulator(frame_seed=100)
         upstream.start()
 
-        # Generate service config
-        config_path = tmp_path / "config.yaml"
-        generate_config(
-            config_path,
-            upstream.port,
-            em540_tcp_port,
-            em540_rtu_port,
-            ts65a_tcp_port,
-        )
-
-        # Start service
-        service = ServiceProcess(config_path)
-        service.start()
-
         try:
-            # Wait for downstream ports to be ready
-            wait_for_port(em540_tcp_port, timeout=20.0)
-            wait_for_port(em540_rtu_port, timeout=20.0)
-            wait_for_port(ts65a_tcp_port, timeout=20.0)
-
-            # Connect downstream clients
-            clients = DownstreamClients(em540_tcp_port, em540_rtu_port, ts65a_tcp_port)
-            clients.connect_all()
-
-            # Wait for downstream to start serving non-zero dynamic data.
-            # Dynamic block readiness is less timing-sensitive than static overlays on CI.
-            wait_for_downstream_data(clients.em540_tcp, address=0x0000, timeout=120.0)
-
-            em540_validator = Em540Validator(upstream.frame)
-
-            def _em540_validated() -> bool:
-                try:
-                    em540_validator.validate_tcp_client(clients.em540_tcp)
-                    em540_validator.validate_rtu_client(clients.em540_rtu)
-                except AssertionError:
-                    return False
-                return True
-
-            wait_for_condition(
-                _em540_validated,
-                timeout=120.0,
-                message="downstream EM540 slaves did not converge to expected values within timeout",
+            # Generate service config
+            config_path = tmp_path / "config.yaml"
+            generate_config(
+                config_path,
+                upstream.port,
+                em540_tcp_port,
+                em540_rtu_port,
+                ts65a_tcp_port,
+                em540_serial_port=em540_serial.left_path,
+                ts65a_serial_port=ts65a_serial.left_path,
             )
 
-            ts65a_validator = Ts65aValidator(upstream.frame)
+            # Start service
+            service = ServiceProcess(config_path)
+            service.start()
 
-            def _ts65a_validated() -> bool:
-                try:
-                    ts65a_validator.validate_tcp_client(clients.ts65a_tcp)
-                    ts65a_validator.validate_signature_registers(clients.ts65a_tcp)
-                except AssertionError:
-                    return False
-                return True
+            try:
+                # Wait for downstream ports to be ready
+                wait_for_port(em540_tcp_port, timeout=20.0)
+                wait_for_port(em540_rtu_port, timeout=20.0)
+                wait_for_port(ts65a_tcp_port, timeout=20.0)
 
-            wait_for_condition(
-                _ts65a_validated,
-                timeout=120.0,
-                message="downstream TS65A slave did not converge to expected values within timeout",
-            )
+                # Connect downstream clients
+                clients = DownstreamClients(
+                    em540_tcp_port,
+                    em540_rtu_port,
+                    ts65a_tcp_port,
+                    em540_serial.right_path,
+                    ts65a_serial.right_path,
+                )
+                clients.connect_all()
 
-            # Simulate upstream outage and verify downstream paths fail closed
-            # with Modbus exceptions instead of serving stale/zero payloads.
-            upstream.stop()
+                # Wait for downstream to start serving non-zero dynamic data.
+                # Dynamic block readiness is less timing-sensitive than static overlays on CI.
+                wait_for_downstream_data(clients.em540_tcp, address=0x0000, timeout=120.0)
 
-            def _all_downstream_paths_error() -> bool:
-                em540_tcp_result = clients.em540_tcp.read_holding_registers(0x0000, count=2, device_id=1)
-                em540_rtu_result = clients.em540_rtu.read_holding_registers(0x0000, count=2, device_id=1)
-                ts65a_tcp_result = clients.ts65a_tcp.read_holding_registers(40071, count=2, device_id=1)
-                return em540_tcp_result.isError() and em540_rtu_result.isError() and ts65a_tcp_result.isError()
+                em540_validator = Em540Validator(upstream.frame)
 
-            wait_for_condition(
-                _all_downstream_paths_error,
-                timeout=30.0,
-                message="downstream paths did not return Modbus exceptions after upstream outage",
-            )
+                def _em540_validated() -> bool:
+                    try:
+                        em540_validator.validate_tcp_client(clients.em540_tcp)
+                        em540_validator.validate_rtu_client(clients.em540_rtu)
+                        em540_validator.validate_serial_client(clients.em540_serial)
+                    except AssertionError:
+                        return False
+                    return True
 
-            # Verify service is still healthy
-            service.assert_running()
+                wait_for_condition(
+                    _em540_validated,
+                    timeout=120.0,
+                    message="downstream EM540 slaves did not converge to expected values within timeout",
+                )
 
-            clients.disconnect_all()
+                ts65a_validator = Ts65aValidator(upstream.frame)
 
+                def _ts65a_validated() -> bool:
+                    try:
+                        ts65a_validator.validate_tcp_client(clients.ts65a_tcp)
+                        ts65a_validator.validate_signature_registers(clients.ts65a_tcp)
+                        ts65a_validator.validate_serial_client(clients.ts65a_serial)
+                        ts65a_validator.validate_signature_registers(clients.ts65a_serial)
+                    except AssertionError:
+                        return False
+                    return True
+
+                wait_for_condition(
+                    _ts65a_validated,
+                    timeout=120.0,
+                    message="downstream TS65A slave did not converge to expected values within timeout",
+                )
+
+                # Simulate upstream outage and verify downstream paths fail closed
+                # with Modbus exceptions instead of serving stale/zero payloads.
+                upstream.stop()
+
+                def _all_downstream_paths_error() -> bool:
+                    em540_tcp_result = clients.em540_tcp.read_holding_registers(0x0000, count=2, device_id=1)
+                    em540_rtu_result = clients.em540_rtu.read_holding_registers(0x0000, count=2, device_id=1)
+                    em540_serial_result = clients.em540_serial.read_holding_registers(0x0000, count=2, device_id=1)
+                    ts65a_tcp_result = clients.ts65a_tcp.read_holding_registers(40071, count=2, device_id=1)
+                    ts65a_serial_result = clients.ts65a_serial.read_holding_registers(40071, count=2, device_id=1)
+                    return (
+                        em540_tcp_result.isError()
+                        and em540_rtu_result.isError()
+                        and em540_serial_result.isError()
+                        and ts65a_tcp_result.isError()
+                        and ts65a_serial_result.isError()
+                    )
+
+                wait_for_condition(
+                    _all_downstream_paths_error,
+                    timeout=30.0,
+                    message="downstream paths did not return Modbus exceptions after upstream outage",
+                )
+
+                # Verify service is still healthy
+                service.assert_running()
+
+                clients.disconnect_all()
+
+            finally:
+                service.stop()
         finally:
-            service.stop()
             upstream.stop()
+            em540_serial.close()
+            ts65a_serial.close()
