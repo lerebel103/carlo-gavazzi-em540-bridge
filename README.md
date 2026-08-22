@@ -88,7 +88,7 @@ Optional helper commands:
 - Install all dependencies (including dev tools): `uv sync --no-install-project`
 - Run unit tests (parallel): `make test`
 - Run unit tests (serial): `make test-serial`
-- Run end-to-end integration tests: `make test-integration`
+- Run end-to-end integration tests (always Dockerized): `make test-integration`
 - Lint: `make lint`
 - Format: `make format`
 

@@ -1,0 +1,20 @@
+FROM python:3.14-slim
+
+WORKDIR /workspace
+
+# Install uv (pinned for reproducible integration test environment)
+COPY --from=ghcr.io/astral-sh/uv:0.11.28 /uv /uvx /bin/
+
+# Install all dependencies including dev/test dependencies.
+COPY pyproject.toml uv.lock ./
+RUN uv sync --frozen --no-install-project
+
+# Copy only what integration tests need.
+COPY app/ ./app/
+COPY tests/ ./tests/
+
+ENV PYTHONPATH=/workspace
+ENV PYTHONUNBUFFERED=1
+ENV PYTHONDONTWRITEBYTECODE=1
+
+CMD ["uv", "run", "pytest", "tests/integration/", "-v", "-m", "integration"]

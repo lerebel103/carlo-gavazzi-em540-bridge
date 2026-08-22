@@ -2,6 +2,7 @@
 VERSION := $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
 IMAGE_NAME = carlo-gavazzi-em540-bridge
 DOCKER_USER = lerebel103
+INTEGRATION_TEST_IMAGE = $(IMAGE_NAME)-integration-test
 
 .PHONY: help
 help:
@@ -13,7 +14,7 @@ help:
 	@echo "  logs        - View application logs"
 	@echo "  test        - Run unit tests in parallel (-n auto)"
 	@echo "  test-serial - Run unit tests in serial"
-	@echo "  test-integration - Run end-to-end integration tests"
+	@echo "  test-integration - Run end-to-end integration tests in Docker"
 	@echo "  lint        - Run linting checks"
 	@echo "  format      - Format code"
 	@echo "  clean       - Clean up Docker resources"
@@ -68,8 +69,12 @@ test-serial:
 	uv run pytest tests/ -v -m "not integration"
 
 .PHONY: test-integration
-test-integration:
-	uv run pytest tests/integration/ -v -m integration
+test-integration: test-integration-image
+	docker run --rm $(INTEGRATION_TEST_IMAGE)
+
+.PHONY: test-integration-image
+test-integration-image:
+	docker build -f Dockerfile.integration -t $(INTEGRATION_TEST_IMAGE) .
 
 .PHONY: lint
 lint:
