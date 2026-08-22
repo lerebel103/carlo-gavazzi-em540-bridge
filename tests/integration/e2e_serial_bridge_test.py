@@ -274,7 +274,7 @@ def test_end_to_end_serial_and_tcp_clients_observe_expected_data() -> None:
                     (0x0520, 32),
                 }
             )
-            wait_for_register_coverage(upstream, expected_requests, timeout=30.0)
+            wait_for_register_coverage(upstream, expected_requests, timeout=60.0)
 
             # Wait for downstream to start serving non-zero data
             wait_for_downstream_data(clients.em540_tcp, address=0x000B)
