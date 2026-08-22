@@ -16,6 +16,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 - (Fixes in development)
 
+## [0.3.0] - 2026-08-22
+
+### Added
+- Optional downstream Modbus/RTU serial adapter support for both EM540 and TS65A slave bridges, with per-slave serial settings (`enabled`, `port`, `baudrate`, `parity`, `bytesize`, `stopbits`, `timeout`, `handle_local_echo`).
+- End-to-end integration coverage for serial-backed downstream transport paths using PTY harnesses.
+- CI integration job for Dockerized end-to-end validation (`make test-integration`).
+
+### Changed
+- Refactored integration tests into focused reusable modules (`serial_helpers`, `modbus_client`, `test_data`, `config_gen`, `service_process`, `orchestration`).
+- Expanded README and default configuration documentation for downstream serial adapter deployment.
+
+### Fixed
+- Config population now rejects invalid non-mapping values for nested dataclass sections with `ConfigError` instead of runtime `AttributeError`.
+- PTY serial relay handling hardened for Linux endpoint open-order races and partial write behavior.
+- Integration convergence logic improved to account for transient serial transport timing while still validating serial client behavior.
+
 ## [0.1.1] - 2026-04-11
 
 ### Fixed
@@ -59,6 +75,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-[Unreleased]: https://github.com/lerebel103/carlo-gavazzi-em540-bridge/compare/v0.1.1...HEAD
+[Unreleased]: https://github.com/lerebel103/carlo-gavazzi-em540-bridge/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/lerebel103/carlo-gavazzi-em540-bridge/releases/tag/v0.3.0
 [0.1.1]: https://github.com/lerebel103/carlo-gavazzi-em540-bridge/releases/tag/v0.1.1
 [0.1.0]: https://github.com/lerebel103/carlo-gavazzi-em540-bridge/releases/tag/v0.1.0

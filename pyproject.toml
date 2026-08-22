@@ -1,6 +1,6 @@
 [project]
 name = "em540-bridge"
-version = "0.1.0"
+version = "0.3.0"
 requires-python = ">=3.14"
 dependencies = [
     "paho-mqtt>=2.1.0",
