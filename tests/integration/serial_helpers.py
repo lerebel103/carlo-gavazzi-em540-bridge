@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import os
 import pty
 import selectors
@@ -142,7 +143,13 @@ class ModbusRtuServer:
                 while not self._stop.is_set():
                     try:
                         chunk = os.read(self._master_fd, 256)
-                    except OSError:
+                    except OSError as exc:
+                        # Linux PTY masters raise EIO/ENXIO while no slave endpoint
+                        # is opened yet. Keep waiting so the harness can recover once
+                        # the client opens the slave device path.
+                        if exc.errno in (errno.EIO, errno.ENXIO):
+                            time.sleep(0.01)
+                            continue
                         break
                     if not chunk:
                         continue
