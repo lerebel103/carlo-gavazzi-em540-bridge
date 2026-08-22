@@ -1,5 +1,4 @@
 import asyncio
-import copy
 import logging
 import struct
 from threading import Event, Lock, Thread
@@ -359,7 +358,6 @@ class Ts65aSlaveBridge(MeterDataListener):
         )
 
     async def new_data(self, data: meter_data.MeterData):
-        data = copy.deepcopy(data)
         registers = self._dynamic_register_buffer
         index = 0
 

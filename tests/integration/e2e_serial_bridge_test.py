@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import logging
 import tempfile
+import time
 from pathlib import Path
 
 import pytest
@@ -193,14 +194,33 @@ class Em540Validator:
     def _read_all_blocks(self, client) -> list[list[int]]:
         """Read all expected register blocks from a client."""
         return [
-            read_holding_registers(client, 0x000B, len(self.expected_blocks["static_000b"])),
-            read_holding_registers(client, 0x0000, len(self.expected_blocks["primary"])),
-            read_holding_registers(client, 0x0500, len(self.expected_blocks["energy"])),
-            read_holding_registers(client, 0x0033, len(self.expected_blocks["remapped_0033"])),
-            read_holding_registers(client, 0x0110, len(self.expected_blocks["remapped_0110"])),
-            read_holding_registers(client, 0x0034, len(self.expected_blocks["remapped_0034"])),
-            read_holding_registers(client, 0x0112, len(self.expected_blocks["remapped_0112"])),
+            self._read_stable_holding_registers(client, 0x000B, len(self.expected_blocks["static_000b"])),
+            self._read_stable_holding_registers(client, 0x0000, len(self.expected_blocks["primary"])),
+            self._read_stable_holding_registers(client, 0x0500, len(self.expected_blocks["energy"])),
+            self._read_stable_holding_registers(client, 0x0033, len(self.expected_blocks["remapped_0033"])),
+            self._read_stable_holding_registers(client, 0x0110, len(self.expected_blocks["remapped_0110"])),
+            self._read_stable_holding_registers(client, 0x0034, len(self.expected_blocks["remapped_0034"])),
+            self._read_stable_holding_registers(client, 0x0112, len(self.expected_blocks["remapped_0112"])),
         ]
+
+    def _read_stable_holding_registers(self, client, address: int, count: int) -> list[int]:
+        """Read a block twice and return it only if the values are stable.
+
+        The service updates downstream register buffers continuously. A single read
+        may land while a new snapshot is being published, so the test waits for two
+        identical reads before treating the data as representative.
+        """
+        deadline = time.monotonic() + 10.0
+        last_read: list[int] | None = None
+
+        while time.monotonic() < deadline:
+            current_read = read_holding_registers(client, address, count)
+            if last_read == current_read:
+                return current_read
+            last_read = current_read
+            time.sleep(0.02)
+
+        raise TimeoutError(f"register block {hex(address)} did not stabilize within timeout")
 
     def _assert_all_blocks_match(self, reads: list[list[int]], label: str) -> None:
         """Assert that all blocks match expected values."""
@@ -250,7 +270,7 @@ class Ts65aValidator:
     def validate_tcp_client(self, client) -> None:
         """Validate TS65A TCP client against expected data."""
         # Read the dynamic values register block
-        ts65a_dynamic = read_holding_registers(client, 40071, 90)  # 45 floats = 90 registers
+        ts65a_dynamic = self._read_stable_holding_registers(client, 40071, 90)  # 45 floats = 90 registers
         ts65a_decoded = decode_ts65a_dynamic_values(ts65a_dynamic)
         expected_decoded = self.compute_expected_values()
 
@@ -262,14 +282,14 @@ class Ts65aValidator:
 
     def validate_signature_registers(self, client) -> None:
         """Validate TS65A signature registers (device ID)."""
-        signature = read_holding_registers(client, 40000, 2)
+        signature = self._read_stable_holding_registers(client, 40000, 2)
         assert signature == [21365, 28243], f"TS65A signature mismatch: {signature}"
 
     def validate_serial_client(self, client) -> None:
         """Validate TS65A serial client via signature and dynamic head."""
         try:
             self.validate_signature_registers(client)
-            dynamic_head = read_holding_registers(client, 40071, 6)
+            dynamic_head = self._read_stable_holding_registers(client, 40071, 6)
         except ModbusException:
             return
         decoded_head = decode_ts65a_dynamic_values(dynamic_head)
@@ -277,6 +297,20 @@ class Ts65aValidator:
         assert decoded_head[:3] == pytest.approx(expected_decoded[:3], rel=1e-3, abs=1e-3), (
             f"TS65A serial dynamic head mismatch: got {decoded_head[:3]} expected {expected_decoded[:3]}"
         )
+
+    def _read_stable_holding_registers(self, client, address: int, count: int) -> list[int]:
+        """Read a block twice and return it only if the values are stable."""
+        deadline = time.monotonic() + 10.0
+        last_read: list[int] | None = None
+
+        while time.monotonic() < deadline:
+            current_read = read_holding_registers(client, address, count)
+            if last_read == current_read:
+                return current_read
+            last_read = current_read
+            time.sleep(0.02)
+
+        raise TimeoutError(f"register block {hex(address)} did not stabilize within timeout")
 
 
 @pytest.mark.integration
@@ -386,6 +420,40 @@ def test_end_to_end_serial_and_tcp_clients_observe_expected_data() -> None:
                     timeout=120.0,
                     message=(
                         "downstream TS65A slave did not converge to expected values within timeout"
+                        f"\nLast TS65A validation error: {last_ts65a_error}"
+                        f"{service.diagnostics()}"
+                    ),
+                )
+
+                # Publish a new upstream snapshot with changed dynamic values.
+                # Static registers stay the same because the master only refreshes
+                # them on reconnect, but downstream consumers should still track
+                # the evolving dynamic data.
+                updated_frame = make_em540_source_frame(seed=101)
+                for addr, reg in upstream.frame.static_reg_map.items():
+                    updated_frame.static_reg_map[addr].values = list(reg.values)
+                upstream.publish(updated_frame)
+
+                em540_validator = Em540Validator(upstream.frame)
+                ts65a_validator = Ts65aValidator(upstream.frame)
+                last_em540_error = ""
+                last_ts65a_error = ""
+
+                wait_for_condition(
+                    _em540_validated,
+                    timeout=120.0,
+                    message=(
+                        "downstream EM540 slaves did not converge to updated values within timeout"
+                        f"\nLast EM540 validation error: {last_em540_error}"
+                        f"{service.diagnostics()}"
+                    ),
+                )
+
+                wait_for_condition(
+                    _ts65a_validated,
+                    timeout=120.0,
+                    message=(
+                        "downstream TS65A slave did not converge to updated values within timeout"
                         f"\nLast TS65A validation error: {last_ts65a_error}"
                         f"{service.diagnostics()}"
                     ),
