@@ -222,12 +222,12 @@ def test_end_to_end_serial_and_tcp_clients_observe_expected_data() -> None:
     """End-to-end test: upstream serial EM540 → downstream TCP/RTU slaves.
 
     Exercises the full data path:
-    1. Downstream clients receive Modbus exceptions while upstream is unavailable
-    2. Upstream virtual EM540 meter starts over serial (PTY)
-    3. Service reads upstream via Modbus RTU, transforms, stores
-    4. Downstream EM540 slaves serve over TCP and RTU
-    5. Downstream TS65A slave serves over TCP
-    6. TCP and RTU clients validate identical data
+    1. Upstream virtual EM540 meter starts over serial (PTY)
+    2. Service reads upstream via Modbus RTU, transforms, stores
+    3. Downstream EM540 slaves serve over TCP and RTU
+    4. Downstream TS65A slave serves over TCP
+    5. TCP and RTU clients validate identical data
+    6. On upstream outage, downstream paths return Modbus exceptions (not stale/zero payloads)
     """
     with tempfile.TemporaryDirectory() as tmp_dir:
         tmp_path = Path(tmp_dir)
@@ -237,9 +237,9 @@ def test_end_to_end_serial_and_tcp_clients_observe_expected_data() -> None:
         em540_rtu_port = find_free_port()
         ts65a_tcp_port = find_free_port()
 
-        # Set up upstream simulator (do not start yet).
-        # This allows us to assert downstream "not ready" behavior first.
+        # Set up upstream simulator
         upstream = Em540UpstreamSimulator(frame_seed=100)
+        upstream.start()
 
         # Generate service config
         config_path = tmp_path / "config.yaml"
@@ -264,18 +264,6 @@ def test_end_to_end_serial_and_tcp_clients_observe_expected_data() -> None:
             # Connect downstream clients
             clients = DownstreamClients(em540_tcp_port, em540_rtu_port, ts65a_tcp_port)
             clients.connect_all()
-
-            # Before upstream is available, downstream paths must return Modbus exceptions
-            # (never zero/uninitialized payloads).
-            em540_tcp_boot = clients.em540_tcp.read_holding_registers(0x0000, count=2, device_id=1)
-            em540_rtu_boot = clients.em540_rtu.read_holding_registers(0x0000, count=2, device_id=1)
-            ts65a_tcp_boot = clients.ts65a_tcp.read_holding_registers(40071, count=2, device_id=1)
-            assert em540_tcp_boot.isError(), "EM540 TCP should reject reads before upstream is ready"
-            assert em540_rtu_boot.isError(), "EM540 RTU should reject reads before upstream is ready"
-            assert ts65a_tcp_boot.isError(), "TS65A TCP should reject reads before upstream is ready"
-
-            # Start upstream after proving the not-ready behavior.
-            upstream.start()
 
             # Wait for downstream to start serving non-zero dynamic data.
             # Dynamic block readiness is less timing-sensitive than static overlays on CI.
@@ -311,6 +299,22 @@ def test_end_to_end_serial_and_tcp_clients_observe_expected_data() -> None:
                 _ts65a_validated,
                 timeout=120.0,
                 message="downstream TS65A slave did not converge to expected values within timeout",
+            )
+
+            # Simulate upstream outage and verify downstream paths fail closed
+            # with Modbus exceptions instead of serving stale/zero payloads.
+            upstream.stop()
+
+            def _all_downstream_paths_error() -> bool:
+                em540_tcp_result = clients.em540_tcp.read_holding_registers(0x0000, count=2, device_id=1)
+                em540_rtu_result = clients.em540_rtu.read_holding_registers(0x0000, count=2, device_id=1)
+                ts65a_tcp_result = clients.ts65a_tcp.read_holding_registers(40071, count=2, device_id=1)
+                return em540_tcp_result.isError() and em540_rtu_result.isError() and ts65a_tcp_result.isError()
+
+            wait_for_condition(
+                _all_downstream_paths_error,
+                timeout=30.0,
+                message="downstream paths did not return Modbus exceptions after upstream outage",
             )
 
             # Verify service is still healthy
