@@ -42,6 +42,15 @@ def _make_config(tcp_port: int, rtu_port: int):
         slave_id=1,
         update_timeout=0.5,  # Match production config
         log_level="DEBUG",
+        serial=SimpleNamespace(
+            enabled=False,
+            port="/dev/ttyUSB1",
+            baudrate=9600,
+            parity="N",
+            bytesize=8,
+            stopbits=1,
+            timeout=0.5,
+        ),
     )
 
 

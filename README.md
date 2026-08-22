@@ -23,15 +23,29 @@ readings (see `config-default.yaml`).
 ## Features
 
 - **Modbus/RTU to Modbus/TCP proxy:** Reads metering registers from the EM540 via Modbus/RTU and serves them over Modbus/TCP.
+- **Optional downstream Modbus/RTU serial bridge:** Slave data can also be exposed over a dedicated serial adapter.
 - **Fronius TS-65-A emulation:** Maps EM540 data to the Fronius TS-65-A register format for compatibility with Fronius inverters.
 - **Home Assistant integration:** Publishes measurements and diagnostics as MQTT sensors.
 - **High-rate acquisition:** Targets a 10 Hz (100 ms) polling interval for near real-time updates.
 - **Concurrent client support:** Serves multiple downstream clients without increasing load on the EM540 meter.
 - **Stale-data protection:** A circuit breaker blocks downstream Modbus responses when upstream data is stale or unavailable, preventing silent delivery of bad values.
 
+## Configuration
+
+The master remains mutually exclusive: set [em540_master.mode](/Users/willycastelnau/Projects/Personal/carlo-gavazzi-em540-bridge.worktrees/modbus-slave-serial-adapter-support/app/config.py:36) to either `tcp` or `serial`.
+If your serial path echoes transmitted bytes, enable [em540_master.handle_local_echo](/Users/willycastelnau/Projects/Personal/carlo-gavazzi-em540-bridge.worktrees/modbus-slave-serial-adapter-support/app/config.py:42).
+
+Each slave can expose the same internal model over multiple transports at once:
+
+- EM540 slave: TCP, RTU-over-TCP, optional serial RTU
+- TS65A slave: TCP, optional serial RTU
+
+See [config-default.yaml](/Users/willycastelnau/Projects/Personal/carlo-gavazzi-em540-bridge.worktrees/modbus-slave-serial-adapter-support/config-default.yaml) for the full sample layout.
+
 ## Requirements
 
 - **Hardware:** RS485 to Modbus/RTU physical converter to connect the EM540 meter to your network.
+- **Optional hardware:** Dedicated serial adapter for downstream slave RTU access.
 - **Meter configuration:** EM540 must be set to a baud rate of 57600 or higher to support a 100 ms read cycle.
 - **Software (Docker path):** Docker Engine with Docker Compose plugin.
 - **Software (manual path):** Python 3.14 and [uv](https://docs.astral.sh/uv/) for dependency management.
@@ -72,8 +86,9 @@ Optional helper commands:
 ## Development
 
 - Install all dependencies (including dev tools): `uv sync --no-install-project`
-- Run tests (parallel): `make test`
-- Run tests (serial): `make test-serial`
+- Run unit tests (parallel): `make test`
+- Run unit tests (serial): `make test-serial`
+- Run end-to-end integration tests: `make test-integration`
 - Lint: `make lint`
 - Format: `make format`
 

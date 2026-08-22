@@ -124,15 +124,18 @@ class Em540Master:
         self._last_reconnect_log_time: float = 0.0
 
         if config.mode == "serial":
-            # Create serial client
+            # Create serial client.
+            # reconnect_delay=None disables pymodbus's internal do_reconnect() task.
             self._client = AsyncModbusSerialClient(
                 port=config.serial_port,
                 framer=FramerType.RTU,
                 baudrate=config.baudrate,
                 parity=config.parity,
                 stopbits=config.stopbits,
+                handle_local_echo=config.handle_local_echo,
                 timeout=config.timeout,
                 retries=config.retries,
+                reconnect_delay=None,
             )
         elif config.mode == "tcp":
             # Create Modbus TCP client

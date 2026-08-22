@@ -11,8 +11,9 @@ help:
 	@echo "  up/start    - Start with docker-compose"
 	@echo "  down/stop   - Stop with docker-compose"
 	@echo "  logs        - View application logs"
-	@echo "  test        - Run tests in parallel (-n auto)"
-	@echo "  test-serial - Run all tests in serial"
+	@echo "  test        - Run unit tests in parallel (-n auto)"
+	@echo "  test-serial - Run unit tests in serial"
+	@echo "  test-integration - Run end-to-end integration tests"
 	@echo "  lint        - Run linting checks"
 	@echo "  format      - Format code"
 	@echo "  clean       - Clean up Docker resources"
@@ -60,11 +61,15 @@ lock:
 
 .PHONY: test
 test:
-	uv run pytest tests/ -v -n auto
+	uv run pytest tests/ -v -n auto -m "not integration"
 
 .PHONY: test-serial
 test-serial:
-	uv run pytest tests/ -v
+	uv run pytest tests/ -v -m "not integration"
+
+.PHONY: test-integration
+test-integration:
+	uv run pytest tests/integration/ -v -m integration
 
 .PHONY: lint
 lint:

@@ -42,6 +42,9 @@ testpaths = ["tests"]
 python_files = "*_test.py"
 python_classes = ""
 python_functions = "test_*"
+markers = [
+    "integration: end-to-end tests that require virtual serial devices and the running service",
+]
 
 [tool.hypothesis]
 database_backend = "directory"

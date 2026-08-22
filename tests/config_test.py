@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+from dataclasses import MISSING, asdict, is_dataclass
 from dataclasses import fields as dc_fields
 from unittest.mock import patch
 
@@ -99,6 +100,8 @@ def test_missing_optional_fields_get_defaults(tmp_path):
     assert state.em540_slave.rtu_port == 5002
     assert state.ts65a_slave.grid_feed_in_hard_limit == -5000.0
     assert state.mqtt.enabled is True
+    assert state.em540_slave.serial.enabled is False
+    assert state.ts65a_slave.serial.enabled is False
     assert state.pymodbus_log_level == "INFO"
     assert state.root_log_level == "INFO"
 
@@ -180,13 +183,37 @@ def _make_config(tmp_path, overrides: dict | None = None):
     """Build a valid config dict, apply overrides, write to tmp file, return path."""
     data = {
         "em540_master": {"mode": "tcp", "host": "10.0.0.1", "port": 502, "slave_id": 1, "log_level": "INFO"},
-        "em540_slave": {"host": "0.0.0.0", "rtu_port": 5002, "tcp_port": 5001, "slave_id": 1, "log_level": "INFO"},
+        "em540_slave": {
+            "host": "0.0.0.0",
+            "rtu_port": 5002,
+            "tcp_port": 5001,
+            "slave_id": 1,
+            "log_level": "INFO",
+            "serial": {
+                "enabled": False,
+                "port": "/dev/ttyUSB1",
+                "baudrate": 9600,
+                "parity": "N",
+                "bytesize": 8,
+                "stopbits": 1,
+                "timeout": 0.5,
+            },
+        },
         "ts65a_slave": {
             "port": 5003,
             "slave_id": 1,
             "log_level": "INFO",
             "grid_feed_in_hard_limit": -5000,
             "smoothing_num_points": 20,
+            "serial": {
+                "enabled": False,
+                "port": "/dev/ttyUSB2",
+                "baudrate": 9600,
+                "parity": "N",
+                "bytesize": 8,
+                "stopbits": 1,
+                "timeout": 0.5,
+            },
         },
         "mqtt": {"host": "broker.local", "port": 1883, "log_level": "INFO"},
         "pymodbus": {"log_level": "INFO"},
@@ -195,13 +222,10 @@ def _make_config(tmp_path, overrides: dict | None = None):
     if overrides:
         for dotted_key, value in overrides.items():
             parts = dotted_key.split(".")
-            if len(parts) == 2:
-                section, key = parts
-                if section not in data:
-                    data[section] = {}
-                data[section][key] = value
-            else:
-                data[parts[0]] = value
+            target = data
+            for part in parts[:-1]:
+                target = target.setdefault(part, {})
+            target[parts[-1]] = value
     p = tmp_path / "config.yaml"
     p.write_text(yaml.safe_dump(data))
     return str(p)
@@ -326,6 +350,44 @@ def test_valid_log_level_accepted(tmp_path, field, level):
     path = _make_config(tmp_path, {field: level})
     state = ConfigManager(path).load()
     assert state is not None
+
+
+# -- serial adapter validation --
+
+
+@pytest.mark.parametrize("section", ["em540_slave", "ts65a_slave"])
+def test_serial_config_can_be_enabled(tmp_path, section):
+    path = _make_config(
+        tmp_path,
+        {
+            f"{section}.serial.enabled": True,
+            f"{section}.serial.port": "/dev/ttyUSB9",
+            f"{section}.serial.baudrate": 115200,
+            f"{section}.serial.parity": "N",
+            f"{section}.serial.bytesize": 8,
+            f"{section}.serial.stopbits": 1,
+            f"{section}.serial.timeout": 0.25,
+        },
+    )
+    state = ConfigManager(path).load()
+    serial = getattr(state, section).serial
+    assert serial.enabled is True
+    assert serial.port == "/dev/ttyUSB9"
+    assert serial.baudrate == 115200
+
+
+@pytest.mark.parametrize("section", ["em540_slave", "ts65a_slave"])
+def test_invalid_serial_port_raises(tmp_path, section):
+    path = _make_config(tmp_path, {f"{section}.serial.enabled": True, f"{section}.serial.port": ""})
+    with pytest.raises(ConfigError, match="serial\\.port"):
+        ConfigManager(path).load()
+
+
+@pytest.mark.parametrize("section", ["em540_slave", "ts65a_slave"])
+def test_invalid_serial_parity_raises(tmp_path, section):
+    path = _make_config(tmp_path, {f"{section}.serial.enabled": True, f"{section}.serial.parity": "X"})
+    with pytest.raises(ConfigError, match="serial\\.parity"):
+        ConfigManager(path).load()
 
 
 # -- pymodbus / root log_level validation --
@@ -749,10 +811,26 @@ _SECTION_DATACLASSES: dict[str, type] = {
     "mqtt": MqttConfig,
 }
 
+
 # For each section, build a dict of field_name → default value.
+def _field_default(field):
+    if field.default is not MISSING:
+        return field.default
+    if field.default_factory is not MISSING:
+        return field.default_factory()
+    raise AssertionError(f"Field {field.name} has no default")
+
+
 _SECTION_DEFAULTS: dict[str, dict[str, object]] = {
-    section: {f.name: f.default for f in dc_fields(cls)} for section, cls in _SECTION_DATACLASSES.items()
+    section: {f.name: _field_default(f) for f in dc_fields(cls)} for section, cls in _SECTION_DATACLASSES.items()
 }
+
+
+def _yaml_safe_value(value):
+    if is_dataclass(value):
+        return asdict(value)
+    return value
+
 
 # Strategy: for each section, draw a random subset of field names to *include*.
 # Omitted fields should get their dataclass defaults after load().
@@ -783,7 +861,7 @@ def test_property_defaults_applied_for_missing_optional_fields(included):
     for section, field_names in included.items():
         section_dict: dict[str, object] = {}
         for name in field_names:
-            section_dict[name] = _SECTION_DEFAULTS[section][name]
+            section_dict[name] = _yaml_safe_value(_SECTION_DEFAULTS[section][name])
         data[section] = section_dict
 
     with tempfile.TemporaryDirectory() as tmp_dir:

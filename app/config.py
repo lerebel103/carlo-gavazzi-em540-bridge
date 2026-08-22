@@ -10,7 +10,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, is_dataclass
 from pathlib import Path
 
 import yaml
@@ -39,6 +39,7 @@ class Em540MasterConfig:
     parity: str = "N"
     bytesize: int = 8
     stopbits: int = 1
+    handle_local_echo: bool = False
     serial_port: str = "/dev/ttyUSB0"
     host: str = "192.168.102.240"
     port: int = 8899
@@ -50,6 +51,18 @@ class Em540MasterConfig:
 
 
 @dataclass
+class SlaveSerialConfig:
+    enabled: bool = False
+    port: str = "/dev/ttyUSB1"
+    baudrate: int = 9600
+    parity: str = "N"
+    bytesize: int = 8
+    stopbits: float = 1
+    timeout: float = 0.5
+    handle_local_echo: bool = False
+
+
+@dataclass
 class Em540SlaveConfig:
     host: str = "0.0.0.0"
     rtu_port: int = 5002
@@ -57,6 +70,7 @@ class Em540SlaveConfig:
     slave_id: int = 1
     update_timeout: float = 0.5
     log_level: str = "INFO"
+    serial: SlaveSerialConfig = field(default_factory=SlaveSerialConfig)
 
 
 @dataclass
@@ -68,6 +82,7 @@ class Ts65aSlaveConfig:
     grid_feed_in_hard_limit: float = -5000.0
     smoothing_num_points: int = 20
     log_level: str = "INFO"
+    serial: SlaveSerialConfig = field(default_factory=SlaveSerialConfig)
 
 
 @dataclass
@@ -194,9 +209,7 @@ class ConfigManager:
             if sub_config is None:
                 continue
 
-            for key, value in section_data.items():
-                if hasattr(sub_config, key):
-                    setattr(sub_config, key, value)
+            self._populate_config(sub_config, section_data)
 
         self._validate(state)
         self._state = state
@@ -206,6 +219,7 @@ class ConfigManager:
 
     _VALID_MODES = ("tcp", "serial")
     _VALID_LOG_LEVELS = ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL")
+    _VALID_SERIAL_PARITY = ("N", "E", "O", "M", "S")
 
     def _validate(self, state: AppState) -> None:
         """Validate populated AppState; raise ConfigError on first failure."""
@@ -248,6 +262,9 @@ class ConfigManager:
             if value not in self._VALID_LOG_LEVELS:
                 raise ConfigError(f"{name} must be one of {self._VALID_LOG_LEVELS}, got '{value}'")
 
+        self._validate_serial_config("em540_slave.serial", state.em540_slave.serial)
+        self._validate_serial_config("ts65a_slave.serial", state.ts65a_slave.serial)
+
         # 5. grid_feed_in_hard_limit  (<= 0)
         if state.ts65a_slave.grid_feed_in_hard_limit > 0:
             raise ConfigError(
@@ -261,6 +278,33 @@ class ConfigManager:
                 f"1 <= value <= 600, "
                 f"got {state.ts65a_slave.smoothing_num_points}"
             )
+
+    def _populate_config(self, target, section_data: dict) -> None:
+        for key, value in section_data.items():
+            if not hasattr(target, key):
+                continue
+            current_value = getattr(target, key)
+            if is_dataclass(current_value) and isinstance(value, dict):
+                self._populate_config(current_value, value)
+            else:
+                setattr(target, key, value)
+
+    def _validate_serial_config(self, name: str, serial: SlaveSerialConfig) -> None:
+        if not serial.enabled:
+            return
+
+        if not serial.port:
+            raise ConfigError(f"{name}.port must be a non-empty string when enabled")
+        if serial.baudrate <= 0:
+            raise ConfigError(f"{name}.baudrate must be > 0, got {serial.baudrate}")
+        if serial.parity not in self._VALID_SERIAL_PARITY:
+            raise ConfigError(f"{name}.parity must be one of {self._VALID_SERIAL_PARITY}, got '{serial.parity}'")
+        if not (5 <= serial.bytesize <= 8):
+            raise ConfigError(f"{name}.bytesize must satisfy 5 <= bytesize <= 8, got {serial.bytesize}")
+        if serial.stopbits not in (1, 1.5, 2):
+            raise ConfigError(f"{name}.stopbits must be one of (1, 1.5, 2), got {serial.stopbits}")
+        if serial.timeout <= 0:
+            raise ConfigError(f"{name}.timeout must be > 0, got {serial.timeout}")
 
     # -- persistence ---------------------------------------------------------
 

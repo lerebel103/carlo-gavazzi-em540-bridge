@@ -9,18 +9,30 @@ from app.fronius.ts65a_slave_bridge import Ts65aSlaveBridge, _build_ts65a_simdat
 
 class TestTs65aSlaveBridge(unittest.TestCase):
     def _make_config(self):
-        config = MagicMock()
-        config.host = "127.0.0.1"
-        config.port = 0
-        config.slave_id = 1
-        config.update_timeout = 5.0
-        config.log_level = "WARNING"
-        config.smoothing_num_points = 3
-        config.grid_feed_in_hard_limit = -1000
-        return config
+        return SimpleNamespace(
+            host="127.0.0.1",
+            port=0,
+            slave_id=1,
+            update_timeout=5.0,
+            log_level="WARNING",
+            smoothing_num_points=3,
+            grid_feed_in_hard_limit=-1000,
+            serial=SimpleNamespace(
+                enabled=False,
+                port="/dev/ttyUSB2",
+                baudrate=9600,
+                parity="N",
+                bytesize=8,
+                stopbits=1,
+                timeout=0.5,
+            ),
+        )
 
     def _build_bridge(self):
-        with patch("app.fronius.ts65a_slave_bridge.ModbusTcpServer") as mock_server_cls:
+        with (
+            patch("app.fronius.ts65a_slave_bridge.ModbusTcpServer") as mock_server_cls,
+            patch("app.fronius.ts65a_slave_bridge.ModbusSerialServer") as mock_serial_server_cls,
+        ):
             # Pre-build real SimCore so the mock server exposes it via .context
             from pymodbus.simulator.simcore import SimCore
 
@@ -30,6 +42,7 @@ class TestTs65aSlaveBridge(unittest.TestCase):
             mock_server = MagicMock()
             mock_server.context = real_sim_core
             mock_server_cls.return_value = mock_server
+            mock_serial_server_cls.return_value = MagicMock(context=real_sim_core)
             bridge = Ts65aSlaveBridge(self._make_config())
 
         return bridge, mock_server
@@ -98,6 +111,38 @@ class TestTs65aSlaveBridge(unittest.TestCase):
         self.assertEqual(len(written), num_regs)
         # At least some registers should be non-zero after writing real meter data
         self.assertTrue(any(v != 0 for v in written), "Register writes should produce non-zero values")
+
+    def test_serial_server_shares_context_when_enabled(self):
+        bridge_config = self._make_config()
+        bridge_config.serial = SimpleNamespace(
+            enabled=True,
+            port="/dev/ttyUSB7",
+            baudrate=115200,
+            parity="N",
+            bytesize=8,
+            stopbits=1,
+            timeout=0.25,
+            handle_local_echo=False,
+        )
+
+        with (
+            patch("app.fronius.ts65a_slave_bridge.ModbusTcpServer") as mock_server_cls,
+            patch("app.fronius.ts65a_slave_bridge.ModbusSerialServer") as mock_serial_server_cls,
+        ):
+            from pymodbus.simulator.simcore import SimCore
+
+            real_device = _build_ts65a_simdata(bridge_config.slave_id)
+            real_sim_core = SimCore(real_device)
+
+            mock_server = MagicMock()
+            mock_server.context = real_sim_core
+            serial_mock = MagicMock()
+            serial_mock.context = real_sim_core
+            mock_server_cls.return_value = mock_server
+            mock_serial_server_cls.return_value = serial_mock
+            bridge = Ts65aSlaveBridge(bridge_config)
+
+        self.assertIs(bridge._serial_server.context, bridge._server.context)
 
     def test_voltage_phase_ca_uses_phase_c_line_line_voltage(self):
         bridge, _ = self._build_bridge()

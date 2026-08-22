@@ -4,7 +4,7 @@ from threading import Event, Lock, Thread
 from typing import Callable
 
 from pymodbus import FramerType
-from pymodbus.server import ModbusTcpServer
+from pymodbus.server import ModbusSerialServer, ModbusTcpServer
 from pymodbus.simulator.simdata import DataType, SimData
 from pymodbus.simulator.simdevice import SimDevice
 
@@ -151,7 +151,26 @@ class Em540Slave(MeterDataListener):
             trace_connect=self._tcp_trace_connect,
         )
         self._tcp_server.context = self._rtu_server.context
+        self._serial_server: ModbusSerialServer | None = None
+        if self._config.serial.enabled:
+            self._serial_server = ModbusSerialServer(
+                framer=FramerType.RTU,
+                context=device,
+                port=self._config.serial.port,
+                baudrate=self._config.serial.baudrate,
+                parity=self._config.serial.parity,
+                bytesize=self._config.serial.bytesize,
+                stopbits=self._config.serial.stopbits,
+                timeout=self._config.serial.timeout,
+                handle_local_echo=self._config.serial.handle_local_echo,
+                trace_pdu=self._pdu_helper.on_pdu,
+                trace_connect=self._serial_trace_connect,
+            )
+            self._serial_server.context = self._rtu_server.context
         self._server_loop: asyncio.AbstractEventLoop | None = None
+        self._servers: list[ModbusTcpServer | ModbusSerialServer] = [self._rtu_server, self._tcp_server]
+        if self._serial_server is not None:
+            self._servers.append(self._serial_server)
 
         # Direct access to the SimRuntime register array for lock-based writes.
         # This avoids routing writes through the server event loop (which caused
@@ -173,6 +192,7 @@ class Em540Slave(MeterDataListener):
         self._rtu_reaper.install()
         self._tcp_reaper = IdleConnectionReaper(self._tcp_server, server_label="em540-tcp")
         self._tcp_reaper.install()
+        self._reapers: list[IdleConnectionReaper] = [self._rtu_reaper, self._tcp_reaper]
 
     def _rtu_trace_connect(self, connect: bool) -> None:
         logger.debug("Client connection to RTU server: %s", connect)
@@ -196,6 +216,13 @@ class Em540Slave(MeterDataListener):
             logger.info("Downstream TCP client disconnected (total: %d).", self._stats.tcp_client_count)
         self._stats.changed()
 
+    def _serial_trace_connect(self, connect: bool) -> None:
+        logger.debug("Client connection to serial server: %s", connect)
+        if connect:
+            logger.info("Downstream serial client connected.")
+        else:
+            logger.info("Downstream serial client disconnected.")
+
     def add_stats_listener(self, listener: Callable[[EM540SlaveStats], None]) -> None:
         self._stats.add_listener(listener)
 
@@ -212,11 +239,10 @@ class Em540Slave(MeterDataListener):
 
         async def _run_servers():
             try:
-                await self._rtu_server.serve_forever(background=True)
-                await self._tcp_server.serve_forever(background=True)
-                # Start idle connection reapers now that servers are listening
-                self._rtu_reaper.start(self._server_loop)
-                self._tcp_reaper.start(self._server_loop)
+                for server in self._servers:
+                    await server.serve_forever(background=True)
+                for reaper in self._reapers:
+                    reaper.start(self._server_loop)
             except Exception as e:
                 startup_error.append(e)
             finally:
@@ -353,8 +379,15 @@ class Em540Slave(MeterDataListener):
 
     def stop(self) -> None:
         """Stop downstream servers and clean up the dedicated event loop."""
-        self._rtu_reaper.stop()
-        self._tcp_reaper.stop()
+        for reaper in self._reapers:
+            reaper.stop()
+        for server in self._servers:
+            close = getattr(server, "close", None)
+            if callable(close):
+                try:
+                    close()
+                except Exception:
+                    logger.debug("Failed to close downstream server", exc_info=True)
         loop = self._server_loop
         if loop is not None and loop.is_running():
             loop.call_soon_threadsafe(loop.stop)
