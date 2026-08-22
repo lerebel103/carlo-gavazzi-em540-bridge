@@ -1,11 +1,12 @@
 import asyncio
+import copy
 import logging
 import struct
 from threading import Event, Lock, Thread
 from typing import Callable
 
 from pymodbus import FramerType
-from pymodbus.server import ModbusTcpServer
+from pymodbus.server import ModbusSerialServer, ModbusTcpServer
 from pymodbus.simulator.simdata import DataType, SimData
 from pymodbus.simulator.simdevice import SimDevice
 
@@ -192,9 +193,28 @@ class Ts65aSlaveBridge(MeterDataListener):
             trace_pdu=self._pdu_helper.on_pdu,
             trace_connect=self._trace_connect,
         )
+        self._serial_server: ModbusSerialServer | None = None
+        if self._config.serial.enabled:
+            self._serial_server = ModbusSerialServer(
+                framer=FramerType.RTU,
+                context=device,
+                port=self._config.serial.port,
+                baudrate=self._config.serial.baudrate,
+                parity=self._config.serial.parity,
+                bytesize=self._config.serial.bytesize,
+                stopbits=self._config.serial.stopbits,
+                timeout=self._config.serial.timeout,
+                handle_local_echo=self._config.serial.handle_local_echo,
+                trace_pdu=self._pdu_helper.on_pdu,
+                trace_connect=self._serial_trace_connect,
+            )
+            self._serial_server.context = self._server.context
         self._dynamic_start_address: int = 40071
         self._dynamic_register_buffer: list[int] = [0] * (len(self._dynamic_values()) * 2)
         self._server_loop: asyncio.AbstractEventLoop | None = None
+        self._servers: list[ModbusTcpServer | ModbusSerialServer] = [self._server]
+        if self._serial_server is not None:
+            self._servers.append(self._serial_server)
 
         # Direct access to the SimRuntime register array for lock-based writes.
         # This avoids routing writes through the server event loop (which caused
@@ -224,6 +244,13 @@ class Ts65aSlaveBridge(MeterDataListener):
             logger.info("Downstream TS65A client disconnected (total: %d).", self._stats.tcp_client_count)
         self._stats.changed()
 
+    def _serial_trace_connect(self, connect):
+        logger.debug("Client connection to serial server: %s", connect)
+        if connect:
+            logger.info("Downstream TS65A serial client connected.")
+        else:
+            logger.info("Downstream TS65A serial client disconnected.")
+
     def add_stats_listener(self, listener: Callable[["Ts65aSlaveStats"], None]):
         self._stats.add_listener(listener)
 
@@ -238,8 +265,8 @@ class Ts65aSlaveBridge(MeterDataListener):
 
         async def _run_server():
             try:
-                await self._server.serve_forever(background=True)
-                # Start idle connection reaper now that the server is listening
+                for server in self._servers:
+                    await server.serve_forever(background=True)
                 self._reaper.start(self._server_loop)
             except Exception as e:
                 startup_error.append(e)
@@ -263,6 +290,13 @@ class Ts65aSlaveBridge(MeterDataListener):
     def stop(self):
         """Stop the server and clean up the dedicated event loop."""
         self._reaper.stop()
+        for server in self._servers:
+            close = getattr(server, "close", None)
+            if callable(close):
+                try:
+                    close()
+                except Exception:
+                    logger.debug("Failed to close downstream TS65A server", exc_info=True)
         if self._server_loop is not None and self._server_loop.is_running():
             self._server_loop.call_soon_threadsafe(self._server_loop.stop)
         self._server_loop = None
@@ -325,6 +359,7 @@ class Ts65aSlaveBridge(MeterDataListener):
         )
 
     async def new_data(self, data: meter_data.MeterData):
+        data = copy.deepcopy(data)
         registers = self._dynamic_register_buffer
         index = 0
 

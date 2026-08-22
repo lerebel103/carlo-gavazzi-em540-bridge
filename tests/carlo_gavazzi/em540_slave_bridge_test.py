@@ -8,6 +8,7 @@ SimData entries and writes register values directly into the register array.
 
 import asyncio
 import unittest
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 from pymodbus.simulator.simdevice import SimDevice
@@ -25,14 +26,23 @@ class TestEm540Slave(unittest.TestCase):
     """Validates: Requirements 12.1, 12.2, 12.3, 12.4"""
 
     def _make_config(self):
-        config = MagicMock()
-        config.host = "127.0.0.1"
-        config.rtu_port = 5020
-        config.tcp_port = 5021
-        config.slave_id = 1
-        config.update_timeout = 5.0
-        config.log_level = "WARNING"
-        return config
+        return SimpleNamespace(
+            host="127.0.0.1",
+            rtu_port=5020,
+            tcp_port=5021,
+            slave_id=1,
+            update_timeout=5.0,
+            log_level="WARNING",
+            serial=SimpleNamespace(
+                enabled=False,
+                port="/dev/ttyUSB1",
+                baudrate=9600,
+                parity="N",
+                bytesize=8,
+                stopbits=1,
+                timeout=0.5,
+            ),
+        )
 
     def _build_slave(self, frame=None):
         """Construct Em540Slave with ModbusTcpServer patched out (but real SimDevice/SimCore).
@@ -51,7 +61,10 @@ class TestEm540Slave(unittest.TestCase):
         real_device = SimDevice(config.slave_id, simdata=simdata)
         real_sim_core = SimCore(real_device)
 
-        with patch("app.carlo_gavazzi.em540_slave_bridge.ModbusTcpServer") as mock_server_cls:
+        with (
+            patch("app.carlo_gavazzi.em540_slave_bridge.ModbusTcpServer") as mock_server_cls,
+            patch("app.carlo_gavazzi.em540_slave_bridge.ModbusSerialServer") as mock_serial_server_cls,
+        ):
             rtu_mock = MagicMock()
             rtu_mock.context = real_sim_core
 
@@ -59,6 +72,7 @@ class TestEm540Slave(unittest.TestCase):
             tcp_mock.context = real_sim_core
 
             mock_server_cls.side_effect = [rtu_mock, tcp_mock]
+            mock_serial_server_cls.return_value = MagicMock(context=real_sim_core)
             slave = Em540Slave(config, frame)
 
         return slave, rtu_mock
@@ -75,6 +89,42 @@ class TestEm540Slave(unittest.TestCase):
 
         # Both server references point to the same context object
         self.assertIs(slave._tcp_server.context, slave._rtu_server.context)
+
+    def test_serial_server_shares_context_when_enabled(self):
+        frame = Em540Frame()
+        config = self._make_config()
+        config.serial = SimpleNamespace(
+            enabled=True,
+            port="/dev/ttyUSB9",
+            baudrate=115200,
+            parity="N",
+            bytesize=8,
+            stopbits=1,
+            timeout=0.25,
+            handle_local_echo=False,
+        )
+
+        from pymodbus.simulator.simcore import SimCore
+
+        simdata = _build_simdata(frame)
+        real_device = SimDevice(config.slave_id, simdata=simdata)
+        real_sim_core = SimCore(real_device)
+
+        with (
+            patch("app.carlo_gavazzi.em540_slave_bridge.ModbusTcpServer") as mock_server_cls,
+            patch("app.carlo_gavazzi.em540_slave_bridge.ModbusSerialServer") as mock_serial_server_cls,
+        ):
+            rtu_mock = MagicMock()
+            rtu_mock.context = real_sim_core
+            tcp_mock = MagicMock()
+            tcp_mock.context = real_sim_core
+            serial_mock = MagicMock()
+            serial_mock.context = real_sim_core
+            mock_server_cls.side_effect = [rtu_mock, tcp_mock]
+            mock_serial_server_cls.return_value = serial_mock
+            slave = Em540Slave(config, frame)
+
+        self.assertIs(slave._serial_server.context, slave._rtu_server.context)
 
     # --- Requirement 12.4: REG_OFFSET is 0 ---
 

@@ -9,6 +9,8 @@ em540_master:
   parity: N
   bytesize: 8
   stopbits: 1
+  # Enable this when the serial adapter echoes transmitted bytes back to the master
+  handle_local_echo: false
   serial_port: /dev/ttyUSB0
   # --------------------------------------------------------------------------
 
@@ -29,7 +31,8 @@ em540_master:
   log_level: INFO
 
 em540_slave:
-  # IP on which the data is proxied out by this application
+  # The EM540 slave data model can be served over TCP, RTU-over-TCP, and/or
+  # an optional serial adapter at the same time.
   host: 0.0.0.0
   # Port for Modbus RTU over TCP
   rtu_port: 5002
@@ -41,11 +44,22 @@ em540_slave:
   update_timeout: 0.5
   # Log level info for this component
   log_level: INFO
+  # Optional Modbus/RTU serial adapter (disabled by default)
+  serial:
+    enabled: false
+    port: /dev/ttyUSB1
+    baudrate: 9600
+    parity: N
+    bytesize: 8
+    stopbits: 1
+    timeout: 0.5
+    handle_local_echo: false
 
 ts65a_slave:
-  # IP on which the data is proxied out by this application
+  # The TS65A slave data model can be served over TCP and/or an optional
+  # serial adapter at the same time.
   host: 0.0.0.0
-  # Port for Modbus RTU over TCP
+  # Port for Modbus TCP
   port: 5003
   # Slave ID assumed by the emulated slave
   slave_id: 1
@@ -57,6 +71,16 @@ ts65a_slave:
   smoothing_num_points: 20
   # Log level info for this component
   log_level: INFO
+  # Optional Modbus/RTU serial adapter (disabled by default)
+  serial:
+    enabled: false
+    port: /dev/ttyUSB2
+    baudrate: 9600
+    parity: N
+    bytesize: 8
+    stopbits: 1
+    timeout: 0.5
+    handle_local_echo: false
 
 mqtt:
   # Whether to enable MQTT integration from the top level.
