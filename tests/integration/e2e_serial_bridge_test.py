@@ -30,6 +30,7 @@ from .modbus_client import (
     wait_for_port,
 )
 from .orchestration import (
+    wait_for_condition,
     wait_for_downstream_data,
 )
 from .serial_helpers import ModbusRtuServer
@@ -264,19 +265,41 @@ def test_end_to_end_serial_and_tcp_clients_observe_expected_data() -> None:
             clients = DownstreamClients(em540_tcp_port, em540_rtu_port, ts65a_tcp_port)
             clients.connect_all()
 
-            # Wait for downstream to start serving non-zero data
-            # This validates that the service is reading from upstream and serving to downstream
-            wait_for_downstream_data(clients.em540_tcp, address=0x000B, timeout=60.0)
+            # Wait for downstream to start serving non-zero dynamic data.
+            # Dynamic block readiness is less timing-sensitive than static overlays on CI.
+            wait_for_downstream_data(clients.em540_tcp, address=0x0000, timeout=60.0)
 
-            # Validate EM540 data on both TCP and RTU paths
             em540_validator = Em540Validator(upstream.frame)
-            em540_validator.validate_tcp_client(clients.em540_tcp)
-            em540_validator.validate_rtu_client(clients.em540_rtu)
 
-            # Validate TS65A data on TCP path
+            def _em540_validated() -> bool:
+                try:
+                    em540_validator.validate_tcp_client(clients.em540_tcp)
+                    em540_validator.validate_rtu_client(clients.em540_rtu)
+                except AssertionError:
+                    return False
+                return True
+
+            wait_for_condition(
+                _em540_validated,
+                timeout=120.0,
+                message="downstream EM540 slaves did not converge to expected values within timeout",
+            )
+
             ts65a_validator = Ts65aValidator(upstream.frame)
-            ts65a_validator.validate_tcp_client(clients.ts65a_tcp)
-            ts65a_validator.validate_signature_registers(clients.ts65a_tcp)
+
+            def _ts65a_validated() -> bool:
+                try:
+                    ts65a_validator.validate_tcp_client(clients.ts65a_tcp)
+                    ts65a_validator.validate_signature_registers(clients.ts65a_tcp)
+                except AssertionError:
+                    return False
+                return True
+
+            wait_for_condition(
+                _ts65a_validated,
+                timeout=120.0,
+                message="downstream TS65A slave did not converge to expected values within timeout",
+            )
 
             # Verify service is still healthy
             service.assert_running()
