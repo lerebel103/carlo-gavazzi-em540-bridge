@@ -76,7 +76,15 @@ class SerialCable:
                         return
                     if not data:
                         continue
-                    self._write_all(key.data, data)
+                    try:
+                        self._write_all(key.data, data)
+                    except OSError as exc:
+                        # Symmetric to reads: writes can also see EIO/ENXIO
+                        # while the opposite slave endpoint is not open yet.
+                        if exc.errno in (errno.EIO, errno.ENXIO):
+                            time.sleep(0.01)
+                            continue
+                        return
         finally:
             selector.close()
 

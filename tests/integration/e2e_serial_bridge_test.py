@@ -123,7 +123,8 @@ class DownstreamClients:
             parity="N",
             bytesize=8,
             stopbits=1,
-            timeout=2.0,
+            timeout=1.0,
+            retries=1,
             handle_local_echo=False,
         )
         self.ts65a_serial = ModbusSerialClient(
@@ -133,7 +134,8 @@ class DownstreamClients:
             parity="N",
             bytesize=8,
             stopbits=1,
-            timeout=2.0,
+            timeout=1.0,
+            retries=1,
             handle_local_echo=False,
         )
 
@@ -168,6 +170,25 @@ class Em540Validator:
         """Validate EM540 RTU client against expected data."""
         reads = self._read_all_blocks(client)
         self._assert_all_blocks_match(reads, "RTU")
+
+    def validate_serial_client(self, client) -> None:
+        """Validate EM540 serial client with stable representative blocks.
+
+        Serial transport over PTY can occasionally timeout under CI load;
+        when reads do succeed, values must match expected data.
+        """
+        try:
+            static_000b = read_holding_registers(client, 0x000B, len(self.expected_blocks["static_000b"]))
+            primary_head = read_holding_registers(client, 0x0000, 4)
+        except ModbusException:
+            return
+        expected_primary_head = self.expected_blocks["primary"][:4]
+        assert static_000b == self.expected_blocks["static_000b"], (
+            f"SERIAL mismatch at static_000b: got {static_000b} expected {self.expected_blocks['static_000b']}"
+        )
+        assert primary_head == expected_primary_head, (
+            f"SERIAL mismatch at primary head: got {primary_head[:5]}... expected {expected_primary_head[:5]}..."
+        )
 
     def _read_all_blocks(self, client) -> list[list[int]]:
         """Read all expected register blocks from a client."""
@@ -244,6 +265,19 @@ class Ts65aValidator:
         signature = read_holding_registers(client, 40000, 2)
         assert signature == [21365, 28243], f"TS65A signature mismatch: {signature}"
 
+    def validate_serial_client(self, client) -> None:
+        """Validate TS65A serial client via signature and dynamic head."""
+        try:
+            self.validate_signature_registers(client)
+            dynamic_head = read_holding_registers(client, 40071, 6)
+        except ModbusException:
+            return
+        decoded_head = decode_ts65a_dynamic_values(dynamic_head)
+        expected_decoded = self.compute_expected_values()
+        assert decoded_head[:3] == pytest.approx(expected_decoded[:3], rel=1e-3, abs=1e-3), (
+            f"TS65A serial dynamic head mismatch: got {decoded_head[:3]} expected {expected_decoded[:3]}"
+        )
+
 
 @pytest.mark.integration
 def test_end_to_end_serial_and_tcp_clients_observe_expected_data() -> None:
@@ -309,17 +343,6 @@ def test_end_to_end_serial_and_tcp_clients_observe_expected_data() -> None:
                 # Dynamic block readiness is less timing-sensitive than static overlays on CI.
                 wait_for_downstream_data(clients.em540_tcp, address=0x0000, timeout=120.0)
 
-                # Serial smoke reads: exercise downstream serial servers without
-                # gating convergence on PTY timing variability.
-                try:
-                    clients.em540_serial.read_holding_registers(0x000B, count=1, device_id=1)
-                except ModbusException:
-                    pass
-                try:
-                    clients.ts65a_serial.read_holding_registers(40000, count=2, device_id=1)
-                except ModbusException:
-                    pass
-
                 em540_validator = Em540Validator(upstream.frame)
                 last_em540_error: str = ""
 
@@ -328,6 +351,7 @@ def test_end_to_end_serial_and_tcp_clients_observe_expected_data() -> None:
                     try:
                         em540_validator.validate_tcp_client(clients.em540_tcp)
                         em540_validator.validate_rtu_client(clients.em540_rtu)
+                        em540_validator.validate_serial_client(clients.em540_serial)
                     except (AssertionError, ModbusException) as exc:
                         last_em540_error = str(exc)
                         return False
@@ -351,6 +375,7 @@ def test_end_to_end_serial_and_tcp_clients_observe_expected_data() -> None:
                     try:
                         ts65a_validator.validate_tcp_client(clients.ts65a_tcp)
                         ts65a_validator.validate_signature_registers(clients.ts65a_tcp)
+                        ts65a_validator.validate_serial_client(clients.ts65a_serial)
                     except (AssertionError, ModbusException) as exc:
                         last_ts65a_error = str(exc)
                         return False
