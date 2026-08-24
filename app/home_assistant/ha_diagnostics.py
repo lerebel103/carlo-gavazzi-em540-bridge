@@ -531,7 +531,7 @@ class HADiagnostics:
 
     def set_em540_master_stats(self, stats: Em540MasterStats):
         self._em540_master_stats = stats
-        now = time.time()
+        now = time.monotonic()
         self._master_counter += 1
         if self._last_master_rate_timestamp == 0:
             self._last_master_rate_timestamp = now

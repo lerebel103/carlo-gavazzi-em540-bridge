@@ -43,7 +43,7 @@ def test_master_read_rate_is_derived_from_master_stats_callback_timing():
     diagnostics = HADiagnostics(topic_prefix="test")
     stats = Em540MasterStats()
 
-    with patch("app.home_assistant.ha_diagnostics.time.time", side_effect=[100.0, 106.0]):
+    with patch("app.home_assistant.ha_diagnostics.time.monotonic", side_effect=[100.0, 106.0]):
         diagnostics.set_em540_master_stats(stats)
         diagnostics.set_em540_master_stats(stats)
 

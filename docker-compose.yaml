@@ -7,6 +7,7 @@ services:
         VERSION: ${VERSION:-dev}
     container_name: carlo-gavazzi-em540-bridge
     restart: unless-stopped
+    init: true
     volumes:
       - ./config.yaml:/etc/carlo-gavazzi-em540-bridge/config.yaml
     environment:
@@ -14,6 +15,18 @@ services:
     # Real-time performance optimizations
     cap_add:
       - SYS_NICE  # Allow setting high scheduler priority
+    # Give this container stronger CPU scheduling weight versus other containers.
+    # (Default is 1024; higher means preferred CPU time under contention.)
+    cpu_shares: 4096
+    # Keep this container less likely to be OOM-killed than non-critical workloads.
+    # Valid range: -1000 (protect most) .. 1000 (kill first).
+    oom_score_adj: -900
+    # Allow high-priority scheduling knobs from inside the container.
+    # Host/kernel policy still applies (see notes below).
+    ulimits:
+      rtprio: 99
+      nice: -20
+      memlock: -1
     ports:
       - 5001:5001  # Modbus TCP
       - 5002:5002  # Modbus RTU-over-TCP
@@ -21,6 +34,9 @@ services:
     # Resource limits — steady-state RSS is ~50-60MB. The 128M cap ensures
     # the OOM killer fires early if there's a leak, before the Pi is under
     # system-wide memory pressure that would freeze the host.
+    # Note: `deploy.resources` is enforced in Swarm mode. For plain
+    # `docker compose up`, use service-level `cpus`/`mem_limit` if you need
+    # hard limits there as well.
     deploy:
       resources:
         limits:
@@ -42,6 +58,21 @@ services:
       timeout: 5s
       retries: 3
       start_period: 10s
+    # Explicitly run the bridge at high process priority inside the container.
+    # This requires SYS_NICE + appropriate ulimits above.
+    command:
+      - nice
+      - -n
+      - "-20"
+      - uv
+      - run
+      - --frozen
+      - --no-sync
+      - python
+      - -m
+      - app
+      - --config
+      - /etc/carlo-gavazzi-em540-bridge/config.yaml
     # Uncomment the following for development/debugging (interactive shell access)
     # stdin_open: true
     # tty: true
