@@ -27,6 +27,38 @@ def test_em540_tcp_client_stats_are_published_in_diagnostics_payload():
     assert payload_obj["em540_tcp_client_disconnect_count"] == 11
 
 
+def test_master_timing_payload_prefers_worst_case_values_over_last_cycle_values():
+    diagnostics = HADiagnostics(topic_prefix="test")
+
+    master_stats = Em540MasterStats()
+    master_stats.read_duration_ms_last = 9.5
+    master_stats.read_duration_ms_max = 14.0
+    master_stats.modbus_read_duration_ms_last = 4.0
+    master_stats.modbus_read_duration_ms_max = 8.5
+    master_stats.post_read_processing_ms_last = 1.5
+    master_stats.post_read_processing_ms_max = 3.25
+    master_stats.non_read_processing_ms_last = 0.75
+    master_stats.non_read_processing_ms_max = 2.5
+    master_stats.tick_headroom_ms_last = 42.0
+    master_stats.tick_headroom_ms_min = 17.5
+    diagnostics.set_em540_master_stats(master_stats)
+
+    with patch.dict("sys.modules", {"uptime": SimpleNamespace(uptime=lambda: 1)}):
+        _, payload = diagnostics.mqtt_data()
+    payload_obj = json.loads(payload)
+
+    assert payload_obj["rs485_master_read_duration"] == 14.0
+    assert payload_obj["rs485_master_read_duration_max"] == 14.0
+    assert payload_obj["rs485_modbus_read_duration"] == 8.5
+    assert payload_obj["rs485_modbus_read_duration_max"] == 8.5
+    assert payload_obj["rs485_post_read_processing_duration"] == 3.25
+    assert payload_obj["rs485_post_read_processing_duration_max"] == 3.25
+    assert payload_obj["rs485_other_processing_duration"] == 2.5
+    assert payload_obj["rs485_other_processing_duration_max"] == 2.5
+    assert payload_obj["rs485_tick_headroom"] == 17.5
+    assert payload_obj["rs485_tick_headroom_min"] == 17.5
+
+
 def test_diagnostics_payload_contains_all_declared_sensor_keys():
     diagnostics = HADiagnostics(topic_prefix="test")
 
