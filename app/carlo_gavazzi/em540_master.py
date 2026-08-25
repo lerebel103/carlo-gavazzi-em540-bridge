@@ -14,7 +14,6 @@ from pymodbus.exceptions import ModbusIOException
 from app.carlo_gavazzi.em540_data import (
     _DYNAMIC_PRIMARY_BLOCK_ADDR,
     _ENERGY_BLOCK_ADDR,
-    ENERGY_BLOCK_CHUNK_SIZE,
     ENERGY_BLOCK_TOTAL_SIZE,
 )
 from app.carlo_gavazzi.meter_data import MeterData
@@ -384,76 +383,18 @@ class Em540Master:
             self._update_timing_stats(cycle_start, modbus_read_ms, post_read_processing_ms)
             return False
 
-        # --- Chunked energy block read logic (best-effort, non-blocking) ---
-        # The energy block (0x0500, 64 regs) is split into chunks that are read
-        # on alternating ticks with primary-only rest ticks to allow jitter recovery.
-        #
-        # Scheduling:
-        #   - When skip_n_read fires, we read chunk 0 on that tick.
-        #   - After each chunk read, we rest for one tick (primary-only) before
-        #     reading the next chunk. This gives lighter ticks room to absorb jitter.
-        #   - Pattern: chunk0, rest, chunk1, rest, ..., chunkN, then idle.
-        #
-        # Energy chunk failures do NOT abort the tick — primary data still publishes.
-        # The chunk sequence resets on failure and retries on the next skip-counter fire.
-
-        energy_reg_desc = frame.dynamic_reg_map[_ENERGY_BLOCK_ADDR]
-        skip_n_read = energy_reg_desc.skip_n_read
-        num_chunks = (ENERGY_BLOCK_TOTAL_SIZE + ENERGY_BLOCK_CHUNK_SIZE - 1) // ENERGY_BLOCK_CHUNK_SIZE
-
-        # Determine whether the energy block's skip counter would fire this tick
-        energy_skip_fires = (
-            self._dyn_reg_read_counter == 1 or skip_n_read == 0 or (self._dyn_reg_read_counter % (skip_n_read + 1)) == 0
-        )
-
-        # If a chunk is pending from a previous tick, handle rest/read alternation
-        if self._energy_chunk_pending > 0:
-            if self._energy_chunk_rest:
-                # Rest tick — skip the chunk read, just backfill and let primary run alone
-                self._energy_chunk_rest = False
-                self._backfill_energy_from_front(frame)
-            else:
-                # Read tick — seed from front then read the pending chunk
-                self._backfill_energy_from_front(frame)
-                chunk_idx = self._energy_chunk_pending
-                energy_read_ok = await self._read_energy_chunk(frame, chunk_index=chunk_idx)
-                if energy_read_ok:
-                    next_chunk = chunk_idx + 1
-                    if next_chunk < num_chunks:
-                        self._energy_chunk_pending = next_chunk
-                        self._energy_chunk_rest = True  # rest before next chunk
-                    else:
-                        self._energy_chunk_pending = -1
-                        self._energy_chunk_rest = False
-                        if not self._energy_initial_read_complete:
-                            self._energy_initial_read_complete = True
-                            logger.info("Initial full energy register read complete.")
-                else:
-                    # Chunk failed — reset sequence but DON'T abort the tick.
-                    # Primary data already read successfully above.
-                    self._energy_chunk_pending = -1
-                    self._energy_chunk_rest = False
-                    self._backfill_energy_from_front(frame)
-        elif energy_skip_fires:
-            # Start a new chunked energy read: read chunk 0 this tick.
-            # Seed the back buffer's energy values from front first so that any chunks
-            # not yet overwritten (1..N-1) reflect the latest known values.
-            self._backfill_energy_from_front(frame)
-            energy_read_ok = await self._read_energy_chunk(frame, chunk_index=0)
-            if energy_read_ok:
-                if num_chunks > 1:
-                    self._energy_chunk_pending = 1
-                    self._energy_chunk_rest = True  # rest before chunk 1
-                else:
-                    self._energy_chunk_pending = -1
-                    if not self._energy_initial_read_complete:
-                        self._energy_initial_read_complete = True
-                        logger.info("Initial full energy register read complete.")
-            else:
-                self._energy_chunk_pending = -1
-                self._backfill_energy_from_front(frame)
+        # --- Temporary baseline mode: full energy block every tick ---
+        # Read the whole energy block immediately after the primary block so
+        # each tick measures two back-to-back Modbus reads.
+        energy_read_ok = await self._read_full_energy_block(frame)
+        if energy_read_ok:
+            if not self._energy_initial_read_complete:
+                self._energy_initial_read_complete = True
+                logger.info("Initial full energy register read complete.")
+            self._energy_chunk_pending = -1
+            self._energy_chunk_rest = False
         else:
-            # No energy read this tick — backfill energy values from front buffer
+            # Preserve previously-known energy values when the read fails.
             self._backfill_energy_from_front(frame)
 
         modbus_read_ms = (time.perf_counter() - read_start) * 1000.0
@@ -535,35 +476,20 @@ class Em540Master:
 
         return True
 
-    async def _read_energy_chunk(self, frame, chunk_index: int) -> bool:
-        """Read a single chunk of the energy register block.
-
-        The energy block is divided into chunks of ENERGY_BLOCK_CHUNK_SIZE registers
-        (currently 16). Each chunk is addressed at:
-            _ENERGY_BLOCK_ADDR + (chunk_index * ENERGY_BLOCK_CHUNK_SIZE)
-
-        The results are written directly into the appropriate slice of the energy
-        register's values list in the frame.
-        """
+    async def _read_full_energy_block(self, frame) -> bool:
+        """Read the full energy register block (0x0500) in one Modbus request."""
         reg_desc = frame.dynamic_reg_map[_ENERGY_BLOCK_ADDR]
-        chunk_offset = chunk_index * ENERGY_BLOCK_CHUNK_SIZE
-        start_addr = _ENERGY_BLOCK_ADDR + chunk_offset
-        num_registers = min(ENERGY_BLOCK_CHUNK_SIZE, ENERGY_BLOCK_TOTAL_SIZE - chunk_offset)
+        start_addr = _ENERGY_BLOCK_ADDR
+        num_registers = ENERGY_BLOCK_TOTAL_SIZE
 
         self._refresh_client_runtime_config()
         try:
-            logger.debug(
-                "Reading energy chunk %d from address %s, count=%d",
-                chunk_index,
-                hex(start_addr),
-                num_registers,
-            )
+            logger.debug("Reading full energy block from address %s, count=%d", hex(start_addr), num_registers)
             result = await self._client.read_holding_registers(start_addr, count=num_registers, device_id=self.slave_id)
 
             if result.isError():
                 logger.warning(
-                    "Modbus error reading energy chunk %d at %s, count=%s: %s",
-                    chunk_index,
+                    "Modbus error reading full energy block at %s, count=%s: %s",
                     hex(start_addr),
                     num_registers,
                     result,
@@ -573,11 +499,10 @@ class Em540Master:
             if len(result.registers) != num_registers:
                 self._consecutive_reg_mismatch += 1
                 logger.warning(
-                    "Register count mismatch: expected %d but got %d for energy chunk %d "
+                    "Register count mismatch: expected %d but got %d for full energy block "
                     "at address %s (consecutive: %d/%d)",
                     num_registers,
                     len(result.registers),
-                    chunk_index,
                     hex(start_addr),
                     self._consecutive_reg_mismatch,
                     self._MAX_CONSECUTIVE_REG_MISMATCH,
@@ -591,13 +516,12 @@ class Em540Master:
                 return False
 
             self._consecutive_reg_mismatch = 0
-            # Write chunk data into the correct slice of the energy register values
-            reg_desc.values[chunk_offset : chunk_offset + num_registers] = result.registers
+            reg_desc.values = result.registers
         except ModbusIOException as ex:
-            logger.warning("Modbus IO error reading energy chunk %d from EM540: %s", chunk_index, ex)
+            logger.warning("Modbus IO error reading full energy block from EM540: %s", ex)
             return False
         except ModbusException as ex:
-            logger.warning("Modbus error reading energy chunk %d from EM540: %s", chunk_index, ex)
+            logger.warning("Modbus error reading full energy block from EM540: %s", ex)
             return False
 
         return True
