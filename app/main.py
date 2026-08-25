@@ -16,7 +16,6 @@ from app.version import version_for_display
 
 logger = logging.getLogger()
 config_manager = None
-_SLEEP_SPIN_GUARD_S = 0.002
 
 
 class _PymodbusReconnectWarningFilter(logging.Filter):
@@ -95,17 +94,6 @@ async def process_loop():
             paced_mode = read_interval > 0.0
             now = time.perf_counter()
 
-            # Sleep until the next absolute deadline. A short spin guard keeps the
-            # last couple of milliseconds deterministic instead of leaving them to
-            # asyncio timer wakeup jitter.
-            if paced_mode and now < next_call_time:
-                remaining = next_call_time - now
-                if remaining > _SLEEP_SPIN_GUARD_S:
-                    await asyncio.sleep(remaining - _SLEEP_SPIN_GUARD_S)
-                while time.perf_counter() < next_call_time:
-                    pass
-                now = time.perf_counter()
-
             if not em540_master.connected:
                 if now >= next_connect_attempt_time:
                     # Suppress the "Failed to connect" WARNING from pymodbus.logging to avoid reconnect log spam.
@@ -122,13 +110,16 @@ async def process_loop():
 
             await em540_master.acquire_data()
 
-            # Advance to the next absolute deadline; if we overran, skip missed
-            # ticks instead of running immediate catch-up bursts.
+            # Advance to the next absolute deadline. Sleeping happens after the
+            # read cycle so the Modbus path is not delayed by timer wakeup jitter.
             if paced_mode:
                 now = time.perf_counter()
                 next_call_time += read_interval
                 while next_call_time <= now:
                     next_call_time += read_interval
+                remaining = next_call_time - now
+                if remaining > 0:
+                    await asyncio.sleep(remaining)
             else:
                 # Unpaced mode: run acquisitions as fast as possible and avoid sleeping.
                 next_call_time = time.perf_counter()
