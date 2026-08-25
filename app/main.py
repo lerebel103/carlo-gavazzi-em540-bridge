@@ -87,8 +87,7 @@ async def process_loop():
     await ts65a_slave.start()
 
     read_interval = float(state.em540_master.update_interval)
-    paced_mode = read_interval > 0.0
-    reconnect_backoff = read_interval if paced_mode else 0.1
+    reconnect_backoff = read_interval if read_interval > 0.0 else 0.1
     max_reconnect_backoff = 5.0
     next_connect_attempt_time = 0.0
     stop_event = asyncio.Event()
@@ -102,6 +101,13 @@ async def process_loop():
         mono_now = time.perf_counter()
         next_wall_deadline = math.floor(wall_now / interval_s) * interval_s + interval_s
         return mono_now + (next_wall_deadline - wall_now)
+
+    def _clear_tick_queue() -> None:
+        while True:
+            try:
+                tick_queue.get_nowait()
+            except asyncio.QueueEmpty:
+                return
 
     async def _notify_tick(signal: _TickSignal) -> None:
         if tick_queue.full():
@@ -153,6 +159,8 @@ async def process_loop():
     async def _paced_scheduler() -> None:
         sequence = 0
         interval_s = _current_interval()
+        if interval_s <= 0.0:
+            return
         next_deadline = _aligned_start_deadline(interval_s)
 
         try:
@@ -177,7 +185,6 @@ async def process_loop():
                 while next_deadline <= now:
                     next_deadline += interval_s
         finally:
-            stop_event.set()
             if tick_queue.full():
                 try:
                     tick_queue.get_nowait()
@@ -195,6 +202,10 @@ async def process_loop():
                     stop_event.set()
                     return
 
+                # Live transition: leave paced worker as soon as interval is disabled.
+                if _current_interval() <= 0.0:
+                    return
+
                 try:
                     signal = await asyncio.wait_for(tick_queue.get(), timeout=0.5)
                 except asyncio.TimeoutError:
@@ -205,7 +216,6 @@ async def process_loop():
 
                 await _acquire_cycle(signal)
         finally:
-            stop_event.set()
             if tick_queue.full():
                 try:
                     tick_queue.get_nowait()
@@ -223,24 +233,30 @@ async def process_loop():
                     stop_event.set()
                     return
 
+                # Live transition: switch to paced mode once interval is enabled.
+                if _current_interval() > 0.0:
+                    return
+
                 await _acquire_cycle(None)
         finally:
-            stop_event.set()
+            pass
 
     try:
-        if paced_mode:
-            scheduler_task = asyncio.create_task(_paced_scheduler(), name="em540-tick-scheduler")
-            worker_task = asyncio.create_task(_paced_worker(), name="em540-acquisition-worker")
-            await asyncio.gather(scheduler_task, worker_task)
-        else:
-            await _unpaced_worker()
+        while not stop_event.is_set():
+            if em540_master.has_fatal_error:
+                stop_event.set()
+                break
+
+            if _current_interval() > 0.0:
+                _clear_tick_queue()
+                scheduler_task = asyncio.create_task(_paced_scheduler(), name="em540-tick-scheduler")
+                worker_task = asyncio.create_task(_paced_worker(), name="em540-acquisition-worker")
+                await asyncio.gather(scheduler_task, worker_task)
+            else:
+                await _unpaced_worker()
     finally:
         stop_event.set()
-        if tick_queue.full():
-            try:
-                tick_queue.get_nowait()
-            except asyncio.QueueEmpty:
-                pass
+        _clear_tick_queue()
         try:
             tick_queue.put_nowait(None)
         except asyncio.QueueFull:
