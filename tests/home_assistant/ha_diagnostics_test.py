@@ -137,3 +137,19 @@ def test_only_selected_diagnostics_are_enabled_by_default():
         "ts65a_stale_data_age",
         "ts65a_dropped_stale_requests",
     }
+
+
+def test_diagnostics_display_names_are_migrated_without_changing_entity_keys():
+    diagnostics = HADiagnostics(topic_prefix="test")
+
+    payloads = {topic: json.loads(payload) for topic, payload in diagnostics.advertise_data()}
+
+    assert payloads["homeassistant/sensor/em540_bridge_test_rs485_master_read_rate/config"]["name"] == (
+        "RS485 Acquisition Rate"
+    )
+    assert payloads["homeassistant/sensor/em540_bridge_test_rs485_master_read_duration/config"]["name"] == (
+        "RS485 Acquisition Duration"
+    )
+    assert payloads["homeassistant/sensor/em540_bridge_test_rs485_tick_headroom/config"]["name"] == (
+        "RS485 Acquisition Headroom"
+    )

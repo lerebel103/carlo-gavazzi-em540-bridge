@@ -37,9 +37,11 @@ class Sensor:
         precision=1,
         entity_category: str | None = None,
         enabled_by_default: bool = True,
+        display_name: str | None = None,
     ):
         self.value: float = 0
         self.name = name
+        self.display_name = display_name or name
         self.state_topic = state_topic
         self.device_class = device_class
         self.state_class = state_class
@@ -78,7 +80,7 @@ class Sensor:
 
     def discovery(self):
         obj = {
-            "name": self.name,
+            "name": self.display_name,
             "state_topic": self.state_topic,
             "device_class": self.device_class,
             "state_class": self.state_class,

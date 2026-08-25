@@ -61,6 +61,7 @@ class HADiagnostics:
             precision=2,
             entity_category="diagnostic",
             enabled_by_default=True,
+            display_name="RS485 Acquisition Rate",
         )
         self.mqtt_update_rate = Sensor(
             "MQTT Data Update Rate",
@@ -111,6 +112,7 @@ class HADiagnostics:
             precision=2,
             entity_category="diagnostic",
             enabled_by_default=False,
+            display_name="RS485 Acquisition Duration",
         )
         self.master_read_duration_max_ms = Sensor(
             "RS485 Master Read Duration Max",
@@ -121,6 +123,7 @@ class HADiagnostics:
             precision=2,
             entity_category="diagnostic",
             enabled_by_default=False,
+            display_name="RS485 Acquisition Duration Max",
         )
         self.master_modbus_read_duration_ms = Sensor(
             "RS485 Modbus Read Duration",
@@ -131,6 +134,7 @@ class HADiagnostics:
             precision=2,
             entity_category="diagnostic",
             enabled_by_default=False,
+            display_name="RS485 Modbus I/O Duration",
         )
         self.master_modbus_read_duration_max_ms = Sensor(
             "RS485 Modbus Read Duration Max",
@@ -141,6 +145,7 @@ class HADiagnostics:
             precision=2,
             entity_category="diagnostic",
             enabled_by_default=False,
+            display_name="RS485 Modbus I/O Duration Max",
         )
         self.master_post_read_processing_ms = Sensor(
             "RS485 Post-Read Processing Duration",
@@ -151,6 +156,7 @@ class HADiagnostics:
             precision=2,
             entity_category="diagnostic",
             enabled_by_default=False,
+            display_name="RS485 Worker Post-Processing Duration",
         )
         self.master_post_read_processing_max_ms = Sensor(
             "RS485 Post-Read Processing Duration Max",
@@ -161,6 +167,7 @@ class HADiagnostics:
             precision=2,
             entity_category="diagnostic",
             enabled_by_default=False,
+            display_name="RS485 Worker Post-Processing Duration Max",
         )
         self.master_non_read_processing_ms = Sensor(
             "RS485 Other Processing Duration",
@@ -171,6 +178,7 @@ class HADiagnostics:
             precision=2,
             entity_category="diagnostic",
             enabled_by_default=False,
+            display_name="RS485 Loop Overhead Duration",
         )
         self.master_non_read_processing_max_ms = Sensor(
             "RS485 Other Processing Duration Max",
@@ -181,6 +189,7 @@ class HADiagnostics:
             precision=2,
             entity_category="diagnostic",
             enabled_by_default=False,
+            display_name="RS485 Loop Overhead Duration Max",
         )
         self.master_tick_headroom_ms = Sensor(
             "RS485 Tick Headroom",
@@ -191,6 +200,7 @@ class HADiagnostics:
             precision=2,
             entity_category="diagnostic",
             enabled_by_default=False,
+            display_name="RS485 Acquisition Headroom",
         )
         self.master_tick_headroom_min_ms = Sensor(
             "RS485 Tick Headroom Min",
@@ -201,6 +211,7 @@ class HADiagnostics:
             precision=2,
             entity_category="diagnostic",
             enabled_by_default=False,
+            display_name="RS485 Acquisition Headroom Min",
         )
         self.master_tick_overrun_count = Sensor(
             "RS485 Tick Overrun Count",
@@ -211,6 +222,7 @@ class HADiagnostics:
             precision=0,
             entity_category="diagnostic",
             enabled_by_default=True,
+            display_name="RS485 Acquisition Deadline Miss Count",
         )
         self.min_power_w = Sensor(
             "Min Power W",

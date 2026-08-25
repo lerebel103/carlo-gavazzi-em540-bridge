@@ -345,7 +345,12 @@ class Em540Master:
     def connected(self) -> bool:
         return self._client.connected
 
-    async def acquire_data(self) -> bool:
+    async def acquire_data(
+        self,
+        tick_deadline_mono: float | None = None,
+        tick_ready_at_mono: float | None = None,
+        tick_interval_s: float | None = None,
+    ) -> bool:
         cycle_start = time.perf_counter()
         modbus_read_ms = 0.0
         post_read_processing_ms = 0.0
@@ -423,7 +428,14 @@ class Em540Master:
                     self._condition.notify_all()
 
         post_read_processing_ms = (time.perf_counter() - process_start) * 1000.0
-        self._update_timing_stats(cycle_start, modbus_read_ms, post_read_processing_ms)
+        self._update_timing_stats(
+            cycle_start=cycle_start,
+            modbus_read_ms=modbus_read_ms,
+            post_read_processing_ms=post_read_processing_ms,
+            tick_deadline_mono=tick_deadline_mono,
+            tick_ready_at_mono=tick_ready_at_mono,
+            tick_interval_s=tick_interval_s,
+        )
 
         return is_ok
 
@@ -537,15 +549,36 @@ class Em540Master:
         if front_energy is not None:
             frame.dynamic_reg_map[_ENERGY_BLOCK_ADDR].values = list(front_energy.values)
 
-    def _update_timing_stats(self, cycle_start: float, modbus_read_ms: float, post_read_processing_ms: float) -> None:
-        elapsed_ms = (time.perf_counter() - cycle_start) * 1000.0
-        non_read_processing_ms = max(0.0, elapsed_ms - modbus_read_ms - post_read_processing_ms)
-        tick_budget_ms = float(getattr(self._config, "update_interval", 0.1)) * 1000.0
-        headroom_ms = tick_budget_ms - elapsed_ms
+    def _update_timing_stats(
+        self,
+        cycle_start: float,
+        modbus_read_ms: float,
+        post_read_processing_ms: float,
+        tick_deadline_mono: float | None = None,
+        tick_ready_at_mono: float | None = None,
+        tick_interval_s: float | None = None,
+    ) -> None:
+        acquisition_end = time.perf_counter()
+        acquisition_duration_ms = (acquisition_end - cycle_start) * 1000.0
+
+        if tick_ready_at_mono is not None:
+            non_read_processing_ms = max(0.0, (cycle_start - tick_ready_at_mono) * 1000.0)
+        else:
+            non_read_processing_ms = max(0.0, acquisition_duration_ms - modbus_read_ms - post_read_processing_ms)
+
+        if tick_interval_s is None:
+            tick_interval_s = float(getattr(self._config, "update_interval", 0.1))
+
+        if tick_deadline_mono is not None and tick_interval_s > 0:
+            headroom_ms = ((tick_deadline_mono + tick_interval_s) - acquisition_end) * 1000.0
+        elif tick_interval_s > 0:
+            headroom_ms = tick_interval_s * 1000.0 - acquisition_duration_ms - non_read_processing_ms
+        else:
+            headroom_ms = 0.0
 
         with self._stats.lock:
-            self._stats.read_duration_ms_last = elapsed_ms
-            self._stats.read_duration_ms_max = max(self._stats.read_duration_ms_max, elapsed_ms)
+            self._stats.read_duration_ms_last = acquisition_duration_ms
+            self._stats.read_duration_ms_max = max(self._stats.read_duration_ms_max, acquisition_duration_ms)
             self._stats.modbus_read_duration_ms_last = modbus_read_ms
             self._stats.modbus_read_duration_ms_max = max(self._stats.modbus_read_duration_ms_max, modbus_read_ms)
             self._stats.post_read_processing_ms_last = post_read_processing_ms
@@ -568,7 +601,7 @@ class Em540Master:
             # Only count an overrun when the cycle exceeds the budget by more than the
             # jitter margin. This filters transient I/O jitter that the scheduler absorbs
             # on the following tick, leaving the counter to reflect genuine overload.
-            overrun_threshold_ms = tick_budget_ms * self._TICK_OVERRUN_MARGIN_FRACTION
+            overrun_threshold_ms = tick_interval_s * 1000.0 * self._TICK_OVERRUN_MARGIN_FRACTION
             if headroom_ms < -overrun_threshold_ms:
                 self._stats.tick_overrun_count += 1
 

@@ -2,8 +2,10 @@
 import argparse
 import asyncio
 import logging
+import math
 import time
 from contextlib import contextmanager
+from dataclasses import dataclass
 
 from pymodbus import pymodbus_apply_logging_config
 
@@ -16,6 +18,13 @@ from app.version import version_for_display
 
 logger = logging.getLogger()
 config_manager = None
+
+
+@dataclass(frozen=True)
+class _TickSignal:
+    sequence: int
+    deadline_mono: float
+    ready_at_mono: float
 
 
 class _PymodbusReconnectWarningFilter(logging.Filter):
@@ -77,53 +86,165 @@ async def process_loop():
     await em540_slave.start()
     await ts65a_slave.start()
 
-    initial_interval = float(state.em540_master.update_interval)
-    paced_mode = initial_interval > 0.0
-    next_call_time = time.perf_counter() + (initial_interval if paced_mode else 0.0)
-    reconnect_backoff = initial_interval if paced_mode else 0.1
+    read_interval = float(state.em540_master.update_interval)
+    paced_mode = read_interval > 0.0
+    reconnect_backoff = read_interval if paced_mode else 0.1
     max_reconnect_backoff = 5.0
     next_connect_attempt_time = 0.0
+    stop_event = asyncio.Event()
+    tick_queue: asyncio.Queue[_TickSignal | None] = asyncio.Queue(maxsize=1)
+
+    def _current_interval() -> float:
+        return max(0.0, float(state.em540_master.update_interval))
+
+    def _aligned_start_deadline(interval_s: float) -> float:
+        wall_now = time.time()
+        mono_now = time.perf_counter()
+        next_wall_deadline = math.floor(wall_now / interval_s) * interval_s + interval_s
+        return mono_now + (next_wall_deadline - wall_now)
+
+    async def _notify_tick(signal: _TickSignal) -> None:
+        if tick_queue.full():
+            try:
+                tick_queue.get_nowait()
+            except asyncio.QueueEmpty:
+                pass
+        try:
+            tick_queue.put_nowait(signal)
+        except asyncio.QueueFull:
+            # Another producer pass won the race; skipping is acceptable because
+            # worker semantics are latest-tick-wins under overload.
+            pass
+
+    async def _attempt_connect(now: float, interval_s: float) -> None:
+        nonlocal reconnect_backoff, next_connect_attempt_time
+
+        if now < next_connect_attempt_time:
+            return
+
+        # Suppress the "Failed to connect" WARNING from pymodbus.logging to avoid reconnect log spam.
+        with _suppress_pymodbus_reconnect_warning():
+            await em540_master.connect()
+
+        if em540_master.connected:
+            reconnect_backoff = interval_s if interval_s > 0.0 else 0.1
+            next_connect_attempt_time = 0.0
+        else:
+            next_connect_attempt_time = time.perf_counter() + reconnect_backoff
+            retry_base = interval_s if interval_s > 0.0 else 0.1
+            reconnect_backoff = min(max(retry_base, reconnect_backoff * 2), max_reconnect_backoff)
+
+    async def _acquire_cycle(tick_signal: _TickSignal | None) -> bool:
+        interval_s = _current_interval()
+        now = time.perf_counter()
+
+        if not em540_master.connected:
+            await _attempt_connect(now, interval_s)
+
+        if tick_signal is None:
+            return await em540_master.acquire_data(tick_interval_s=interval_s)
+
+        return await em540_master.acquire_data(
+            tick_deadline_mono=tick_signal.deadline_mono,
+            tick_ready_at_mono=tick_signal.ready_at_mono,
+            tick_interval_s=interval_s,
+        )
+
+    async def _paced_scheduler() -> None:
+        sequence = 0
+        interval_s = _current_interval()
+        next_deadline = _aligned_start_deadline(interval_s)
+
+        try:
+            while not stop_event.is_set():
+                sleep_for = next_deadline - time.perf_counter()
+                if sleep_for > 0:
+                    await asyncio.sleep(sleep_for)
+
+                if stop_event.is_set():
+                    return
+
+                ready_at = time.perf_counter()
+                sequence += 1
+                await _notify_tick(_TickSignal(sequence, next_deadline, ready_at))
+
+                interval_s = _current_interval()
+                if interval_s <= 0.0:
+                    return
+
+                next_deadline += interval_s
+                now = time.perf_counter()
+                while next_deadline <= now:
+                    next_deadline += interval_s
+        finally:
+            stop_event.set()
+            if tick_queue.full():
+                try:
+                    tick_queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    pass
+            try:
+                tick_queue.put_nowait(None)
+            except asyncio.QueueFull:
+                pass
+
+    async def _paced_worker() -> None:
+        try:
+            while not stop_event.is_set():
+                if em540_master.has_fatal_error:
+                    stop_event.set()
+                    return
+
+                try:
+                    signal = await asyncio.wait_for(tick_queue.get(), timeout=0.5)
+                except asyncio.TimeoutError:
+                    continue
+
+                if signal is None or stop_event.is_set():
+                    return
+
+                await _acquire_cycle(signal)
+        finally:
+            stop_event.set()
+            if tick_queue.full():
+                try:
+                    tick_queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    pass
+            try:
+                tick_queue.put_nowait(None)
+            except asyncio.QueueFull:
+                pass
+
+    async def _unpaced_worker() -> None:
+        try:
+            while not stop_event.is_set():
+                if em540_master.has_fatal_error:
+                    stop_event.set()
+                    return
+
+                await _acquire_cycle(None)
+        finally:
+            stop_event.set()
 
     try:
-        while True:
-            if em540_master.has_fatal_error:
-                logger.critical("A listener thread encountered unrecoverable errors, initiating shutdown.")
-                break
-
-            read_interval = float(state.em540_master.update_interval)
-            paced_mode = read_interval > 0.0
-            now = time.perf_counter()
-
-            if not em540_master.connected:
-                if now >= next_connect_attempt_time:
-                    # Suppress the "Failed to connect" WARNING from pymodbus.logging to avoid reconnect log spam.
-                    with _suppress_pymodbus_reconnect_warning():
-                        await em540_master.connect()
-
-                    if em540_master.connected:
-                        reconnect_backoff = read_interval if paced_mode else 0.1
-                        next_connect_attempt_time = 0.0
-                    else:
-                        next_connect_attempt_time = time.perf_counter() + reconnect_backoff
-                        retry_base = read_interval if paced_mode else 0.1
-                        reconnect_backoff = min(max(retry_base, reconnect_backoff * 2), max_reconnect_backoff)
-
-            await em540_master.acquire_data()
-
-            # Advance to the next absolute deadline. Sleeping happens after the
-            # read cycle so the Modbus path is not delayed by timer wakeup jitter.
-            if paced_mode:
-                now = time.perf_counter()
-                next_call_time += read_interval
-                while next_call_time <= now:
-                    next_call_time += read_interval
-                remaining = next_call_time - now
-                if remaining > 0:
-                    await asyncio.sleep(remaining)
-            else:
-                # Unpaced mode: run acquisitions as fast as possible and avoid sleeping.
-                next_call_time = time.perf_counter()
+        if paced_mode:
+            scheduler_task = asyncio.create_task(_paced_scheduler(), name="em540-tick-scheduler")
+            worker_task = asyncio.create_task(_paced_worker(), name="em540-acquisition-worker")
+            await asyncio.gather(scheduler_task, worker_task)
+        else:
+            await _unpaced_worker()
     finally:
+        stop_event.set()
+        if tick_queue.full():
+            try:
+                tick_queue.get_nowait()
+            except asyncio.QueueEmpty:
+                pass
+        try:
+            tick_queue.put_nowait(None)
+        except asyncio.QueueFull:
+            pass
         em540_master.stop_listeners()
         em540_slave.stop()
         ts65a_slave.stop()
