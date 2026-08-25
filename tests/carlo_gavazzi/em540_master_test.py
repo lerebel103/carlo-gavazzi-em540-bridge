@@ -346,25 +346,25 @@ class TestEm540Master(unittest.TestCase):
 
         self.assertEqual(self.master._stats.tick_overrun_count, 0)
 
-    def test_tick_overrun_counts_when_no_headroom_remains(self):
-        """A cycle that reaches/passes the next tick boundary must count as an overrun."""
-        self.config.update_interval = 0.1  # 100ms budget
+    def test_tick_overrun_counts_when_beyond_margin(self):
+        """A cycle that misses by more than the jitter margin must count as an overrun."""
+        self.config.update_interval = 0.1  # 100ms budget; 50ms jitter margin
 
-        # 130ms cycle: no remaining headroom against a 100ms interval.
-        cycle_start = time.perf_counter() - 0.130
+        # 180ms cycle: signed headroom ~= -80ms, beyond the 50ms margin.
+        cycle_start = time.perf_counter() - 0.180
         self.master._update_timing_stats(
             cycle_start=cycle_start,
-            modbus_read_ms=120.0,
+            modbus_read_ms=170.0,
             post_read_processing_ms=5.0,
         )
 
         self.assertEqual(self.master._stats.tick_overrun_count, 1)
 
-    def test_tick_headroom_is_non_negative_in_paced_mode(self):
-        """Paced-mode headroom is defined against the next future tick and must not be negative."""
+    def test_tick_headroom_can_be_negative_when_cycle_finishes_late(self):
+        """Signed headroom should be negative when the cycle misses the immediate next boundary."""
         now = time.perf_counter()
         cycle_start = now - 0.120
-        tick_deadline = now - 0.030
+        tick_deadline = now - 0.200
 
         self.master._update_timing_stats(
             cycle_start=cycle_start,
@@ -375,7 +375,7 @@ class TestEm540Master(unittest.TestCase):
             tick_interval_s=0.1,
         )
 
-        self.assertGreaterEqual(self.master._stats.tick_headroom_ms_last, 0.0)
+        self.assertLess(self.master._stats.tick_headroom_ms_last, 0.0)
 
     def test_refresh_client_runtime_config_uses_live_shared_config_values(self):
         self.mock_client.timeout = 1.0

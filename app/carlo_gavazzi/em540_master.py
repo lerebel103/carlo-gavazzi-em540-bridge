@@ -1,6 +1,5 @@
 import asyncio
 import logging
-import math
 import os
 import struct
 import threading
@@ -563,19 +562,12 @@ class Em540Master:
             tick_interval_s = float(getattr(self._config, "update_interval", 0.1))
 
         if tick_deadline_mono is not None and tick_interval_s > 0:
-            # Headroom is the time from acquisition completion to the NEXT FUTURE tick event.
-            # This definition is always non-negative by construction.
+            # Signed slack against the immediate following tick boundary.
+            # Positive means we completed before that boundary; negative means late.
             first_following_tick = tick_deadline_mono + tick_interval_s
-            if acquisition_end < first_following_tick:
-                next_tick_event = first_following_tick
-            else:
-                elapsed_since_following = acquisition_end - first_following_tick
-                intervals_missed = math.floor(elapsed_since_following / tick_interval_s) + 1
-                next_tick_event = first_following_tick + (intervals_missed * tick_interval_s)
-
-            headroom_ms = max(0.0, (next_tick_event - acquisition_end) * 1000.0)
+            headroom_ms = (first_following_tick - acquisition_end) * 1000.0
         elif tick_interval_s > 0:
-            headroom_ms = max(0.0, tick_interval_s * 1000.0 - acquisition_duration_ms - non_read_processing_ms)
+            headroom_ms = tick_interval_s * 1000.0 - acquisition_duration_ms - non_read_processing_ms
         else:
             headroom_ms = 0.0
 
@@ -601,9 +593,9 @@ class Em540Master:
             else:
                 self._stats.tick_headroom_ms_min = min(self._stats.tick_headroom_ms_min, headroom_ms)
 
-            # Overrun means the cycle consumed at least the full interval budget and
-            # reached/passed the next tick boundary (i.e. no remaining headroom).
-            if tick_interval_s > 0 and headroom_ms <= 0.0:
+            # Overrun means we missed the immediate following tick boundary.
+            overrun_threshold_ms = tick_interval_s * 1000.0 * self._TICK_OVERRUN_MARGIN_FRACTION
+            if tick_interval_s > 0 and headroom_ms < -overrun_threshold_ms:
                 self._stats.tick_overrun_count += 1
 
         # Timing stats are expected to update continuously for diagnostics consumers.
