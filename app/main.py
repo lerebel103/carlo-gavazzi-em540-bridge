@@ -2,6 +2,7 @@
 import argparse
 import asyncio
 import logging
+import time
 from contextlib import contextmanager
 
 from pymodbus import pymodbus_apply_logging_config
@@ -15,6 +16,7 @@ from app.version import version_for_display
 
 logger = logging.getLogger()
 config_manager = None
+_SLEEP_SPIN_GUARD_S = 0.002
 
 
 class _PymodbusReconnectWarningFilter(logging.Filter):
@@ -76,10 +78,9 @@ async def process_loop():
     await em540_slave.start()
     await ts65a_slave.start()
 
-    loop = asyncio.get_running_loop()
     initial_interval = float(state.em540_master.update_interval)
     paced_mode = initial_interval > 0.0
-    next_call_time = loop.time() + (initial_interval if paced_mode else 0.0)
+    next_call_time = time.perf_counter() + (initial_interval if paced_mode else 0.0)
     reconnect_backoff = initial_interval if paced_mode else 0.1
     max_reconnect_backoff = 5.0
     next_connect_attempt_time = 0.0
@@ -92,13 +93,18 @@ async def process_loop():
 
             read_interval = float(state.em540_master.update_interval)
             paced_mode = read_interval > 0.0
-            now = loop.time()
+            now = time.perf_counter()
 
-            # Sleep until the next absolute deadline. Using the event loop's
-            # monotonic clock avoids wall-clock perturbations and reduces drift.
+            # Sleep until the next absolute deadline. A short spin guard keeps the
+            # last couple of milliseconds deterministic instead of leaving them to
+            # asyncio timer wakeup jitter.
             if paced_mode and now < next_call_time:
-                await asyncio.sleep(next_call_time - now)
-                now = loop.time()
+                remaining = next_call_time - now
+                if remaining > _SLEEP_SPIN_GUARD_S:
+                    await asyncio.sleep(remaining - _SLEEP_SPIN_GUARD_S)
+                while time.perf_counter() < next_call_time:
+                    pass
+                now = time.perf_counter()
 
             if not em540_master.connected:
                 if now >= next_connect_attempt_time:
@@ -110,7 +116,7 @@ async def process_loop():
                         reconnect_backoff = read_interval if paced_mode else 0.1
                         next_connect_attempt_time = 0.0
                     else:
-                        next_connect_attempt_time = loop.time() + reconnect_backoff
+                        next_connect_attempt_time = time.perf_counter() + reconnect_backoff
                         retry_base = read_interval if paced_mode else 0.1
                         reconnect_backoff = min(max(retry_base, reconnect_backoff * 2), max_reconnect_backoff)
 
@@ -119,19 +125,13 @@ async def process_loop():
             # Advance to the next absolute deadline; if we overran, skip missed
             # ticks instead of running immediate catch-up bursts.
             if paced_mode:
-                now = loop.time()
-                if now >= next_call_time:
-                    lag = now - next_call_time
-                    if lag >= read_interval:
-                        skipped_ticks = int(lag // read_interval)
-                        next_call_time += (skipped_ticks + 1) * read_interval
-                    else:
-                        next_call_time += read_interval
-                else:
+                now = time.perf_counter()
+                next_call_time += read_interval
+                while next_call_time <= now:
                     next_call_time += read_interval
             else:
                 # Unpaced mode: run acquisitions as fast as possible and avoid sleeping.
-                next_call_time = loop.time()
+                next_call_time = time.perf_counter()
     finally:
         em540_master.stop_listeners()
         em540_slave.stop()

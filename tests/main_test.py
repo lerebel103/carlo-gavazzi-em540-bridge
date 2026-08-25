@@ -229,6 +229,13 @@ class TestMainLoopPriority(unittest.TestCase):
         state.em540_master.update_interval = 0.1
         mocks = _setup_mocks()
 
+        counter = {"n": 0}
+
+        def _perf_counter():
+            val = counter["n"] * 0.05
+            counter["n"] += 1
+            return val
+
         call_count = {"n": 0}
 
         async def _acquire():
@@ -246,6 +253,7 @@ class TestMainLoopPriority(unittest.TestCase):
             patch.object(main, "Em540Slave", return_value=mocks["slave"]),
             patch.object(main, "Ts65aSlaveBridge", return_value=mocks["ts65a"]),
             patch.object(main, "HABridge"),
+            patch.object(main.time, "perf_counter", side_effect=_perf_counter),
             patch.object(main.asyncio, "sleep", new_callable=AsyncMock) as mock_sleep,
         ):
             with self.assertRaises(_LoopBreak):
