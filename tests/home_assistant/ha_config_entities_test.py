@@ -58,7 +58,7 @@ _NUMBER_KEYS = {"min", "max", "step", "mode"}
 _grid_limit = st.floats(min_value=-50000, max_value=0, allow_nan=False, allow_infinity=False)
 _smoothing = st.integers(min_value=1, max_value=600)
 _mqtt_interval = st.floats(min_value=0.1, max_value=60, allow_nan=False, allow_infinity=False)
-_master_interval = st.floats(min_value=0.05, max_value=10, allow_nan=False, allow_infinity=False)
+_master_interval = st.floats(min_value=0.0, max_value=10, allow_nan=False, allow_infinity=False)
 _master_retries = st.integers(min_value=0, max_value=9)
 _master_timeout = st.floats(min_value=0.05, max_value=10, allow_nan=False, allow_infinity=False)
 _slave_timeout = st.floats(min_value=0.1, max_value=10, allow_nan=False, allow_infinity=False)

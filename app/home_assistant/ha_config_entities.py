@@ -136,7 +136,7 @@ class HAConfigEntities:
                 field_path="em540_master.update_interval",
                 config_section=self._state.em540_master,
                 field_name="update_interval",
-                min_value=0.05,
+                min_value=0.0,
                 max_value=10,
                 step=0.05,
                 unit="s",

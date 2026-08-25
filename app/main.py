@@ -2,7 +2,6 @@
 import argparse
 import asyncio
 import logging
-import time
 from contextlib import contextmanager
 
 from pymodbus import pymodbus_apply_logging_config
@@ -77,10 +76,11 @@ async def process_loop():
     await em540_slave.start()
     await ts65a_slave.start()
 
-    initial_interval = state.em540_master.update_interval
-    start_time = time.perf_counter()
-    next_call_time = start_time + initial_interval
-    reconnect_backoff = initial_interval
+    loop = asyncio.get_running_loop()
+    initial_interval = float(state.em540_master.update_interval)
+    paced_mode = initial_interval > 0.0
+    next_call_time = loop.time() + (initial_interval if paced_mode else 0.0)
+    reconnect_backoff = initial_interval if paced_mode else 0.1
     max_reconnect_backoff = 5.0
     next_connect_attempt_time = 0.0
 
@@ -90,34 +90,48 @@ async def process_loop():
                 logger.critical("A listener thread encountered unrecoverable errors, initiating shutdown.")
                 break
 
-            read_interval = max(0.001, float(state.em540_master.update_interval))
-            current_time = time.perf_counter()
-            if current_time >= next_call_time:
-                # If we are late, skip missed ticks instead of executing catch-up bursts.
-                lag = current_time - next_call_time
-                if lag >= read_interval:
-                    skipped_ticks = int(lag // read_interval)
-                    next_call_time += (skipped_ticks + 1) * read_interval
+            read_interval = float(state.em540_master.update_interval)
+            paced_mode = read_interval > 0.0
+            now = loop.time()
+
+            # Sleep until the next absolute deadline. Using the event loop's
+            # monotonic clock avoids wall-clock perturbations and reduces drift.
+            if paced_mode and now < next_call_time:
+                await asyncio.sleep(next_call_time - now)
+                now = loop.time()
+
+            if not em540_master.connected:
+                if now >= next_connect_attempt_time:
+                    # Suppress the "Failed to connect" WARNING from pymodbus.logging to avoid reconnect log spam.
+                    with _suppress_pymodbus_reconnect_warning():
+                        await em540_master.connect()
+
+                    if em540_master.connected:
+                        reconnect_backoff = read_interval if paced_mode else 0.1
+                        next_connect_attempt_time = 0.0
+                    else:
+                        next_connect_attempt_time = loop.time() + reconnect_backoff
+                        retry_base = read_interval if paced_mode else 0.1
+                        reconnect_backoff = min(max(retry_base, reconnect_backoff * 2), max_reconnect_backoff)
+
+            await em540_master.acquire_data()
+
+            # Advance to the next absolute deadline; if we overran, skip missed
+            # ticks instead of running immediate catch-up bursts.
+            if paced_mode:
+                now = loop.time()
+                if now >= next_call_time:
+                    lag = now - next_call_time
+                    if lag >= read_interval:
+                        skipped_ticks = int(lag // read_interval)
+                        next_call_time += (skipped_ticks + 1) * read_interval
+                    else:
+                        next_call_time += read_interval
                 else:
                     next_call_time += read_interval
-
-                if not em540_master.connected:
-                    if current_time >= next_connect_attempt_time:
-                        # Suppress the "Failed to connect" WARNING from pymodbus.logging to avoid reconnect log spam.
-                        with _suppress_pymodbus_reconnect_warning():
-                            await em540_master.connect()
-
-                        if em540_master.connected:
-                            reconnect_backoff = read_interval
-                            next_connect_attempt_time = 0.0
-                        else:
-                            next_connect_attempt_time = time.perf_counter() + reconnect_backoff
-                            reconnect_backoff = min(reconnect_backoff * 2, max_reconnect_backoff)
-                await em540_master.acquire_data()
-
-            sleep_for = max(0, next_call_time - time.perf_counter() - 0.0001)
-            if sleep_for > 0:
-                await asyncio.sleep(sleep_for)
+            else:
+                # Unpaced mode: run acquisitions as fast as possible and avoid sleeping.
+                next_call_time = loop.time()
     finally:
         em540_master.stop_listeners()
         em540_slave.stop()
