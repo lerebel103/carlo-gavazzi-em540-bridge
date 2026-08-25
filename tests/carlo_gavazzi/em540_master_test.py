@@ -332,11 +332,25 @@ class TestEm540Master(unittest.TestCase):
         self.assertEqual(post_ms, 3.0)
         self.assertGreaterEqual(non_read_ms, 0.0)
 
-    def test_tick_overrun_ignores_jitter_within_margin(self):
-        """A cycle exceeding the budget but within the jitter margin must not count as an overrun."""
-        self.config.update_interval = 0.1  # 100ms budget; margin fraction 0.5 -> 50ms slack
+    def test_tick_overrun_not_counted_when_headroom_remains(self):
+        """A cycle that still leaves time before the next tick must not count as an overrun."""
+        self.config.update_interval = 0.1  # 100ms budget
 
-        # 130ms cycle: over budget (100ms) but under budget + margin (150ms).
+        # 70ms cycle: headroom remains before the following tick.
+        cycle_start = time.perf_counter() - 0.070
+        self.master._update_timing_stats(
+            cycle_start=cycle_start,
+            modbus_read_ms=60.0,
+            post_read_processing_ms=5.0,
+        )
+
+        self.assertEqual(self.master._stats.tick_overrun_count, 0)
+
+    def test_tick_overrun_counts_when_no_headroom_remains(self):
+        """A cycle that reaches/passes the next tick boundary must count as an overrun."""
+        self.config.update_interval = 0.1  # 100ms budget
+
+        # 130ms cycle: no remaining headroom against a 100ms interval.
         cycle_start = time.perf_counter() - 0.130
         self.master._update_timing_stats(
             cycle_start=cycle_start,
@@ -344,21 +358,24 @@ class TestEm540Master(unittest.TestCase):
             post_read_processing_ms=5.0,
         )
 
-        self.assertEqual(self.master._stats.tick_overrun_count, 0)
+        self.assertEqual(self.master._stats.tick_overrun_count, 1)
 
-    def test_tick_overrun_counts_when_beyond_margin(self):
-        """A cycle exceeding the budget plus jitter margin must count as an overrun."""
-        self.config.update_interval = 0.1  # 100ms budget; margin fraction 0.5 -> 50ms slack
+    def test_tick_headroom_is_non_negative_in_paced_mode(self):
+        """Paced-mode headroom is defined against the next future tick and must not be negative."""
+        now = time.perf_counter()
+        cycle_start = now - 0.120
+        tick_deadline = now - 0.030
 
-        # 180ms cycle: beyond budget + margin (150ms).
-        cycle_start = time.perf_counter() - 0.180
         self.master._update_timing_stats(
             cycle_start=cycle_start,
-            modbus_read_ms=170.0,
-            post_read_processing_ms=5.0,
+            modbus_read_ms=80.0,
+            post_read_processing_ms=10.0,
+            tick_deadline_mono=tick_deadline,
+            tick_ready_at_mono=cycle_start,
+            tick_interval_s=0.1,
         )
 
-        self.assertEqual(self.master._stats.tick_overrun_count, 1)
+        self.assertGreaterEqual(self.master._stats.tick_headroom_ms_last, 0.0)
 
     def test_refresh_client_runtime_config_uses_live_shared_config_values(self):
         self.mock_client.timeout = 1.0
@@ -417,7 +434,6 @@ class TestSkipNRead(unittest.TestCase):
         addresses = self._get_read_addresses()
         self.assertIn(0x0000, addresses)
         self.assertIn(0x0500, addresses)
-        self.assertEqual(self.master._energy_chunk_pending, -1)
 
     # -----------------------------------------------------------------------
     # Dynamic blocks are always read on every cycle

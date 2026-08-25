@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import math
 import os
 import struct
 import threading
@@ -93,10 +94,8 @@ class Em540MasterStats:
 class Em540Master:
     """Represents a Modbus master that reads data from an EM540 device.
 
-    This class will do its best to read data up to a 10Hz rate which the EM540 is able to provide. However, this can
-    only be achieved if only a subset of the available registers are read. The more registers are read, the slower the
-    update rate will be. The read rate of non-critical data can be configured by setting the 'skip_n_read' parameter in
-    the register definitions in em540_data.py.
+    This class reads one primary dynamic block and one full energy block back-to-back
+    on each acquisition cycle.
 
     Additionally, a high baud rate of 115200bps should be used on the EM540 to achieve the best performance.
 
@@ -129,18 +128,11 @@ class Em540Master:
         self._condition: threading.Condition = threading.Condition()
         self._stats: Em540MasterStats = Em540MasterStats()
         self._static_read_plan: tuple[int, ...] = tuple(self._front_data.frame.static_reg_map.keys())
-        self._dynamic_read_plan: tuple[int, ...] = tuple(self._front_data.frame.dynamic_reg_map.keys())
         logger.setLevel(config.log_level)
         self._client: ModbusBaseClient
 
-        # Energy block chunked-read state.
-        # When the energy block's skip counter fires, we read chunk 0 on that tick,
-        # then subsequent chunks on alternating ticks with primary-only rest ticks
-        # in between. Chunk size and count are driven by ENERGY_BLOCK_CHUNK_SIZE.
-        # This interlacing lets shorter primary-only ticks absorb jitter.
-        self._energy_chunk_pending: int = -1  # -1 = no chunk pending, 1..N-1 = next chunk index to read
-        self._energy_chunk_rest: bool = False  # True = skip this tick's chunk read (rest tick)
-        self._energy_initial_read_complete: bool = False  # Gate: don't publish until first full energy read
+        # Gate: don't publish until the first full energy read has completed.
+        self._energy_initial_read_complete: bool = False
         self._fatal_error: threading.Event = threading.Event()
 
         # Register count mismatch tracking. Transient mismatches (e.g. stale RTU
@@ -357,32 +349,25 @@ class Em540Master:
 
         # No point reading if we are not connected
         if not self._client.connected:
-            self._energy_chunk_pending = -1
-            self._energy_chunk_rest = False
             for listener in self._listeners:
                 await listener.read_failed()
             self._update_timing_stats(cycle_start, modbus_read_ms, post_read_processing_ms)
             return False
 
         # Use back buffer as the mutable working set and keep front buffer immutable for listeners.
-        # To avoid per-tick full-frame copies, skipped dynamic register groups are backfilled from front.
         frame = self._back_data.frame
-        self._sync_dynamic_reg_meta(self._front_data.frame.dynamic_reg_map, frame.dynamic_reg_map)
 
         # Read our dynamic registers
         self._dyn_reg_read_counter += 1
-        read_start = time.perf_counter()
 
         # --- Primary block read (critical path) ---
         # Read the primary block FIRST. This contains real-time power/voltage/current
-        # data that downstream consumers depend on at 10Hz. Energy chunk failures must
+        # data that downstream consumers depend on at 10Hz. Energy read failures must
         # never prevent primary data from reaching listeners.
-        is_ok: bool = await self._read_primary_block(frame)
+        is_ok, primary_modbus_ms = await self._read_primary_block(frame)
+        modbus_read_ms += primary_modbus_ms
 
         if not is_ok:
-            self._energy_chunk_pending = -1
-            self._energy_chunk_rest = False
-            modbus_read_ms = (time.perf_counter() - read_start) * 1000.0
             for listener in self._listeners:
                 await listener.read_failed()
             self._update_timing_stats(cycle_start, modbus_read_ms, post_read_processing_ms)
@@ -391,18 +376,15 @@ class Em540Master:
         # --- Temporary baseline mode: full energy block every tick ---
         # Read the whole energy block immediately after the primary block so
         # each tick measures two back-to-back Modbus reads.
-        energy_read_ok = await self._read_full_energy_block(frame)
+        energy_read_ok, energy_modbus_ms = await self._read_full_energy_block(frame)
+        modbus_read_ms += energy_modbus_ms
         if energy_read_ok:
             if not self._energy_initial_read_complete:
                 self._energy_initial_read_complete = True
                 logger.info("Initial full energy register read complete.")
-            self._energy_chunk_pending = -1
-            self._energy_chunk_rest = False
         else:
             # Preserve previously-known energy values when the read fails.
             self._backfill_energy_from_front(frame)
-
-        modbus_read_ms = (time.perf_counter() - read_start) * 1000.0
 
         # --- Post-read processing and publication ---
         process_start = time.perf_counter()
@@ -417,8 +399,8 @@ class Em540Master:
         if is_ok:
             # Swap buffers under the condition lock so the front buffer stays immutable
             # for listener threads (which read _front_data under _condition). The swap is
-            # always performed so partial energy chunks are preserved across ticks via
-            # _backfill_energy_from_front. Only advance the sequence and wake listeners
+            # always performed so previous energy values can be preserved across failed reads.
+            # Only advance the sequence and wake listeners
             # once we have static data AND a complete initial energy read, so downstream
             # consumers never observe a frame with zero energy values on startup.
             with self._condition:
@@ -439,16 +421,22 @@ class Em540Master:
 
         return is_ok
 
-    async def _read_primary_block(self, frame) -> bool:
-        """Read the primary dynamic register block (0x0000)."""
+    async def _read_primary_block(self, frame) -> tuple[bool, float]:
+        """Read the primary dynamic register block (0x0000).
+
+        Returns a tuple of (is_ok, modbus_io_ms) where modbus_io_ms is only the
+        direct request/response await window for this block.
+        """
         reg_desc = frame.dynamic_reg_map[_DYNAMIC_PRIMARY_BLOCK_ADDR]
         num_registers = len(reg_desc.values)
 
         self._refresh_client_runtime_config()
+        modbus_io_start = time.perf_counter()
         try:
             result = await self._client.read_holding_registers(
                 _DYNAMIC_PRIMARY_BLOCK_ADDR, count=num_registers, device_id=self.slave_id
             )
+            modbus_io_ms = (time.perf_counter() - modbus_io_start) * 1000.0
 
             if result.isError():
                 logger.warning(
@@ -457,7 +445,7 @@ class Em540Master:
                     num_registers,
                     result,
                 )
-                return False
+                return False, modbus_io_ms
 
             if len(result.registers) != num_registers:
                 self._consecutive_reg_mismatch += 1
@@ -475,29 +463,37 @@ class Em540Master:
                         self._consecutive_reg_mismatch,
                     )
                     os._exit(1)
-                return False
+                return False, modbus_io_ms
 
             self._consecutive_reg_mismatch = 0
             reg_desc.values = result.registers
         except ModbusIOException as ex:
+            modbus_io_ms = (time.perf_counter() - modbus_io_start) * 1000.0
             logger.warning("Modbus IO error reading primary registers from EM540: %s", ex)
-            return False
+            return False, modbus_io_ms
         except ModbusException as ex:
+            modbus_io_ms = (time.perf_counter() - modbus_io_start) * 1000.0
             logger.warning("Modbus error reading primary registers from EM540: %s", ex)
-            return False
+            return False, modbus_io_ms
 
-        return True
+        return True, modbus_io_ms
 
-    async def _read_full_energy_block(self, frame) -> bool:
-        """Read the full energy register block (0x0500) in one Modbus request."""
+    async def _read_full_energy_block(self, frame) -> tuple[bool, float]:
+        """Read the full energy register block (0x0500) in one Modbus request.
+
+        Returns a tuple of (is_ok, modbus_io_ms) where modbus_io_ms is only the
+        direct request/response await window for this block.
+        """
         reg_desc = frame.dynamic_reg_map[_ENERGY_BLOCK_ADDR]
         start_addr = _ENERGY_BLOCK_ADDR
         num_registers = ENERGY_BLOCK_TOTAL_SIZE
 
         self._refresh_client_runtime_config()
+        modbus_io_start = time.perf_counter()
         try:
             logger.debug("Reading full energy block from address %s, count=%d", hex(start_addr), num_registers)
             result = await self._client.read_holding_registers(start_addr, count=num_registers, device_id=self.slave_id)
+            modbus_io_ms = (time.perf_counter() - modbus_io_start) * 1000.0
 
             if result.isError():
                 logger.warning(
@@ -506,7 +502,7 @@ class Em540Master:
                     num_registers,
                     result,
                 )
-                return False
+                return False, modbus_io_ms
 
             if len(result.registers) != num_registers:
                 self._consecutive_reg_mismatch += 1
@@ -525,26 +521,23 @@ class Em540Master:
                         self._consecutive_reg_mismatch,
                     )
                     os._exit(1)
-                return False
+                return False, modbus_io_ms
 
             self._consecutive_reg_mismatch = 0
             reg_desc.values = result.registers
         except ModbusIOException as ex:
+            modbus_io_ms = (time.perf_counter() - modbus_io_start) * 1000.0
             logger.warning("Modbus IO error reading full energy block from EM540: %s", ex)
-            return False
+            return False, modbus_io_ms
         except ModbusException as ex:
+            modbus_io_ms = (time.perf_counter() - modbus_io_start) * 1000.0
             logger.warning("Modbus error reading full energy block from EM540: %s", ex)
-            return False
+            return False, modbus_io_ms
 
-        return True
+        return True, modbus_io_ms
 
     def _backfill_energy_from_front(self, frame) -> None:
-        """Copy energy register values from the front buffer to keep them current when not reading.
-
-        This propagates previously-read energy chunks across buffer swaps so that
-        partial energy data accumulates correctly during the initial read sequence
-        and energy values stay current between read cycles after completion.
-        """
+        """Copy energy register values from the front buffer when a full energy read fails."""
         front_energy = self._front_data.frame.dynamic_reg_map.get(_ENERGY_BLOCK_ADDR)
         if front_energy is not None:
             frame.dynamic_reg_map[_ENERGY_BLOCK_ADDR].values = list(front_energy.values)
@@ -570,9 +563,19 @@ class Em540Master:
             tick_interval_s = float(getattr(self._config, "update_interval", 0.1))
 
         if tick_deadline_mono is not None and tick_interval_s > 0:
-            headroom_ms = ((tick_deadline_mono + tick_interval_s) - acquisition_end) * 1000.0
+            # Headroom is the time from acquisition completion to the NEXT FUTURE tick event.
+            # This definition is always non-negative by construction.
+            first_following_tick = tick_deadline_mono + tick_interval_s
+            if acquisition_end < first_following_tick:
+                next_tick_event = first_following_tick
+            else:
+                elapsed_since_following = acquisition_end - first_following_tick
+                intervals_missed = math.floor(elapsed_since_following / tick_interval_s) + 1
+                next_tick_event = first_following_tick + (intervals_missed * tick_interval_s)
+
+            headroom_ms = max(0.0, (next_tick_event - acquisition_end) * 1000.0)
         elif tick_interval_s > 0:
-            headroom_ms = tick_interval_s * 1000.0 - acquisition_duration_ms - non_read_processing_ms
+            headroom_ms = max(0.0, tick_interval_s * 1000.0 - acquisition_duration_ms - non_read_processing_ms)
         else:
             headroom_ms = 0.0
 
@@ -598,11 +601,9 @@ class Em540Master:
             else:
                 self._stats.tick_headroom_ms_min = min(self._stats.tick_headroom_ms_min, headroom_ms)
 
-            # Only count an overrun when the cycle exceeds the budget by more than the
-            # jitter margin. This filters transient I/O jitter that the scheduler absorbs
-            # on the following tick, leaving the counter to reflect genuine overload.
-            overrun_threshold_ms = tick_interval_s * 1000.0 * self._TICK_OVERRUN_MARGIN_FRACTION
-            if headroom_ms < -overrun_threshold_ms:
+            # Overrun means the cycle consumed at least the full interval budget and
+            # reached/passed the next tick boundary (i.e. no remaining headroom).
+            if tick_interval_s > 0 and headroom_ms <= 0.0:
                 self._stats.tick_overrun_count += 1
 
         # Timing stats are expected to update continuously for diagnostics consumers.
@@ -624,11 +625,6 @@ class Em540Master:
         for addr, reg in source_frame.remapped_reg_map.items():
             target_frame.remapped_reg_map[addr].values = list(reg.values)
             target_frame.remapped_reg_map[addr].skip_n_read = reg.skip_n_read
-
-    def _sync_dynamic_reg_meta(self, source_reg_map: dict, target_reg_map: dict) -> None:
-        """Keep dynamic register scheduling metadata aligned across buffers."""
-        for addr, reg in source_reg_map.items():
-            target_reg_map[addr].skip_n_read = reg.skip_n_read
 
     def _listener_loop(self, listener: MeterDataListener) -> None:
         num_errors = 0
@@ -692,36 +688,15 @@ class Em540Master:
     async def _read_registers(
         self,
         reg_map: dict,
-        dyn_reg: bool = False,
-        fallback_reg_map: dict | None = None,
         reg_addrs: tuple[int, ...] | None = None,
     ) -> bool:
         self._refresh_client_runtime_config()
         try:
-            # Read dynamic registers
-            # Only read the primary register every cycle, the rest are read less often
-            # This is because we can't keep up a 10Hz read rate if we read all registers.
             if reg_addrs is None:
                 reg_addrs = tuple(reg_map.keys())
 
             for reg_addr in reg_addrs:
                 reg_desc = reg_map[reg_addr]
-                skip_n_read: int = reg_desc.skip_n_read
-
-                # Always perform the first read on all registers
-                # Then skip reads as configured
-                if dyn_reg and self._dyn_reg_read_counter > 1 and skip_n_read > 0:
-                    if (self._dyn_reg_read_counter % (skip_n_read + 1)) != 0:
-                        if fallback_reg_map is not None and reg_addr in fallback_reg_map:
-                            reg_map[reg_addr].values = list(fallback_reg_map[reg_addr].values)
-                        logger.debug(
-                            ">>>> Skipping read of '%s' register at %s, read counter=%s, skip_n_read=%s",
-                            reg_desc.description,
-                            hex(reg_addr),
-                            self._dyn_reg_read_counter,
-                            skip_n_read,
-                        )
-                        continue
 
                 num_registers: int = len(reg_desc.values)
                 logger.debug(
