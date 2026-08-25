@@ -32,6 +32,7 @@ class MeterDataListener:
 
 class Em540MasterStats:
     def __init__(self) -> None:
+        self.lock: threading.Lock = threading.Lock()
         self.consumer_missed_updates_total: int = 0
         self.consumer_max_seq_gap: int = 0
         self.read_duration_ms_last: float = 0.0
@@ -46,6 +47,38 @@ class Em540MasterStats:
         self.tick_headroom_ms_min: float = 0.0
         self.tick_overrun_count: int = 0
         self._listeners: list[Callable[["Em540MasterStats"], None]] = []
+
+    def snapshot_and_reset_interval_extrema(self) -> dict[str, float | int]:
+        """Return a synchronized stats snapshot and reset interval extrema.
+
+        Extrema are reset so subsequent diagnostics emissions reflect only the
+        next interval window (DIAGNOSTICS_INTERVAL in HA diagnostics).
+        """
+        with self.lock:
+            snapshot = {
+                "consumer_missed_updates_total": self.consumer_missed_updates_total,
+                "consumer_max_seq_gap": self.consumer_max_seq_gap,
+                "read_duration_ms_last": self.read_duration_ms_last,
+                "read_duration_ms_max": self.read_duration_ms_max,
+                "modbus_read_duration_ms_last": self.modbus_read_duration_ms_last,
+                "modbus_read_duration_ms_max": self.modbus_read_duration_ms_max,
+                "post_read_processing_ms_last": self.post_read_processing_ms_last,
+                "post_read_processing_ms_max": self.post_read_processing_ms_max,
+                "non_read_processing_ms_last": self.non_read_processing_ms_last,
+                "non_read_processing_ms_max": self.non_read_processing_ms_max,
+                "tick_headroom_ms_last": self.tick_headroom_ms_last,
+                "tick_headroom_ms_min": self.tick_headroom_ms_min,
+                "tick_overrun_count": self.tick_overrun_count,
+            }
+
+            # Reset only interval extrema; counters and *last values are lifetime/stream state.
+            self.read_duration_ms_max = 0.0
+            self.modbus_read_duration_ms_max = 0.0
+            self.post_read_processing_ms_max = 0.0
+            self.non_read_processing_ms_max = 0.0
+            self.tick_headroom_ms_min = 0.0
+
+            return snapshot
 
     def changed(self) -> None:
         for listener in self._listeners:
@@ -96,7 +129,6 @@ class Em540Master:
         self._data_seq: int = 0
         self._condition: threading.Condition = threading.Condition()
         self._stats: Em540MasterStats = Em540MasterStats()
-        self._stats_lock: threading.Lock = threading.Lock()
         self._static_read_plan: tuple[int, ...] = tuple(self._front_data.frame.static_reg_map.keys())
         self._dynamic_read_plan: tuple[int, ...] = tuple(self._front_data.frame.dynamic_reg_map.keys())
         logger.setLevel(config.log_level)
@@ -587,7 +619,7 @@ class Em540Master:
         tick_budget_ms = float(getattr(self._config, "update_interval", 0.1)) * 1000.0
         headroom_ms = tick_budget_ms - elapsed_ms
 
-        with self._stats_lock:
+        with self._stats.lock:
             self._stats.read_duration_ms_last = elapsed_ms
             self._stats.read_duration_ms_max = max(self._stats.read_duration_ms_max, elapsed_ms)
             self._stats.modbus_read_duration_ms_last = modbus_read_ms
@@ -673,7 +705,7 @@ class Em540Master:
 
                 if gap > 1:
                     missed = gap - 1
-                    with self._stats_lock:
+                    with self._stats.lock:
                         self._stats.consumer_missed_updates_total += missed
                         self._stats.consumer_max_seq_gap = max(self._stats.consumer_max_seq_gap, gap)
                     self._stats.changed()

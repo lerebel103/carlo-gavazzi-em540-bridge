@@ -59,6 +59,27 @@ def test_master_timing_payload_prefers_worst_case_values_over_last_cycle_values(
     assert payload_obj["rs485_tick_headroom_min"] == 17.5
 
 
+def test_master_timing_extrema_reset_after_diagnostics_emit():
+    diagnostics = HADiagnostics(topic_prefix="test")
+
+    master_stats = Em540MasterStats()
+    master_stats.read_duration_ms_max = 12.0
+    master_stats.modbus_read_duration_ms_max = 7.0
+    master_stats.post_read_processing_ms_max = 2.0
+    master_stats.non_read_processing_ms_max = 1.0
+    master_stats.tick_headroom_ms_min = -5.0
+    diagnostics.set_em540_master_stats(master_stats)
+
+    with patch.dict("sys.modules", {"uptime": SimpleNamespace(uptime=lambda: 1)}):
+        diagnostics.mqtt_data()
+
+    assert master_stats.read_duration_ms_max == 0.0
+    assert master_stats.modbus_read_duration_ms_max == 0.0
+    assert master_stats.post_read_processing_ms_max == 0.0
+    assert master_stats.non_read_processing_ms_max == 0.0
+    assert master_stats.tick_headroom_ms_min == 0.0
+
+
 def test_diagnostics_payload_contains_all_declared_sensor_keys():
     diagnostics = HADiagnostics(topic_prefix="test")
 
