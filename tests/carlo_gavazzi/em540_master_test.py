@@ -322,8 +322,6 @@ class TestEm540Master(unittest.TestCase):
         cycle_start = time.perf_counter() - 0.02
         self.master._update_timing_stats(
             cycle_start=cycle_start,
-            modbus_read_ms=12.0,
-            post_read_processing_ms=3.0,
         )
 
         self.assertTrue(observed)
@@ -340,8 +338,6 @@ class TestEm540Master(unittest.TestCase):
         cycle_start = time.perf_counter() - 0.070
         self.master._update_timing_stats(
             cycle_start=cycle_start,
-            modbus_read_ms=60.0,
-            post_read_processing_ms=5.0,
         )
 
         self.assertEqual(self.master._stats.tick_overrun_count, 0)
@@ -354,8 +350,6 @@ class TestEm540Master(unittest.TestCase):
         cycle_start = time.perf_counter() - 0.180
         self.master._update_timing_stats(
             cycle_start=cycle_start,
-            modbus_read_ms=170.0,
-            post_read_processing_ms=5.0,
         )
 
         self.assertEqual(self.master._stats.tick_overrun_count, 1)
@@ -368,10 +362,7 @@ class TestEm540Master(unittest.TestCase):
 
         self.master._update_timing_stats(
             cycle_start=cycle_start,
-            modbus_read_ms=80.0,
-            post_read_processing_ms=10.0,
             tick_deadline_mono=tick_deadline,
-            tick_ready_at_mono=cycle_start,
             tick_interval_s=0.1,
         )
 

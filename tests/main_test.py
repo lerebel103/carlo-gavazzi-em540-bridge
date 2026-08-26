@@ -229,11 +229,15 @@ class TestMainLoopPriority(unittest.TestCase):
         state.em540_master.update_interval = 0.02
         mocks = _setup_mocks()
         sleep_calls = []
+        fake_clock = {"wall": 10_000.0, "mono": 1_000.0}
         real_sleep = asyncio.sleep
 
         async def _sleep(delay):
             sleep_calls.append(delay)
-            await real_sleep(delay)
+            step = max(0.0, float(delay))
+            fake_clock["wall"] += step
+            fake_clock["mono"] += step
+            await real_sleep(0)
 
         call_count = {"n": 0}
 
@@ -252,6 +256,8 @@ class TestMainLoopPriority(unittest.TestCase):
             patch.object(main, "Em540Slave", return_value=mocks["slave"]),
             patch.object(main, "Ts65aSlaveBridge", return_value=mocks["ts65a"]),
             patch.object(main, "HABridge"),
+            patch.object(main.time, "time", side_effect=lambda: fake_clock["wall"]),
+            patch.object(main.time, "perf_counter", side_effect=lambda: fake_clock["mono"]),
             patch.object(main.asyncio, "sleep", side_effect=_sleep),
         ):
             with self.assertRaises(_LoopBreak):
@@ -364,12 +370,16 @@ class TestMainLoopPriority(unittest.TestCase):
         mocks = _setup_mocks()
 
         sleep_calls = []
+        fake_clock = {"wall": 20_000.0, "mono": 2_000.0}
         real_sleep = asyncio.sleep
         call_count = {"n": 0}
 
         async def _sleep(delay):
             sleep_calls.append(delay)
-            await real_sleep(delay)
+            step = max(0.0, float(delay))
+            fake_clock["wall"] += step
+            fake_clock["mono"] += step
+            await real_sleep(0)
 
         async def _acquire(*args, **kwargs):
             call_count["n"] += 1
@@ -388,6 +398,8 @@ class TestMainLoopPriority(unittest.TestCase):
             patch.object(main, "Em540Slave", return_value=mocks["slave"]),
             patch.object(main, "Ts65aSlaveBridge", return_value=mocks["ts65a"]),
             patch.object(main, "HABridge"),
+            patch.object(main.time, "time", side_effect=lambda: fake_clock["wall"]),
+            patch.object(main.time, "perf_counter", side_effect=lambda: fake_clock["mono"]),
             patch.object(main.asyncio, "sleep", side_effect=_sleep),
         ):
             with self.assertRaises(_LoopBreak):

@@ -18,6 +18,7 @@ from app.version import version_for_display
 
 logger = logging.getLogger()
 config_manager = None
+_MIN_PACED_INTERVAL_S = 0.01
 
 
 @dataclass(frozen=True)
@@ -94,7 +95,11 @@ async def process_loop():
     tick_queue: asyncio.Queue[_TickSignal | None] = asyncio.Queue(maxsize=1)
 
     def _current_interval() -> float:
-        return max(0.0, float(state.em540_master.update_interval))
+        interval_s = float(state.em540_master.update_interval)
+        if interval_s <= 0.0:
+            return 0.0
+        # Prevent pathological scheduler behavior for tiny positive intervals.
+        return max(_MIN_PACED_INTERVAL_S, interval_s)
 
     def _aligned_start_deadline(interval_s: float) -> float:
         wall_now = time.time()
