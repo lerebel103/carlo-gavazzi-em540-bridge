@@ -214,6 +214,7 @@ class TestHABridgeConfigEntities(unittest.TestCase):
     def test_on_connect_publishes_master_interval_config_state_in_ms(self):
         state = AppState()
         state.em540_master.update_interval = 0.125
+        state.em540_master.timeout = 0.25
         cm = MagicMock(spec=ConfigManager)
         bridge = HABridge(_make_conf(), state=state, config_manager=cm)
         bridge.sensors.advertise_data = MagicMock(return_value=[])
@@ -226,6 +227,11 @@ class TestHABridgeConfigEntities(unittest.TestCase):
         mock_client.publish.assert_any_call(
             "lerebel/config/em540_bridge/em540_master_update_interval/state",
             "125.0",
+            retain=True,
+        )
+        mock_client.publish.assert_any_call(
+            "lerebel/config/em540_bridge/em540_master_timeout/state",
+            "250.0",
             retain=True,
         )
 

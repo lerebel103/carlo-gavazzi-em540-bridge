@@ -66,6 +66,22 @@ def test_master_update_interval_entity_uses_milliseconds_with_internal_seconds_c
     assert entities.state_value_for(entity) == "100.0"
 
 
+def test_master_timeout_entity_uses_milliseconds_with_internal_seconds_conversion():
+    entities = _make_entities()
+    entity = next(e for e in entities._entities if e.field_path == "em540_master.timeout")
+
+    payloads = dict(entities.advertise())
+    discovery_payload = json.loads(payloads[entities.discovery_topic_for(entity)])
+
+    assert discovery_payload["unit_of_measurement"] == "ms"
+    assert discovery_payload["min"] == 50
+    assert discovery_payload["max"] == 10000
+    assert discovery_payload["step"] == 1
+
+    # Default AppState value is 0.08s, should be surfaced as 80ms in HA.
+    assert entities.state_value_for(entity) == "80.0"
+
+
 # ---------------------------------------------------------------------------
 # Property 7 — MQTT discovery payload validity
 # ---------------------------------------------------------------------------
@@ -260,6 +276,23 @@ def test_master_update_interval_command_converts_ms_payload_to_seconds_internal_
 
     assert abs(state.em540_master.update_interval - 0.125) < 1e-9
     mqtt_client.publish.assert_called_once_with(entities.state_topic_for(entity), "125", retain=True)
+
+
+def test_master_timeout_command_converts_ms_payload_to_seconds_internal_value():
+    state = AppState()
+    mqtt_client = MagicMock()
+    config_manager = MagicMock(spec=ConfigManager)
+    entities = HAConfigEntities(state, mqtt_client, config_manager)
+
+    entity = next(e for e in entities._entities if e.field_path == "em540_master.timeout")
+    message = MagicMock()
+    message.topic = entities.command_topic_for(entity)
+    message.payload = b"250"
+
+    entities._on_command(None, None, message)
+
+    assert abs(state.em540_master.timeout - 0.25) < 1e-9
+    mqtt_client.publish.assert_called_once_with(entities.state_topic_for(entity), "250", retain=True)
 
 
 # ---------------------------------------------------------------------------
