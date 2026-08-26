@@ -165,7 +165,6 @@ async def process_loop():
 
         return await em540_master.acquire_data(
             tick_deadline_mono=tick_signal.deadline_mono,
-            tick_ready_at_mono=tick_signal.ready_at_mono,
             tick_interval_s=interval_s,
         )
 

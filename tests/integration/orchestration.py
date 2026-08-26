@@ -6,6 +6,8 @@ import time
 from collections import Counter
 from typing import Callable
 
+from pymodbus import ModbusException
+
 
 def wait_for_condition(predicate: Callable[[], bool], timeout: float, message: str) -> None:
     """Poll a predicate until it becomes true or timeout is exceeded.
@@ -83,7 +85,12 @@ def wait_for_downstream_data(client, address: int = 0x000B, timeout: float = 60.
     """
 
     def _data_available() -> bool:
-        result = client.read_holding_registers(address, count=1, device_id=1)
+        try:
+            result = client.read_holding_registers(address, count=1, device_id=1)
+        except (ModbusException, OSError, ConnectionError):
+            # During startup/reconnect windows the downstream socket can briefly
+            # reset before the server is fully ready; keep polling until timeout.
+            return False
         return (not result.isError()) and result.registers[0] != 0
 
     wait_for_condition(
