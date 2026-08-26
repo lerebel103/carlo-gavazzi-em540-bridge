@@ -122,11 +122,11 @@ async def process_loop():
             # worker semantics are latest-tick-wins under overload.
             pass
 
-    async def _attempt_connect(now: float, interval_s: float) -> None:
+    async def _attempt_connect(now: float, interval_s: float) -> tuple[bool, float]:
         nonlocal reconnect_backoff, next_connect_attempt_time
 
         if now < next_connect_attempt_time:
-            return
+            return False, max(0.0, next_connect_attempt_time - now)
 
         # Suppress the "Failed to connect" WARNING from pymodbus.logging to avoid reconnect log spam.
         with _suppress_pymodbus_reconnect_warning():
@@ -135,17 +135,25 @@ async def process_loop():
         if em540_master.connected:
             reconnect_backoff = interval_s if interval_s > 0.0 else 0.1
             next_connect_attempt_time = 0.0
+            return True, 0.0
         else:
             next_connect_attempt_time = time.perf_counter() + reconnect_backoff
             retry_base = interval_s if interval_s > 0.0 else 0.1
             reconnect_backoff = min(max(retry_base, reconnect_backoff * 2), max_reconnect_backoff)
+            return True, reconnect_backoff
 
     async def _acquire_cycle(tick_signal: _TickSignal | None) -> bool:
         interval_s = _current_interval()
         now = time.perf_counter()
 
         if not em540_master.connected:
-            await _attempt_connect(now, interval_s)
+            attempted_connect, wait_for_next_connect_s = await _attempt_connect(now, interval_s)
+            if not attempted_connect:
+                # In unpaced mode, avoid a disconnected hot loop while reconnect
+                # attempts are intentionally rate-limited by backoff.
+                if interval_s <= 0.0:
+                    await asyncio.sleep(min(wait_for_next_connect_s, 0.05))
+                return False
 
         if tick_signal is None:
             return await em540_master.acquire_data(tick_interval_s=interval_s)

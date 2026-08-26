@@ -330,6 +330,33 @@ class TestMainLoopPriority(unittest.TestCase):
         self.assertEqual(mocks["master"].acquire_data.await_count, 3)
         mock_sleep.assert_not_awaited()
 
+    def test_unpaced_disconnected_respects_reconnect_backoff_without_acquire_spin(self):
+        """When disconnected in unpaced mode, acquire_data should not spin between backoff windows."""
+        state = _make_state()
+        state.em540_master.update_interval = 0.0
+        mocks = _setup_mocks()
+        type(mocks["master"]).connected = PropertyMock(return_value=False)
+
+        async def _sleep(_delay):
+            raise _LoopBreak()
+
+        mocks["master"].acquire_data = AsyncMock(return_value=False)
+
+        with (
+            _patch_config_manager(state),
+            patch.object(main, "pymodbus_apply_logging_config"),
+            patch.object(main, "Em540Master", return_value=mocks["master"]),
+            patch.object(main, "Em540Slave", return_value=mocks["slave"]),
+            patch.object(main, "Ts65aSlaveBridge", return_value=mocks["ts65a"]),
+            patch.object(main, "HABridge"),
+            patch.object(main.asyncio, "sleep", side_effect=_sleep),
+        ):
+            with self.assertRaises(_LoopBreak):
+                asyncio.run(main.process_loop())
+
+        mocks["master"].connect.assert_awaited_once()
+        self.assertEqual(mocks["master"].acquire_data.await_count, 1)
+
     def test_update_interval_switch_from_zero_to_nonzero_enables_pacing(self):
         """Runtime interval switch 0 -> >0 should transition from unpaced to paced mode."""
         state = _make_state()

@@ -350,7 +350,14 @@ class Em540Master:
         if not self._client.connected:
             for listener in self._listeners:
                 await listener.read_failed()
-            self._update_timing_stats(cycle_start, modbus_read_ms, post_read_processing_ms)
+            self._update_timing_stats(
+                cycle_start=cycle_start,
+                modbus_read_ms=modbus_read_ms,
+                post_read_processing_ms=post_read_processing_ms,
+                tick_deadline_mono=tick_deadline_mono,
+                tick_ready_at_mono=tick_ready_at_mono,
+                tick_interval_s=tick_interval_s,
+            )
             return False
 
         # Use back buffer as the mutable working set and keep front buffer immutable for listeners.
@@ -369,7 +376,14 @@ class Em540Master:
         if not is_ok:
             for listener in self._listeners:
                 await listener.read_failed()
-            self._update_timing_stats(cycle_start, modbus_read_ms, post_read_processing_ms)
+            self._update_timing_stats(
+                cycle_start=cycle_start,
+                modbus_read_ms=modbus_read_ms,
+                post_read_processing_ms=post_read_processing_ms,
+                tick_deadline_mono=tick_deadline_mono,
+                tick_ready_at_mono=tick_ready_at_mono,
+                tick_interval_s=tick_interval_s,
+            )
             return False
 
         # --- Temporary baseline mode: full energy block every tick ---
@@ -567,7 +581,7 @@ class Em540Master:
             first_following_tick = tick_deadline_mono + tick_interval_s
             headroom_ms = (first_following_tick - acquisition_end) * 1000.0
         elif tick_interval_s > 0:
-            headroom_ms = tick_interval_s * 1000.0 - acquisition_duration_ms - non_read_processing_ms
+            headroom_ms = tick_interval_s * 1000.0 - acquisition_duration_ms
         else:
             headroom_ms = 0.0
 
