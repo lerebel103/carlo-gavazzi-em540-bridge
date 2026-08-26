@@ -263,7 +263,18 @@ async def process_loop():
                 _clear_tick_queue()
                 scheduler_task = asyncio.create_task(_paced_scheduler(), name="em540-tick-scheduler")
                 worker_task = asyncio.create_task(_paced_worker(), name="em540-acquisition-worker")
-                await asyncio.gather(scheduler_task, worker_task)
+                done, pending = await asyncio.wait(
+                    {scheduler_task, worker_task},
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                for task in pending:
+                    task.cancel()
+                if pending:
+                    await asyncio.gather(*pending, return_exceptions=True)
+                for task in done:
+                    exc = task.exception()
+                    if exc is not None:
+                        raise exc
             else:
                 await _unpaced_worker()
     finally:
