@@ -115,7 +115,7 @@ class HADiagnostics:
         self.acquisition_duration_max_ms = Sensor(
             "Acq Dur Max",
             "ms",
-            "measurement",
+            "duration",
             "measurement",
             self.state_topic,
             precision=2,
@@ -135,7 +135,7 @@ class HADiagnostics:
         self.acquisition_headroom_min_ms = Sensor(
             "Acq Headroom Min",
             "ms",
-            "measurement",
+            "duration",
             "measurement",
             self.state_topic,
             precision=2,
@@ -155,7 +155,7 @@ class HADiagnostics:
         self.acquisition_headroom_mean_ms = Sensor(
             "Acq Headroom Mean",
             "ms",
-            "measurement",
+            "duration",
             "measurement",
             self.state_topic,
             precision=2,
