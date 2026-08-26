@@ -53,7 +53,7 @@ class HADiagnostics:
         )
 
         self.update_rate = Sensor(
-            "RS485 Master Read Rate",
+            "Acq Rate",
             "Hz",
             "frequency",
             "measurement",
@@ -61,7 +61,6 @@ class HADiagnostics:
             precision=2,
             entity_category="diagnostic",
             enabled_by_default=True,
-            display_name="RS485 Acquisition Rate",
         )
         self.mqtt_update_rate = Sensor(
             "MQTT Data Update Rate",
@@ -103,8 +102,8 @@ class HADiagnostics:
             entity_category="diagnostic",
             enabled_by_default=False,
         )
-        self.master_read_duration_ms = Sensor(
-            "RS485 Master Read Duration",
+        self.acquisition_duration_min_ms = Sensor(
+            "Acq Dur Min",
             "ms",
             "duration",
             "measurement",
@@ -112,10 +111,9 @@ class HADiagnostics:
             precision=2,
             entity_category="diagnostic",
             enabled_by_default=False,
-            display_name="RS485 Acquisition Duration",
         )
-        self.master_read_duration_max_ms = Sensor(
-            "RS485 Master Read Duration Max",
+        self.acquisition_duration_max_ms = Sensor(
+            "Acq Dur Max",
             "ms",
             "measurement",
             "measurement",
@@ -123,10 +121,9 @@ class HADiagnostics:
             precision=2,
             entity_category="diagnostic",
             enabled_by_default=False,
-            display_name="RS485 Acquisition Duration Max",
         )
-        self.master_modbus_read_duration_ms = Sensor(
-            "RS485 Modbus Read Duration",
+        self.acquisition_duration_mean_ms = Sensor(
+            "Acq Dur Mean",
             "ms",
             "duration",
             "measurement",
@@ -134,10 +131,9 @@ class HADiagnostics:
             precision=2,
             entity_category="diagnostic",
             enabled_by_default=False,
-            display_name="RS485 Modbus I/O Duration",
         )
-        self.master_modbus_read_duration_max_ms = Sensor(
-            "RS485 Modbus Read Duration Max",
+        self.acquisition_headroom_min_ms = Sensor(
+            "Acq Headroom Min",
             "ms",
             "measurement",
             "measurement",
@@ -145,10 +141,9 @@ class HADiagnostics:
             precision=2,
             entity_category="diagnostic",
             enabled_by_default=False,
-            display_name="RS485 Modbus I/O Duration Max",
         )
-        self.master_post_read_processing_ms = Sensor(
-            "RS485 Post-Read Processing Duration",
+        self.acquisition_headroom_max_ms = Sensor(
+            "Acq Headroom Max",
             "ms",
             "duration",
             "measurement",
@@ -156,10 +151,9 @@ class HADiagnostics:
             precision=2,
             entity_category="diagnostic",
             enabled_by_default=False,
-            display_name="RS485 Worker Post-Processing Duration",
         )
-        self.master_post_read_processing_max_ms = Sensor(
-            "RS485 Post-Read Processing Duration Max",
+        self.acquisition_headroom_mean_ms = Sensor(
+            "Acq Headroom Mean",
             "ms",
             "measurement",
             "measurement",
@@ -167,54 +161,9 @@ class HADiagnostics:
             precision=2,
             entity_category="diagnostic",
             enabled_by_default=False,
-            display_name="RS485 Worker Post-Processing Duration Max",
-        )
-        self.master_non_read_processing_ms = Sensor(
-            "RS485 Other Processing Duration",
-            "ms",
-            "duration",
-            "measurement",
-            self.state_topic,
-            precision=2,
-            entity_category="diagnostic",
-            enabled_by_default=False,
-            display_name="RS485 Loop Overhead Duration",
-        )
-        self.master_non_read_processing_max_ms = Sensor(
-            "RS485 Other Processing Duration Max",
-            "ms",
-            "measurement",
-            "measurement",
-            self.state_topic,
-            precision=2,
-            entity_category="diagnostic",
-            enabled_by_default=False,
-            display_name="RS485 Loop Overhead Duration Max",
-        )
-        self.master_tick_headroom_ms = Sensor(
-            "RS485 Tick Headroom",
-            "ms",
-            "duration",
-            "measurement",
-            self.state_topic,
-            precision=2,
-            entity_category="diagnostic",
-            enabled_by_default=False,
-            display_name="RS485 Acquisition Headroom",
-        )
-        self.master_tick_headroom_min_ms = Sensor(
-            "RS485 Tick Headroom Min",
-            "ms",
-            "measurement",
-            "measurement",
-            self.state_topic,
-            precision=2,
-            entity_category="diagnostic",
-            enabled_by_default=False,
-            display_name="RS485 Acquisition Headroom Min",
         )
         self.master_tick_overrun_count = Sensor(
-            "RS485 Tick Overrun Count",
+            "Tick Overruns",
             None,
             None,
             "measurement",
@@ -222,7 +171,6 @@ class HADiagnostics:
             precision=0,
             entity_category="diagnostic",
             enabled_by_default=True,
-            display_name="RS485 Acquisition Deadline Miss Count",
         )
         self.min_power_w = Sensor(
             "Min Power W",
@@ -426,16 +374,12 @@ class HADiagnostics:
             self.read_failed_count,
             self.consumer_missed_updates_total,
             self.consumer_max_seq_gap,
-            self.master_read_duration_ms,
-            self.master_read_duration_max_ms,
-            self.master_modbus_read_duration_ms,
-            self.master_modbus_read_duration_max_ms,
-            self.master_post_read_processing_ms,
-            self.master_post_read_processing_max_ms,
-            self.master_non_read_processing_ms,
-            self.master_non_read_processing_max_ms,
-            self.master_tick_headroom_ms,
-            self.master_tick_headroom_min_ms,
+            self.acquisition_duration_min_ms,
+            self.acquisition_duration_max_ms,
+            self.acquisition_duration_mean_ms,
+            self.acquisition_headroom_min_ms,
+            self.acquisition_headroom_max_ms,
+            self.acquisition_headroom_mean_ms,
             self.master_tick_overrun_count,
             self.em540_rtu_client_count,
             self.em540_rtu_client_disconnect_count,
@@ -509,16 +453,12 @@ class HADiagnostics:
             master_stats = self._em540_master_stats.snapshot_and_reset_interval_extrema()
             self.consumer_missed_updates_total.update_value(master_stats["consumer_missed_updates_total"])
             self.consumer_max_seq_gap.update_value(master_stats["consumer_max_seq_gap"])
-            self.master_read_duration_ms.update_value(master_stats["read_duration_ms_max"])
-            self.master_read_duration_max_ms.update_value(master_stats["read_duration_ms_max"])
-            self.master_modbus_read_duration_ms.update_value(master_stats["modbus_read_duration_ms_max"])
-            self.master_modbus_read_duration_max_ms.update_value(master_stats["modbus_read_duration_ms_max"])
-            self.master_post_read_processing_ms.update_value(master_stats["post_read_processing_ms_max"])
-            self.master_post_read_processing_max_ms.update_value(master_stats["post_read_processing_ms_max"])
-            self.master_non_read_processing_ms.update_value(master_stats["non_read_processing_ms_max"])
-            self.master_non_read_processing_max_ms.update_value(master_stats["non_read_processing_ms_max"])
-            self.master_tick_headroom_ms.update_value(master_stats["tick_headroom_ms_min"])
-            self.master_tick_headroom_min_ms.update_value(master_stats["tick_headroom_ms_min"])
+            self.acquisition_duration_min_ms.update_value(master_stats["acquisition_duration_ms_min"])
+            self.acquisition_duration_max_ms.update_value(master_stats["acquisition_duration_ms_max"])
+            self.acquisition_duration_mean_ms.update_value(master_stats["acquisition_duration_ms_mean"])
+            self.acquisition_headroom_min_ms.update_value(master_stats["acquisition_headroom_ms_min"])
+            self.acquisition_headroom_max_ms.update_value(master_stats["acquisition_headroom_ms_max"])
+            self.acquisition_headroom_mean_ms.update_value(master_stats["acquisition_headroom_ms_mean"])
             self.master_tick_overrun_count.update_value(master_stats["tick_overrun_count"])
         if self._ts65a_slave_stats is not None:
             self.ts65a_tcp_client_count.update_value(self._ts65a_slave_stats.tcp_client_count)

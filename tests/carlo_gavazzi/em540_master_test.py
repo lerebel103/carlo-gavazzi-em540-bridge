@@ -311,9 +311,9 @@ class TestEm540Master(unittest.TestCase):
         def _on_stats(stats):
             observed.append(
                 (
-                    stats.modbus_read_duration_ms_last,
-                    stats.post_read_processing_ms_last,
-                    stats.non_read_processing_ms_last,
+                    stats.acquisition_duration_ms_min,
+                    stats.acquisition_duration_ms_max,
+                    stats.acquisition_duration_samples,
                 )
             )
 
@@ -327,10 +327,10 @@ class TestEm540Master(unittest.TestCase):
         )
 
         self.assertTrue(observed)
-        modbus_ms, post_ms, non_read_ms = observed[-1]
-        self.assertEqual(modbus_ms, 12.0)
-        self.assertEqual(post_ms, 3.0)
-        self.assertGreaterEqual(non_read_ms, 0.0)
+        dur_min, dur_max, sample_count = observed[-1]
+        self.assertGreaterEqual(dur_min, 0.0)
+        self.assertEqual(dur_min, dur_max)
+        self.assertEqual(sample_count, 1)
 
     def test_tick_overrun_not_counted_when_headroom_remains(self):
         """A cycle that still leaves time before the next tick must not count as an overrun."""
@@ -375,7 +375,7 @@ class TestEm540Master(unittest.TestCase):
             tick_interval_s=0.1,
         )
 
-        self.assertLess(self.master._stats.tick_headroom_ms_last, 0.0)
+        self.assertLess(self.master._stats.acquisition_headroom_ms_min, 0.0)
 
     def test_refresh_client_runtime_config_uses_live_shared_config_values(self):
         self.mock_client.timeout = 1.0

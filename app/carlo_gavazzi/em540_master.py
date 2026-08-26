@@ -34,16 +34,14 @@ class Em540MasterStats:
         self.lock: threading.Lock = threading.Lock()
         self.consumer_missed_updates_total: int = 0
         self.consumer_max_seq_gap: int = 0
-        self.read_duration_ms_last: float = 0.0
-        self.read_duration_ms_max: float = 0.0
-        self.modbus_read_duration_ms_last: float = 0.0
-        self.modbus_read_duration_ms_max: float = 0.0
-        self.post_read_processing_ms_last: float = 0.0
-        self.post_read_processing_ms_max: float = 0.0
-        self.non_read_processing_ms_last: float = 0.0
-        self.non_read_processing_ms_max: float = 0.0
-        self.tick_headroom_ms_last: float = 0.0
-        self.tick_headroom_ms_min: float = 0.0
+        self.acquisition_duration_ms_min: float = 0.0
+        self.acquisition_duration_ms_max: float = 0.0
+        self.acquisition_duration_ms_sum: float = 0.0
+        self.acquisition_duration_samples: int = 0
+        self.acquisition_headroom_ms_min: float = 0.0
+        self.acquisition_headroom_ms_max: float = 0.0
+        self.acquisition_headroom_ms_sum: float = 0.0
+        self.acquisition_headroom_samples: int = 0
         self.tick_overrun_count: int = 0
         self._listeners: list[Callable[["Em540MasterStats"], None]] = []
 
@@ -54,28 +52,37 @@ class Em540MasterStats:
         next interval window (DIAGNOSTICS_INTERVAL in HA diagnostics).
         """
         with self.lock:
+            if self.acquisition_duration_samples > 0:
+                acquisition_duration_ms_mean = self.acquisition_duration_ms_sum / self.acquisition_duration_samples
+            else:
+                acquisition_duration_ms_mean = 0.0
+
+            if self.acquisition_headroom_samples > 0:
+                acquisition_headroom_ms_mean = self.acquisition_headroom_ms_sum / self.acquisition_headroom_samples
+            else:
+                acquisition_headroom_ms_mean = 0.0
+
             snapshot = {
                 "consumer_missed_updates_total": self.consumer_missed_updates_total,
                 "consumer_max_seq_gap": self.consumer_max_seq_gap,
-                "read_duration_ms_last": self.read_duration_ms_last,
-                "read_duration_ms_max": self.read_duration_ms_max,
-                "modbus_read_duration_ms_last": self.modbus_read_duration_ms_last,
-                "modbus_read_duration_ms_max": self.modbus_read_duration_ms_max,
-                "post_read_processing_ms_last": self.post_read_processing_ms_last,
-                "post_read_processing_ms_max": self.post_read_processing_ms_max,
-                "non_read_processing_ms_last": self.non_read_processing_ms_last,
-                "non_read_processing_ms_max": self.non_read_processing_ms_max,
-                "tick_headroom_ms_last": self.tick_headroom_ms_last,
-                "tick_headroom_ms_min": self.tick_headroom_ms_min,
+                "acquisition_duration_ms_min": self.acquisition_duration_ms_min,
+                "acquisition_duration_ms_max": self.acquisition_duration_ms_max,
+                "acquisition_duration_ms_mean": acquisition_duration_ms_mean,
+                "acquisition_headroom_ms_min": self.acquisition_headroom_ms_min,
+                "acquisition_headroom_ms_max": self.acquisition_headroom_ms_max,
+                "acquisition_headroom_ms_mean": acquisition_headroom_ms_mean,
                 "tick_overrun_count": self.tick_overrun_count,
             }
 
-            # Reset only interval extrema; counters and *last values are lifetime/stream state.
-            self.read_duration_ms_max = 0.0
-            self.modbus_read_duration_ms_max = 0.0
-            self.post_read_processing_ms_max = 0.0
-            self.non_read_processing_ms_max = 0.0
-            self.tick_headroom_ms_min = 0.0
+            # Reset interval window stats while keeping persistent counters.
+            self.acquisition_duration_ms_min = 0.0
+            self.acquisition_duration_ms_max = 0.0
+            self.acquisition_duration_ms_sum = 0.0
+            self.acquisition_duration_samples = 0
+            self.acquisition_headroom_ms_min = 0.0
+            self.acquisition_headroom_ms_max = 0.0
+            self.acquisition_headroom_ms_sum = 0.0
+            self.acquisition_headroom_samples = 0
 
             return snapshot
 
@@ -567,11 +574,6 @@ class Em540Master:
         acquisition_end = time.perf_counter()
         acquisition_duration_ms = (acquisition_end - cycle_start) * 1000.0
 
-        if tick_ready_at_mono is not None:
-            non_read_processing_ms = max(0.0, (cycle_start - tick_ready_at_mono) * 1000.0)
-        else:
-            non_read_processing_ms = max(0.0, acquisition_duration_ms - modbus_read_ms - post_read_processing_ms)
-
         if tick_interval_s is None:
             tick_interval_s = float(getattr(self._config, "update_interval", 0.1))
 
@@ -586,26 +588,35 @@ class Em540Master:
             headroom_ms = 0.0
 
         with self._stats.lock:
-            self._stats.read_duration_ms_last = acquisition_duration_ms
-            self._stats.read_duration_ms_max = max(self._stats.read_duration_ms_max, acquisition_duration_ms)
-            self._stats.modbus_read_duration_ms_last = modbus_read_ms
-            self._stats.modbus_read_duration_ms_max = max(self._stats.modbus_read_duration_ms_max, modbus_read_ms)
-            self._stats.post_read_processing_ms_last = post_read_processing_ms
-            self._stats.post_read_processing_ms_max = max(
-                self._stats.post_read_processing_ms_max,
-                post_read_processing_ms,
-            )
-            self._stats.non_read_processing_ms_last = non_read_processing_ms
-            self._stats.non_read_processing_ms_max = max(
-                self._stats.non_read_processing_ms_max,
-                non_read_processing_ms,
-            )
-            self._stats.tick_headroom_ms_last = headroom_ms
-
-            if self._stats.tick_headroom_ms_min == 0:
-                self._stats.tick_headroom_ms_min = headroom_ms
+            self._stats.acquisition_duration_ms_sum += acquisition_duration_ms
+            self._stats.acquisition_duration_samples += 1
+            if self._stats.acquisition_duration_samples == 1:
+                self._stats.acquisition_duration_ms_min = acquisition_duration_ms
+                self._stats.acquisition_duration_ms_max = acquisition_duration_ms
             else:
-                self._stats.tick_headroom_ms_min = min(self._stats.tick_headroom_ms_min, headroom_ms)
+                self._stats.acquisition_duration_ms_min = min(
+                    self._stats.acquisition_duration_ms_min,
+                    acquisition_duration_ms,
+                )
+                self._stats.acquisition_duration_ms_max = max(
+                    self._stats.acquisition_duration_ms_max,
+                    acquisition_duration_ms,
+                )
+
+            self._stats.acquisition_headroom_ms_sum += headroom_ms
+            self._stats.acquisition_headroom_samples += 1
+            if self._stats.acquisition_headroom_samples == 1:
+                self._stats.acquisition_headroom_ms_min = headroom_ms
+                self._stats.acquisition_headroom_ms_max = headroom_ms
+            else:
+                self._stats.acquisition_headroom_ms_min = min(
+                    self._stats.acquisition_headroom_ms_min,
+                    headroom_ms,
+                )
+                self._stats.acquisition_headroom_ms_max = max(
+                    self._stats.acquisition_headroom_ms_max,
+                    headroom_ms,
+                )
 
             # Overrun means we missed the immediate following tick boundary.
             overrun_threshold_ms = tick_interval_s * 1000.0 * self._TICK_OVERRUN_MARGIN_FRACTION
