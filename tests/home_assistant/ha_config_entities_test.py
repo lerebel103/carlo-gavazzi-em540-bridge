@@ -50,6 +50,22 @@ _REQUIRED_KEYS = {"name", "unique_id", "command_topic", "state_topic", "device",
 _NUMBER_KEYS = {"min", "max", "step", "mode"}
 
 
+def test_master_update_interval_entity_uses_milliseconds_with_internal_seconds_conversion():
+    entities = _make_entities()
+    entity = next(e for e in entities._entities if e.field_path == "em540_master.update_interval")
+
+    payloads = dict(entities.advertise())
+    discovery_payload = json.loads(payloads[entities.discovery_topic_for(entity)])
+
+    assert discovery_payload["unit_of_measurement"] == "ms"
+    assert discovery_payload["min"] == 0.0
+    assert discovery_payload["max"] == 10000
+    assert discovery_payload["step"] == 1
+
+    # Default AppState value is 0.1s, should be surfaced as 100ms in HA.
+    assert entities.state_value_for(entity) == "100.0"
+
+
 # ---------------------------------------------------------------------------
 # Property 7 — MQTT discovery payload validity
 # ---------------------------------------------------------------------------
@@ -146,7 +162,7 @@ def test_property_mqtt_discovery_payload_validity(state: AppState):
 # ---------------------------------------------------------------------------
 
 # Strategy: pick a random entity index and a valid value within its range.
-_ENTITY_COUNT = 7  # number of entities built by HAConfigEntities
+_ENTITY_COUNT = len(PERSISTED_FIELDS)
 
 _entity_index = st.integers(min_value=0, max_value=_ENTITY_COUNT - 1)
 
@@ -227,6 +243,23 @@ def test_property_valid_command_updates_state_and_triggers_persist(data):
     # 3) Published new value to state topic with retain=True (Req 10.3)
     state_topic = f"lerebel/config/em540_bridge/{entity.safe_name}/state"
     mqtt_client.publish.assert_called_once_with(state_topic, str(value), retain=True)
+
+
+def test_master_update_interval_command_converts_ms_payload_to_seconds_internal_value():
+    state = AppState()
+    mqtt_client = MagicMock()
+    config_manager = MagicMock(spec=ConfigManager)
+    entities = HAConfigEntities(state, mqtt_client, config_manager)
+
+    entity = next(e for e in entities._entities if e.field_path == "em540_master.update_interval")
+    message = MagicMock()
+    message.topic = entities.command_topic_for(entity)
+    message.payload = b"125"
+
+    entities._on_command(None, None, message)
+
+    assert abs(state.em540_master.update_interval - 0.125) < 1e-9
+    mqtt_client.publish.assert_called_once_with(entities.state_topic_for(entity), "125", retain=True)
 
 
 # ---------------------------------------------------------------------------
