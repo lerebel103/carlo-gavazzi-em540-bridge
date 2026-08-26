@@ -18,7 +18,7 @@ from app.version import version_for_display
 
 logger = logging.getLogger()
 config_manager = None
-_MIN_PACED_INTERVAL_S = 0.01
+_MIN_PACED_INTERVAL_S = 0.001
 
 
 @dataclass(frozen=True)
@@ -87,8 +87,8 @@ async def process_loop():
     await em540_slave.start()
     await ts65a_slave.start()
 
-    read_interval = float(state.em540_master.update_interval)
-    reconnect_backoff = read_interval if read_interval > 0.0 else 0.1
+    reconnect_backoff = float(state.em540_master.update_interval)
+    reconnect_backoff = reconnect_backoff if reconnect_backoff > 0.0 else 0.1
     max_reconnect_backoff = 5.0
     next_connect_attempt_time = 0.0
     stop_event = asyncio.Event()
