@@ -3,6 +3,7 @@ import argparse
 import asyncio
 import logging
 import math
+import sys
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -11,7 +12,7 @@ from pymodbus import pymodbus_apply_logging_config
 
 from app.carlo_gavazzi.em540_master import Em540Master
 from app.carlo_gavazzi.em540_slave_bridge import Em540Slave
-from app.config import ConfigManager
+from app.config import ConfigError, ConfigManager
 from app.fronius.ts65a_slave_bridge import Ts65aSlaveBridge
 from app.home_assistant.ha_bridge import HABridge
 from app.version import version_for_display
@@ -315,7 +316,16 @@ async def main():
 
     args = parse_args()
     config_manager = ConfigManager(args.config)
-    state = config_manager.load()
+    try:
+        state = config_manager.load()
+    except ConfigError as exc:
+        # Fail hard and fast on invalid configuration (e.g. a misconfigured or
+        # unreachable serial device) rather than starting a service that can
+        # never do useful work. logging isn't configured yet at this point,
+        # so fall back to basicConfig defaults for a visible message.
+        logging.basicConfig()
+        logger.critical("Invalid configuration, refusing to start: %s", exc)
+        sys.exit(1)
     logging.basicConfig(level=state.root_log_level)
     logger.info("Starting EM540 Energy Meter Bridge (%s)", version_for_display())
     await process_loop()

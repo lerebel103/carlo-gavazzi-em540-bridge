@@ -24,6 +24,23 @@ from app.config import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _skip_serial_device_reachability_check(request):
+    """Unit tests don't have real serial hardware attached.
+
+    ConfigManager._validate() probes configured serial device paths by
+    opening them. Patch that check out for tests that aren't specifically
+    exercising it, so tests can use placeholder paths like /dev/ttyUSB0.
+    Tests marked with @pytest.mark.real_serial_check exercise the real
+    implementation instead.
+    """
+    if "real_serial_check" in request.keywords:
+        yield
+        return
+    with patch.object(ConfigManager, "_check_serial_device_reachable"):
+        yield
+
+
 @pytest.fixture()
 def valid_yaml(tmp_path):
     """Return path to a minimal valid config file."""
@@ -396,6 +413,54 @@ def test_nested_serial_config_must_be_mapping(tmp_path, section, value):
     path = _make_config(tmp_path, {f"{section}.serial": value})
     with pytest.raises(ConfigError, match=rf"{section}\.serial must be a mapping"):
         ConfigManager(path).load()
+
+
+# -- serial device reachability --
+#
+# These tests exercise the real _check_serial_device_reachable() implementation
+# (rather than the autouse patched stub) against actual pyserial failures, so
+# they don't need real hardware but do need the check itself to run.
+
+
+@pytest.mark.real_serial_check
+def test_unreachable_master_serial_port_raises(tmp_path):
+    path = _make_config(tmp_path, {"em540_master.mode": "serial", "em540_master.serial_port": "/dev/ttyDOESNOTEXIST99"})
+    with pytest.raises(ConfigError, match="em540_master.serial_port"):
+        ConfigManager(path).load()
+
+
+@pytest.mark.real_serial_check
+@pytest.mark.parametrize("section", ["em540_slave", "ts65a_slave"])
+def test_unreachable_downstream_serial_port_raises(tmp_path, section):
+    path = _make_config(
+        tmp_path,
+        {f"{section}.serial.enabled": True, f"{section}.serial.port": "/dev/ttyDOESNOTEXIST99"},
+    )
+    with pytest.raises(ConfigError, match=f"{section}\\.serial\\.port"):
+        ConfigManager(path).load()
+
+
+@pytest.mark.real_serial_check
+def test_master_serial_check_skipped_when_mode_is_tcp(tmp_path):
+    """The master's serial_port should not be probed at all when mode is 'tcp'."""
+    path = _make_config(
+        tmp_path,
+        {"em540_master.mode": "tcp", "em540_master.serial_port": "/dev/ttyDOESNOTEXIST99"},
+    )
+    state = ConfigManager(path).load()
+    assert state.em540_master.mode == "tcp"
+
+
+@pytest.mark.real_serial_check
+@pytest.mark.parametrize("section", ["em540_slave", "ts65a_slave"])
+def test_downstream_serial_check_skipped_when_disabled(tmp_path, section):
+    """A disabled downstream serial adapter should not be probed."""
+    path = _make_config(
+        tmp_path,
+        {f"{section}.serial.enabled": False, f"{section}.serial.port": "/dev/ttyDOESNOTEXIST99"},
+    )
+    state = ConfigManager(path).load()
+    assert getattr(state, section).serial.enabled is False
 
 
 # -- pymodbus / root log_level validation --

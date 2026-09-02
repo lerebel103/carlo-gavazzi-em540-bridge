@@ -175,14 +175,13 @@ class Em540Validator:
     def validate_serial_client(self, client) -> None:
         """Validate EM540 serial client with stable representative blocks.
 
-        Serial transport over PTY can occasionally timeout under CI load;
-        when reads do succeed, values must match expected data.
+        Serial transport over PTY can occasionally timeout under CI load, so
+        callers should retry via wait_for_condition; a ModbusException here
+        propagates (rather than being swallowed) so a permanently unresponsive
+        serial path fails the test instead of being treated as a pass.
         """
-        try:
-            static_000b = read_holding_registers(client, 0x000B, len(self.expected_blocks["static_000b"]))
-            primary_head = read_holding_registers(client, 0x0000, 4)
-        except ModbusException:
-            return
+        static_000b = read_holding_registers(client, 0x000B, len(self.expected_blocks["static_000b"]))
+        primary_head = read_holding_registers(client, 0x0000, 4)
         expected_primary_head = self.expected_blocks["primary"][:4]
         assert static_000b == self.expected_blocks["static_000b"], (
             f"SERIAL mismatch at static_000b: got {static_000b} expected {self.expected_blocks['static_000b']}"
@@ -286,12 +285,15 @@ class Ts65aValidator:
         assert signature == [21365, 28243], f"TS65A signature mismatch: {signature}"
 
     def validate_serial_client(self, client) -> None:
-        """Validate TS65A serial client via signature and dynamic head."""
-        try:
-            self.validate_signature_registers(client)
-            dynamic_head = self._read_stable_holding_registers(client, 40071, 6)
-        except ModbusException:
-            return
+        """Validate TS65A serial client via signature and dynamic head.
+
+        A ModbusException here propagates (rather than being swallowed) so a
+        permanently unresponsive serial path fails the test instead of being
+        treated as a pass; transient PTY timeouts are handled by the caller's
+        retry loop via wait_for_condition.
+        """
+        self.validate_signature_registers(client)
+        dynamic_head = self._read_stable_holding_registers(client, 40071, 6)
         decoded_head = decode_ts65a_dynamic_values(dynamic_head)
         expected_decoded = self.compute_expected_values()
         assert decoded_head[:3] == pytest.approx(expected_decoded[:3], rel=1e-3, abs=1e-3), (
@@ -465,11 +467,13 @@ def test_end_to_end_serial_and_tcp_clients_observe_expected_data() -> None:
 
                 def _all_downstream_paths_error() -> bool:
                     def _is_error(client, address: int) -> bool:
-                        try:
-                            result = client.read_holding_registers(address, count=2, device_id=1)
-                            return result.isError()
-                        except ModbusException:
-                            return True
+                        # A real Modbus exception *response* (circuit breaker firing) means
+                        # result.isError() is True without raising. A raised ModbusException
+                        # here means the transport itself failed (connection refused/timeout),
+                        # which is a different failure mode (e.g. the dead serial path bug)
+                        # and must not be conflated with the expected fail-closed behavior.
+                        result = client.read_holding_registers(address, count=2, device_id=1)
+                        return result.isError()
 
                     em540_tcp_result = _is_error(clients.em540_tcp, 0x0000)
                     em540_rtu_result = _is_error(clients.em540_rtu, 0x0000)

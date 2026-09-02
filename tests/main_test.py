@@ -500,6 +500,27 @@ class TestMainLoopPriority(unittest.TestCase):
 
         mock_logger_info.assert_any_call("Starting EM540 Energy Meter Bridge (%s)", "v1.2.3")
 
+    def test_main_exits_on_invalid_config(self):
+        """A ConfigError at load time must hard-exit rather than run silently."""
+        with (
+            patch.object(main, "parse_args", return_value=SimpleNamespace(config="config.yaml")),
+            patch.object(main, "ConfigManager") as mock_cm_cls,
+            patch.object(main.logging, "basicConfig"),
+            patch.object(main, "process_loop", new_callable=AsyncMock) as mock_process_loop,
+            patch.object(main.logger, "critical") as mock_logger_critical,
+            patch.object(main.sys, "exit", side_effect=SystemExit(1)) as mock_exit,
+        ):
+            mock_cm = MagicMock()
+            mock_cm.load.side_effect = main.ConfigError("em540_master.serial_port '/dev/bad' could not be opened")
+            mock_cm_cls.return_value = mock_cm
+
+            with self.assertRaises(SystemExit):
+                asyncio.run(main.main())
+
+        mock_exit.assert_called_once_with(1)
+        mock_logger_critical.assert_called_once()
+        mock_process_loop.assert_not_awaited()
+
 
 if __name__ == "__main__":
     unittest.main()
