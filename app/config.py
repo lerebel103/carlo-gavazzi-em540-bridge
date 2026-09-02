@@ -325,9 +325,11 @@ class ConfigManager:
         Catches the common misconfiguration case (wrong/missing device path)
         at startup instead of letting the master/slave silently retry forever
         or letting a downstream slave bind fail without a clear diagnosis.
-        Opens and immediately closes the port; does not touch baud/parity/etc.
-        since those are validated independently and a bad combination there
-        would not prevent the open() call from succeeding.
+        Opens and immediately closes the port. This only avoids issuing any
+        Modbus I/O; it is not otherwise side-effect free — opening the device
+        may apply default line settings via the OS/driver. Baud/parity/etc are
+        validated independently and a bad combination there would not prevent
+        the open() call from succeeding.
         """
         try:
             probe = serial.Serial()

@@ -321,9 +321,12 @@ async def main():
     except ConfigError as exc:
         # Fail hard and fast on invalid configuration (e.g. a misconfigured or
         # unreachable serial device) rather than starting a service that can
-        # never do useful work. logging isn't configured yet at this point,
-        # so fall back to basicConfig defaults for a visible message.
-        logging.basicConfig()
+        # never do useful work. logging isn't configured yet at this point, so
+        # fall back to basicConfig for a visible message. force=True guarantees
+        # the fallback handler is installed even if some handler was already
+        # configured (e.g. under an embedding launcher), so the critical message
+        # is never silently suppressed.
+        logging.basicConfig(force=True)
         logger.critical("Invalid configuration, refusing to start: %s", exc)
         sys.exit(1)
     logging.basicConfig(level=state.root_log_level)
