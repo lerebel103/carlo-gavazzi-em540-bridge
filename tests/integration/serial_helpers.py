@@ -139,6 +139,12 @@ class ModbusRtuServer:
         self._stop = threading.Event()
         self._lock = threading.Lock()
         self._registers: dict[int, int] = {}
+        # Values returned only for an exact single-register read (count == 1) of a
+        # given address. Models registers whose value differs between a
+        # single-word read and a contiguous block scan (e.g. the EM540
+        # identification code at 0x000B, which shares an address with the high
+        # word of the V L3-L1 INT32 measurement).
+        self._single_word_overrides: dict[int, int] = {}
         self._requests: list[tuple[float, int, int]] = []
         self._connect_events: list[bool] = []
 
@@ -151,6 +157,17 @@ class ModbusRtuServer:
         """Replace the register map."""
         with self._lock:
             self._registers = dict(registers)
+
+    def set_single_word_overrides(self, overrides: dict[int, int]) -> None:
+        """Set values returned only for exact single-register (count==1) reads.
+
+        A block scan spanning one of these addresses still returns the value from
+        the normal register map; only a standalone single-word read returns the
+        override. This mirrors meters that multiplex an identity register onto an
+        address that is otherwise part of a wider measurement value.
+        """
+        with self._lock:
+            self._single_word_overrides = dict(overrides)
 
     def start(self) -> None:
         """Start the server thread."""
@@ -197,7 +214,10 @@ class ModbusRtuServer:
             address = (request[2] << 8) | request[3]
             count = (request[4] << 8) | request[5]
             with self._lock:
-                registers = [self._registers.get(addr, 0) for addr in range(address, address + count)]
+                if count == 1 and address in self._single_word_overrides:
+                    registers = [self._single_word_overrides[address]]
+                else:
+                    registers = [self._registers.get(addr, 0) for addr in range(address, address + count)]
                 self._requests.append((time.monotonic(), address, count))
             response = self._build_response(unit_id, function_code, registers)
             os.write(self._master_fd, response)

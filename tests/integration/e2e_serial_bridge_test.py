@@ -60,14 +60,48 @@ class Em540UpstreamSimulator:
         self._update_registers()
 
     def _update_registers(self) -> None:
-        """Refresh the server's register map from the current frame."""
+        """Refresh the server's register map from the current frame.
+
+        Models real EM540 behaviour: the instantaneous-variables block
+        (0x0000..) is a contiguous run of INT32/INT16 measurements, and a
+        block scan returns those raw measurement words. Some static/identity
+        registers (e.g. 0x000B "Carlo Gavazzi identification code") share an
+        address that falls *inside* that dynamic block — on real hardware that
+        register reads as the (zero) high word of the V L3-L1 INT32 during a
+        block scan, and the identity code is only returned via a separate
+        single-word read. So static registers must NOT overwrite addresses
+        already occupied by a dynamic register; doing so previously injected the
+        device-type code (1744) into the V L3-L1 high word and corrupted the
+        parsed line-to-line voltage — a value a real meter never emits.
+        """
         values: dict[int, int] = {}
-        # Dynamic registers laid down first, then static registers overwrite overlaps
-        for reg_map in (self.frame.dynamic_reg_map, self.frame.static_reg_map):
-            for addr, reg in reg_map.items():
-                for i, value in enumerate(reg.values):
-                    values[addr + i] = int(value)
+
+        # Lay down dynamic registers first and record every address they occupy.
+        dynamic_addrs: set[int] = set()
+        for addr, reg in self.frame.dynamic_reg_map.items():
+            for i, value in enumerate(reg.values):
+                values[addr + i] = int(value)
+                dynamic_addrs.add(addr + i)
+
+        # Add static registers only at addresses NOT already served by the
+        # dynamic block, mirroring how a real meter lays out its register space.
+        # Static registers that overlap a dynamic address are exposed instead as
+        # single-word-read overrides below (see set_single_word_overrides), so a
+        # standalone read of e.g. 0x000B returns the identification code while a
+        # block scan returns the (zero) V L3-L1 high word.
+        overlap_overrides: dict[int, int] = {}
+        for addr, reg in self.frame.static_reg_map.items():
+            for i, value in enumerate(reg.values):
+                if (addr + i) in dynamic_addrs:
+                    # Only single-register static fields can be represented as a
+                    # single-word override without ambiguity.
+                    if len(reg.values) == 1:
+                        overlap_overrides[addr + i] = int(value)
+                    continue
+                values[addr + i] = int(value)
+
         self.server.set_registers(values)
+        self.server.set_single_word_overrides(overlap_overrides)
 
     def start(self) -> None:
         """Start the simulator server."""
@@ -173,22 +207,18 @@ class Em540Validator:
         self._assert_all_blocks_match(reads, "RTU")
 
     def validate_serial_client(self, client) -> None:
-        """Validate EM540 serial client with stable representative blocks.
+        """Validate EM540 serial client against the full expected register set.
 
-        Serial transport over PTY can occasionally timeout under CI load, so
-        callers should retry via wait_for_condition; a ModbusException here
-        propagates (rather than being swallowed) so a permanently unresponsive
-        serial path fails the test instead of being treated as a pass.
+        The serial slave shares the same register context as the TCP/RTU slaves,
+        so it must serve identical data. All seven blocks are verified (same as
+        TCP/RTU) rather than a representative subset. Serial transport over PTY
+        can occasionally timeout under CI load, so callers retry via
+        wait_for_condition; a ModbusException here propagates (rather than being
+        swallowed) so a permanently unresponsive serial path fails the test
+        instead of being treated as a pass.
         """
-        static_000b = read_holding_registers(client, 0x000B, len(self.expected_blocks["static_000b"]))
-        primary_head = read_holding_registers(client, 0x0000, 4)
-        expected_primary_head = self.expected_blocks["primary"][:4]
-        assert static_000b == self.expected_blocks["static_000b"], (
-            f"SERIAL mismatch at static_000b: got {static_000b} expected {self.expected_blocks['static_000b']}"
-        )
-        assert primary_head == expected_primary_head, (
-            f"SERIAL mismatch at primary head: got {primary_head[:5]}... expected {expected_primary_head[:5]}..."
-        )
+        reads = self._read_all_blocks(client)
+        self._assert_all_blocks_match(reads, "SERIAL")
 
     def _read_all_blocks(self, client) -> list[list[int]]:
         """Read all expected register blocks from a client."""
@@ -251,8 +281,8 @@ class Ts65aValidator:
         """Compute expected TS65A values from the upstream frame.
 
         Returns:
-            List of floats representing the expected dynamic values (first 11 floats only,
-            which are the stable current/voltage/frequency measurements before smoothing effects).
+            List of all 45 expected dynamic float values, matching the TS65A
+            register layout served downstream.
         """
         meter_data = MeterData()
         meter_data.frame = self.upstream_frame
@@ -268,14 +298,17 @@ class Ts65aValidator:
 
     def validate_tcp_client(self, client) -> None:
         """Validate TS65A TCP client against expected data."""
-        # Read the dynamic values register block
-        ts65a_dynamic = self._read_stable_holding_registers(client, 40071, 90)  # 45 floats = 90 registers
+        # Read the dynamic values register block (45 floats = 90 registers).
+        ts65a_dynamic = self._read_stable_holding_registers(client, 40071, 90)
         ts65a_decoded = decode_ts65a_dynamic_values(ts65a_dynamic)
         expected_decoded = self.compute_expected_values()
 
-        # Validate only the stable subset (first 11 floats: current, voltage, frequency)
-        # Energy/VAh fields are smoothed and less stable
-        assert ts65a_decoded[:11] == pytest.approx(expected_decoded[:11], rel=1e-3, abs=1e-3), (
+        # Verify all 45 decoded floats. The current/voltage/power/etc. fields are
+        # fed through bounded moving averages, but for a fixed upstream frame those
+        # averages converge to the instantaneous value; the energy (Wh) and VAh
+        # fields are assigned directly (no smoothing). _read_stable_holding_registers
+        # waits for two identical reads, so we only compare a converged snapshot.
+        assert ts65a_decoded == pytest.approx(expected_decoded, rel=1e-3, abs=1e-3), (
             f"TS65A TCP dynamic values mismatch: got {ts65a_decoded[:3]}... expected {expected_decoded[:3]}..."
         )
 
@@ -285,19 +318,21 @@ class Ts65aValidator:
         assert signature == [21365, 28243], f"TS65A signature mismatch: {signature}"
 
     def validate_serial_client(self, client) -> None:
-        """Validate TS65A serial client via signature and dynamic head.
+        """Validate TS65A serial client against the full expected value set.
 
-        A ModbusException here propagates (rather than being swallowed) so a
-        permanently unresponsive serial path fails the test instead of being
-        treated as a pass; transient PTY timeouts are handled by the caller's
-        retry loop via wait_for_condition.
+        The serial slave shares the same register context as the TCP slave, so it
+        must serve identical data. Signature registers plus all 45 dynamic floats
+        are verified (same as TCP). A ModbusException here propagates (rather than
+        being swallowed) so a permanently unresponsive serial path fails the test
+        instead of being treated as a pass; transient PTY timeouts are handled by
+        the caller's retry loop via wait_for_condition.
         """
         self.validate_signature_registers(client)
-        dynamic_head = self._read_stable_holding_registers(client, 40071, 6)
-        decoded_head = decode_ts65a_dynamic_values(dynamic_head)
+        ts65a_dynamic = self._read_stable_holding_registers(client, 40071, 90)
+        decoded = decode_ts65a_dynamic_values(ts65a_dynamic)
         expected_decoded = self.compute_expected_values()
-        assert decoded_head[:3] == pytest.approx(expected_decoded[:3], rel=1e-3, abs=1e-3), (
-            f"TS65A serial dynamic head mismatch: got {decoded_head[:3]} expected {expected_decoded[:3]}"
+        assert decoded == pytest.approx(expected_decoded, rel=1e-3, abs=1e-3), (
+            f"TS65A serial dynamic values mismatch: got {decoded[:3]} expected {expected_decoded[:3]}"
         )
 
     def _read_stable_holding_registers(self, client, address: int, count: int) -> list[int]:
