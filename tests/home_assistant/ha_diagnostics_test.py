@@ -30,6 +30,20 @@ def test_em540_tcp_client_stats_are_published_in_diagnostics_payload():
     assert payload_obj["em540_tcp_client_disconnect_count"] == 11
 
 
+def test_read_failed_count_is_published_from_master_stats():
+    diagnostics = HADiagnostics(topic_prefix="test")
+
+    master_stats = Em540MasterStats()
+    master_stats.read_failed_total = 7
+    diagnostics.set_em540_master_stats(master_stats)
+
+    with patch.dict("sys.modules", {"uptime": SimpleNamespace(uptime=lambda: 1)}):
+        _, payload = diagnostics.mqtt_data()
+    payload_obj = json.loads(payload)
+
+    assert payload_obj["rs485_master_read_failures"] == 7
+
+
 def test_master_timing_payload_prefers_worst_case_values_over_last_cycle_values():
     diagnostics = HADiagnostics(topic_prefix="test")
 

@@ -43,6 +43,10 @@ class Em540MasterStats:
         self.acquisition_headroom_ms_sum: float = 0.0
         self.acquisition_headroom_samples: int = 0
         self.tick_overrun_count: int = 0
+        # Count of every failed upstream read attempt: transport not connected,
+        # primary block read failure, corrupt frame, and energy block chunk read
+        # failure. This is the authoritative "RS485 Master Read Failures" metric.
+        self.read_failed_total: int = 0
         self._listeners: list[Callable[["Em540MasterStats"], None]] = []
 
     def snapshot_and_reset_interval_extrema(self) -> dict[str, float | int]:
@@ -352,8 +356,7 @@ class Em540Master:
 
         # No point reading if we are not connected
         if not self._client.connected:
-            for listener in self._listeners:
-                await listener.read_failed()
+            await self._notify_listeners_read_failed()
             self._update_timing_stats(
                 cycle_start=cycle_start,
                 tick_deadline_mono=tick_deadline_mono,
@@ -374,8 +377,7 @@ class Em540Master:
         is_ok = await self._read_primary_block(frame)
 
         if not is_ok:
-            for listener in self._listeners:
-                await listener.read_failed()
+            await self._notify_listeners_read_failed()
             self._update_timing_stats(
                 cycle_start=cycle_start,
                 tick_deadline_mono=tick_deadline_mono,
@@ -392,7 +394,12 @@ class Em540Master:
                 self._energy_initial_read_complete = True
                 logger.info("Initial full energy register read complete.")
         else:
-            # Preserve previously-known energy values when the read fails.
+            # Energy read failed — primary data still published this tick, so we
+            # do NOT abort or signal listeners read_failed (that would flap their
+            # circuit breakers on a partial miss). Still count it so the
+            # read-failure metric accounts for every upstream read error, and
+            # preserve previously-known energy values.
+            self._count_read_failure()
             self._backfill_energy_from_front(frame)
 
         # --- Post-read processing and publication ---
@@ -401,8 +408,7 @@ class Em540Master:
         except (struct.error, ValueError, OverflowError) as e:
             logger.warning("Corrupt frame data, dropping cycle: %s", e)
             is_ok = False
-            for listener in self._listeners:
-                await listener.read_failed()
+            await self._notify_listeners_read_failed()
 
         if is_ok:
             # Swap buffers under the condition lock so the front buffer stays immutable
@@ -424,6 +430,32 @@ class Em540Master:
         )
 
         return is_ok
+
+    def _count_read_failure(self) -> None:
+        """Record a failed upstream read attempt in diagnostics.
+
+        Covers every read failure mode: not connected, primary block failure,
+        corrupt frame, and energy block chunk failure. This keeps the
+        "RS485 Master Read Failures" metric authoritative regardless of whether
+        the failure aborts the tick (primary/connect/corrupt) or is tolerated
+        without aborting (energy chunk).
+        """
+        with self._stats.lock:
+            self._stats.read_failed_total += 1
+        self._stats.changed()
+
+    async def _notify_listeners_read_failed(self) -> None:
+        """Signal listeners that the tick produced no usable data.
+
+        Also counts the failure. Used for whole-cycle failures (not connected,
+        primary block failure, corrupt frame) where downstream consumers must
+        fail closed. Energy chunk failures do NOT use this path: they count the
+        failure but keep publishing primary data, so listeners are not told the
+        cycle failed (which would flap their circuit breakers needlessly).
+        """
+        self._count_read_failure()
+        for listener in self._listeners:
+            await listener.read_failed()
 
     async def _read_primary_block(self, frame) -> bool:
         """Read the primary dynamic register block (0x0000)."""

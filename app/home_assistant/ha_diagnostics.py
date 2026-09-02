@@ -423,7 +423,13 @@ class HADiagnostics:
             self._last_mqtt_rate_timestamp = now
 
     def read_failed(self):
-        self.read_failed_count.update_value(self.read_failed_count.value + 1)
+        # The read-failure count is sourced authoritatively from
+        # Em540MasterStats.read_failed_total in mqtt_data(), which captures every
+        # failure mode (connect, primary block, corrupt frame, energy chunk).
+        # This hook is retained for the availability-side effects driven by the
+        # HABridge listener; it intentionally no longer mutates the counter to
+        # avoid double counting against the master stat.
+        pass
 
     def advertise_data(self):
         return [sensor.discovery() for sensor in self._all_sensors()]
@@ -450,6 +456,7 @@ class HADiagnostics:
             self.em540_stale_data_age_ms.update_value(self._em540_slave_stats.stale_data_age_ms)
             self.em540_dropped_stale_request_count.update_value(self._em540_slave_stats.dropped_stale_request_count)
         if self._em540_master_stats is not None:
+            self.read_failed_count.update_value(self._em540_master_stats.read_failed_total)
             master_stats = self._em540_master_stats.snapshot_and_reset_interval_extrema()
             self.consumer_missed_updates_total.update_value(master_stats["consumer_missed_updates_total"])
             self.consumer_max_seq_gap.update_value(master_stats["consumer_max_seq_gap"])
