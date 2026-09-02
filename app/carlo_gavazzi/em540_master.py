@@ -116,6 +116,10 @@ class Em540Master:
     # Interval between repeated "still disconnected" log messages (seconds).
     _RECONNECT_LOG_INTERVAL: float = 30.0
 
+    # Interval between periodic diagnostics debug-log lines (seconds), emitted
+    # only when DEBUG logging is enabled for this master.
+    _DIAGNOSTICS_LOG_INTERVAL: float = 5.0
+
     # Fraction of the per-tick budget allowed as jitter before a cycle is counted as an
     # overrun. A single cycle's wall-clock duration includes Modbus I/O round-trip time,
     # which naturally jitters. Without this margin, transient blips that the scheduler
@@ -155,6 +159,11 @@ class Em540Master:
         self._consecutive_connect_failures: int = 0
         self._first_failure_time: float = 0.0
         self._last_reconnect_log_time: float = 0.0
+
+        # Periodic diagnostics debug-logging state. Tracks a windowed read count
+        # so a frame rate can be derived and logged alongside the timing stats.
+        self._diag_log_last_time: float = 0.0
+        self._diag_log_last_tick_count: int = 0
 
         if config.mode == "serial":
             # Create serial client.
@@ -622,6 +631,68 @@ class Em540Master:
 
         # Timing stats are expected to update continuously for diagnostics consumers.
         self._stats.changed()
+
+        self._maybe_log_diagnostics()
+
+    def _maybe_log_diagnostics(self) -> None:
+        """Emit a periodic diagnostics summary when DEBUG logging is enabled.
+
+        Logs the master's frame rate (reads/second, measured over the elapsed
+        window) alongside the min/max timing stats. Rate-limited to
+        _DIAGNOSTICS_LOG_INTERVAL so it stays readable at 10Hz. Cheap when DEBUG
+        is disabled (a single isEnabledFor check).
+        """
+        if not logger.isEnabledFor(logging.DEBUG):
+            return
+
+        now = time.perf_counter()
+        if self._diag_log_last_time == 0.0:
+            self._diag_log_last_time = now
+            self._diag_log_last_tick_count = self._dyn_reg_read_counter
+            return
+
+        elapsed = now - self._diag_log_last_time
+        if elapsed < self._DIAGNOSTICS_LOG_INTERVAL:
+            return
+
+        ticks = self._dyn_reg_read_counter - self._diag_log_last_tick_count
+        frame_rate = ticks / elapsed if elapsed > 0 else 0.0
+
+        # Read the current window's extrema directly without calling
+        # snapshot_and_reset_interval_extrema(), so this debug logging does not
+        # steal/reset the interval stats that HA diagnostics consumes.
+        with self._stats.lock:
+            s = self._stats
+            dur_mean = (
+                s.acquisition_duration_ms_sum / s.acquisition_duration_samples
+                if s.acquisition_duration_samples
+                else 0.0
+            )
+            head_mean = (
+                s.acquisition_headroom_ms_sum / s.acquisition_headroom_samples
+                if s.acquisition_headroom_samples
+                else 0.0
+            )
+            logger.debug(
+                "Master diagnostics: frame_rate=%.2f Hz | "
+                "acquisition_ms min=%.2f max=%.2f mean=%.2f | "
+                "headroom_ms min=%.2f max=%.2f mean=%.2f | "
+                "overruns=%d | read_failures=%d | missed_updates=%d max_seq_gap=%d",
+                frame_rate,
+                s.acquisition_duration_ms_min,
+                s.acquisition_duration_ms_max,
+                dur_mean,
+                s.acquisition_headroom_ms_min,
+                s.acquisition_headroom_ms_max,
+                head_mean,
+                s.tick_overrun_count,
+                s.read_failed_total,
+                s.consumer_missed_updates_total,
+                s.consumer_max_seq_gap,
+            )
+
+        self._diag_log_last_time = now
+        self._diag_log_last_tick_count = self._dyn_reg_read_counter
 
     def _copy_meter_data(self, source: MeterData, target: MeterData) -> None:
         """Copy frame register values between buffers while keeping object allocation stable."""
