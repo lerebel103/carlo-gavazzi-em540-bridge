@@ -144,7 +144,7 @@ class TestMainLoopPriority(unittest.TestCase):
         mocks = _setup_mocks()
         call_count = {"n": 0}
 
-        async def _acquire():
+        async def _acquire(*args, **kwargs):
             call_count["n"] += 1
             if call_count["n"] >= 3:
                 raise _LoopBreak()
@@ -174,7 +174,7 @@ class TestMainLoopPriority(unittest.TestCase):
         mocks = _setup_mocks()
         type(mocks["master"]).connected = PropertyMock(return_value=False)
 
-        async def _acquire():
+        async def _acquire(*args, **kwargs):
             raise _LoopBreak()
 
         mocks["master"].acquire_data = AsyncMock(side_effect=_acquire)
@@ -198,7 +198,7 @@ class TestMainLoopPriority(unittest.TestCase):
         type(mocks["master"]).connected = PropertyMock(return_value=False)
         pymodbus_logger = MagicMock()
 
-        async def _acquire():
+        async def _acquire(*args, **kwargs):
             raise _LoopBreak()
 
         mocks["master"].acquire_data = AsyncMock(side_effect=_acquire)
@@ -221,26 +221,27 @@ class TestMainLoopPriority(unittest.TestCase):
         pymodbus_logger.setLevel.assert_not_called()
 
     # ------------------------------------------------------------------
-    # Requirement 11.1/11.2: loop sleeps between intervals using mocked time
+    # Requirement 11.1/11.2: loop sleeps between intervals
     # ------------------------------------------------------------------
     def test_loop_sleeps_between_intervals(self):
-        """Requirement 11.1, 11.2 – loop uses perf_counter for timing and sleeps between intervals."""
+        """Requirement 11.1, 11.2 – loop sleeps between intervals."""
         state = _make_state()
-        state.em540_master.update_interval = 0.1
+        state.em540_master.update_interval = 0.02
         mocks = _setup_mocks()
+        sleep_calls = []
+        fake_clock = {"wall": 10_000.0, "mono": 1_000.0}
+        real_sleep = asyncio.sleep
 
-        # Use a counter-based perf_counter mock that advances by update_interval
-        # each call, ensuring the loop always triggers acquire_data immediately.
-        counter = {"n": 0}
-
-        def _perf_counter():
-            val = counter["n"] * 0.1  # each call advances by update_interval
-            counter["n"] += 1
-            return val
+        async def _sleep(delay):
+            sleep_calls.append(delay)
+            step = max(0.0, float(delay))
+            fake_clock["wall"] += step
+            fake_clock["mono"] += step
+            await real_sleep(0)
 
         call_count = {"n": 0}
 
-        async def _acquire():
+        async def _acquire(*args, **kwargs):
             call_count["n"] += 1
             if call_count["n"] >= 3:
                 raise _LoopBreak()
@@ -255,13 +256,14 @@ class TestMainLoopPriority(unittest.TestCase):
             patch.object(main, "Em540Slave", return_value=mocks["slave"]),
             patch.object(main, "Ts65aSlaveBridge", return_value=mocks["ts65a"]),
             patch.object(main, "HABridge"),
-            patch.object(main.time, "perf_counter", side_effect=_perf_counter) as mock_perf,
-            patch.object(main.asyncio, "sleep", new_callable=AsyncMock),
+            patch.object(main.time, "time", side_effect=lambda: fake_clock["wall"]),
+            patch.object(main.time, "perf_counter", side_effect=lambda: fake_clock["mono"]),
+            patch.object(main.asyncio, "sleep", side_effect=_sleep),
         ):
             with self.assertRaises(_LoopBreak):
                 asyncio.run(main.process_loop())
 
-        self.assertTrue(mock_perf.called)
+        self.assertTrue(any(delay > 0 for delay in sleep_calls))
         self.assertEqual(mocks["master"].acquire_data.await_count, 3)
 
     # ------------------------------------------------------------------
@@ -280,7 +282,7 @@ class TestMainLoopPriority(unittest.TestCase):
         acquire_sequence = []
         call_count = {"n": 0}
 
-        async def _acquire():
+        async def _acquire(*args, **kwargs):
             call_count["n"] += 1
             acquire_sequence.append(call_count["n"])
             if call_count["n"] >= 3:
@@ -303,6 +305,109 @@ class TestMainLoopPriority(unittest.TestCase):
         self.assertEqual(mocks["master"].acquire_data.await_count, 3)
         self.assertEqual(acquire_sequence, [1, 2, 3])
 
+    def test_zero_update_interval_runs_unpaced_without_tick_sleep(self):
+        """update_interval=0 should disable tick pacing sleep and run acquisitions unpaced."""
+        state = _make_state()
+        state.em540_master.update_interval = 0.0
+        mocks = _setup_mocks()
+
+        call_count = {"n": 0}
+
+        async def _acquire(*args, **kwargs):
+            call_count["n"] += 1
+            if call_count["n"] >= 3:
+                raise _LoopBreak()
+            return True
+
+        mocks["master"].acquire_data = AsyncMock(side_effect=_acquire)
+
+        with (
+            _patch_config_manager(state),
+            patch.object(main, "pymodbus_apply_logging_config"),
+            patch.object(main, "Em540Master", return_value=mocks["master"]),
+            patch.object(main, "Em540Slave", return_value=mocks["slave"]),
+            patch.object(main, "Ts65aSlaveBridge", return_value=mocks["ts65a"]),
+            patch.object(main, "HABridge"),
+            patch.object(main.asyncio, "sleep", new_callable=AsyncMock) as mock_sleep,
+        ):
+            with self.assertRaises(_LoopBreak):
+                asyncio.run(main.process_loop())
+
+        self.assertEqual(mocks["master"].acquire_data.await_count, 3)
+        mock_sleep.assert_not_awaited()
+
+    def test_unpaced_disconnected_respects_reconnect_backoff_without_acquire_spin(self):
+        """When disconnected in unpaced mode, acquire_data should not spin between backoff windows."""
+        state = _make_state()
+        state.em540_master.update_interval = 0.0
+        mocks = _setup_mocks()
+        type(mocks["master"]).connected = PropertyMock(return_value=False)
+
+        async def _sleep(_delay):
+            raise _LoopBreak()
+
+        mocks["master"].acquire_data = AsyncMock(return_value=False)
+
+        with (
+            _patch_config_manager(state),
+            patch.object(main, "pymodbus_apply_logging_config"),
+            patch.object(main, "Em540Master", return_value=mocks["master"]),
+            patch.object(main, "Em540Slave", return_value=mocks["slave"]),
+            patch.object(main, "Ts65aSlaveBridge", return_value=mocks["ts65a"]),
+            patch.object(main, "HABridge"),
+            patch.object(main.asyncio, "sleep", side_effect=_sleep),
+        ):
+            with self.assertRaises(_LoopBreak):
+                asyncio.run(main.process_loop())
+
+        mocks["master"].connect.assert_awaited_once()
+        self.assertEqual(mocks["master"].acquire_data.await_count, 1)
+
+    def test_update_interval_switch_from_zero_to_nonzero_enables_pacing(self):
+        """Runtime interval switch 0 -> >0 should transition from unpaced to paced mode."""
+        state = _make_state()
+        state.em540_master.update_interval = 0.0
+        mocks = _setup_mocks()
+
+        sleep_calls = []
+        fake_clock = {"wall": 20_000.0, "mono": 2_000.0}
+        real_sleep = asyncio.sleep
+        call_count = {"n": 0}
+
+        async def _sleep(delay):
+            sleep_calls.append(delay)
+            step = max(0.0, float(delay))
+            fake_clock["wall"] += step
+            fake_clock["mono"] += step
+            await real_sleep(0)
+
+        async def _acquire(*args, **kwargs):
+            call_count["n"] += 1
+            if call_count["n"] == 3:
+                state.em540_master.update_interval = 0.02
+            if call_count["n"] >= 6:
+                raise _LoopBreak()
+            return True
+
+        mocks["master"].acquire_data = AsyncMock(side_effect=_acquire)
+
+        with (
+            _patch_config_manager(state),
+            patch.object(main, "pymodbus_apply_logging_config"),
+            patch.object(main, "Em540Master", return_value=mocks["master"]),
+            patch.object(main, "Em540Slave", return_value=mocks["slave"]),
+            patch.object(main, "Ts65aSlaveBridge", return_value=mocks["ts65a"]),
+            patch.object(main, "HABridge"),
+            patch.object(main.time, "time", side_effect=lambda: fake_clock["wall"]),
+            patch.object(main.time, "perf_counter", side_effect=lambda: fake_clock["mono"]),
+            patch.object(main.asyncio, "sleep", side_effect=_sleep),
+        ):
+            with self.assertRaises(_LoopBreak):
+                asyncio.run(main.process_loop())
+
+        self.assertEqual(mocks["master"].acquire_data.await_count, 6)
+        self.assertTrue(any(delay > 0 for delay in sleep_calls))
+
     def test_mqtt_startup_failure_does_not_block_tick_loop(self):
         """MQTT connect scheduling failures must not block process_loop startup or acquisitions."""
         state = _make_state()
@@ -317,7 +422,7 @@ class TestMainLoopPriority(unittest.TestCase):
 
         call_count = {"n": 0}
 
-        async def _acquire():
+        async def _acquire(*args, **kwargs):
             call_count["n"] += 1
             if call_count["n"] >= 1:
                 raise _LoopBreak()
@@ -355,7 +460,7 @@ class TestMainLoopPriority(unittest.TestCase):
         mqtt_bridge.connect = MagicMock()
         mqtt_bridge.stop = MagicMock()
 
-        async def _acquire():
+        async def _acquire(*args, **kwargs):
             raise _LoopBreak()
 
         mocks["master"].acquire_data = AsyncMock(side_effect=_acquire)

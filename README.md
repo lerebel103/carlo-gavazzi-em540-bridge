@@ -7,7 +7,7 @@
 Bridges a single Carlo Gavazzi EM540/EM530 energy meter to multiple downstream consumers simultaneously.
 
 The bridge acts as a Modbus master to the physical meter over RS485 (via an RS485-to-IP converter or serial device),
-reading all dynamic registers at a target rate of 10 Hz. It then re-serves this data in several formats:
+reading dynamic registers at a default target rate of 10 Hz. It then re-serves this data in several formats:
 
 - **Transparent Modbus/TCP proxy:** Direct access to EM540-compatible registers for clients such as Victron GX devices.
 - **Fronius TS-65-A emulation:** EM540 data mapped to the Fronius TS-65-A register layout for Fronius inverter compatibility.
@@ -17,13 +17,13 @@ Fronius TS-65-A emulation maps EM540 data to the corresponding registers transpa
 smoothed over a configurable time window so the emulated values represent a rolling average rather than instantaneous
 readings (see `config-default.yaml`).
 
-> **Note:** The bridge is strictly a read-only proxy. Most EM540 registers are read and cached; some infrequently-changing
-> registers are polled at a lower rate to reduce bus load.
+> **Note:** The bridge is strictly a read-only proxy. Static identification/config registers are read during connection
+> setup, and acquisition cycles read the primary dynamic block plus the full energy block each tick.
 
 ## Features
 
 - **Modbus/RTU to Modbus/TCP proxy:** Reads metering registers from the EM540 via Modbus/RTU and serves them over Modbus/TCP.
-- **Optional downstream Modbus/RTU serial bridge:** Slave data can also be exposed over a dedicated serial adapter.
+- **Optional downstream Modbus/RTU serial adapters for clients:** EM540 and TS65A slave models can each be exposed over dedicated serial adapters.
 - **Fronius TS-65-A emulation:** Maps EM540 data to the Fronius TS-65-A register format for compatibility with Fronius inverters.
 - **Home Assistant integration:** Publishes measurements and diagnostics as MQTT sensors.
 - **High-rate acquisition:** Targets a 10 Hz (100 ms) polling interval for near real-time updates.
@@ -35,6 +35,8 @@ readings (see `config-default.yaml`).
 The master remains mutually exclusive: set [em540_master.mode](app/config.py#L36) to either `tcp` or `serial`.
 If your serial path echoes transmitted bytes, enable [em540_master.handle_local_echo](app/config.py#L42).
 
+This controls the **upstream meter link** only. Downstream client-facing serial bridges are configured separately under each slave section.
+
 Each slave can expose the same internal model over multiple transports at once:
 
 - EM540 slave: TCP, RTU-over-TCP, optional serial RTU
@@ -42,10 +44,18 @@ Each slave can expose the same internal model over multiple transports at once:
 
 See [config-default.yaml](config-default.yaml) for the full sample layout.
 
+### Downstream Serial Adapter Support (Client-Facing)
+
+- Enable [em540_slave.serial.enabled](config-default.yaml) to expose the EM540-compatible slave over a serial RTU adapter for downstream clients.
+- Enable [ts65a_slave.serial.enabled](config-default.yaml) to expose the TS65A-compatible slave over a serial RTU adapter for downstream clients.
+- These can run concurrently with each slave's TCP endpoint.
+
+When running with Docker, map each enabled serial adapter device into the container (for example `/dev/ttyUSB1` for EM540 slave serial and `/dev/ttyUSB2` for TS65A slave serial).
+
 ## Requirements
 
 - **Hardware:** RS485 to Modbus/RTU physical converter to connect the EM540 meter to your network.
-- **Optional hardware:** Dedicated serial adapter for downstream slave RTU access.
+- **Optional hardware:** One or more dedicated serial adapters for downstream slave RTU access (EM540 and/or TS65A).
 - **Meter configuration:** EM540 must be set to a baud rate of 57600 or higher to support a 100 ms read cycle.
 - **Software (Docker path):** Docker Engine with Docker Compose plugin.
 - **Software (manual path):** Python 3.14 and [uv](https://docs.astral.sh/uv/) for dependency management.
@@ -135,7 +145,7 @@ The following measurement sensors are published to Home Assistant and refreshed 
 | Energy Export          | kWh   | energy         | total_increasing | 2         |
 | Reactive Energy Import | kvarh | reactive_energy| total_increasing | 2         |
 | Reactive Energy Export | kvarh | reactive_energy| total_increasing | 2         |
-| Apparent Energy        | kWh   | energy         | total_increasing | 2         |
+| Apparent Energy kvah   | kVAh  | energy         | total_increasing | 2         |
 | Run Hours              | h     | duration       | total_increasing | 1         |
 
 The following diagnostic sensors are also published (entity category: `diagnostic`):
@@ -144,15 +154,18 @@ The following diagnostic sensors are also published (entity category: `diagnosti
 |------------------------------------|------|--------------|-------------|-----------|
 | Sys Uptime                         | s    | duration     | measurement | 0         |
 | Bridge Uptime                      | s    | duration     | measurement | 0         |
-| RS485 Master Read Rate             | Hz   | frequency    | measurement | 2         |
+| Acq Rate                           | Hz   | frequency    | measurement | 2         |
+| MQTT Data Update Rate              | Hz   | frequency    | measurement | 2         |
 | RS485 Master Read Failures         |      |              | measurement | 0         |
 | RS485 Consumer Missed Updates      |      |              | measurement | 0         |
 | RS485 Consumer Max Seq Gap         |      |              | measurement | 0         |
-| RS485 Master Read Duration         | ms   | duration     | measurement | 2         |
-| RS485 Master Read Duration Max     | ms   |              | measurement | 2         |
-| RS485 Tick Headroom                | ms   | duration     | measurement | 2         |
-| RS485 Tick Headroom Min            | ms   |              | measurement | 2         |
-| RS485 Tick Overrun Count           |      |              | measurement | 0         |
+| Acq Dur Min                        | ms   | duration     | measurement | 2         |
+| Acq Dur Max                        | ms   | duration     | measurement | 2         |
+| Acq Dur Mean                       | ms   | duration     | measurement | 2         |
+| Acq Headroom Min                   | ms   | duration     | measurement | 2         |
+| Acq Headroom Max                   | ms   | duration     | measurement | 2         |
+| Acq Headroom Mean                  | ms   | duration     | measurement | 2         |
+| Tick Overruns                      |      |              | measurement | 0         |
 | Min Power W                        | W    | power        | measurement | 1         |
 | Max Power W                        | W    | power        | measurement | 1         |
 | EM540 RTU Client Count             |      |              | measurement | 0         |
@@ -172,7 +185,7 @@ The following diagnostic sensors are also published (entity category: `diagnosti
 
 ## Home Assistant Diagnostics Screenshot
 
-<img src="media/HA%20Diagnostics.png" alt="Home Assistant diagnostics" width="420" />
+<img src="media/HA%20Diagnostics.jpg" alt="Home Assistant diagnostics" width="420" />
 
 ## References
 

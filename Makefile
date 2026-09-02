@@ -24,7 +24,11 @@ help:
 .PHONY: build
 build:
 	@echo "Building Docker image (version: $(VERSION))..."
-	docker build --build-arg VERSION=$(VERSION) -t $(DOCKER_USER)/$(IMAGE_NAME):latest .
+	docker buildx build \
+		--load \
+		--build-arg VERSION=$(VERSION) \
+		--tag $(DOCKER_USER)/$(IMAGE_NAME):latest \
+		.
 
 .PHONY: push
 push:
@@ -74,7 +78,11 @@ test-integration: test-integration-image
 
 .PHONY: test-integration-image
 test-integration-image:
-	docker build -f Dockerfile.integration -t $(INTEGRATION_TEST_IMAGE) .
+	docker buildx build \
+		--load \
+		--file Dockerfile.integration \
+		--tag $(INTEGRATION_TEST_IMAGE) \
+		.
 
 .PHONY: lint
 lint:

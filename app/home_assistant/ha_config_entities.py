@@ -47,6 +47,7 @@ class ConfigEntity:
     max_value: float | None = None
     step: float | None = None
     parse_value: Callable[[str], Any] | None = None
+    format_value: Callable[[Any], Any] | None = None
     unit: str | None = None
     entity_type: str = "number"  # "number" or "switch"
 
@@ -136,11 +137,14 @@ class HAConfigEntities:
                 field_path="em540_master.update_interval",
                 config_section=self._state.em540_master,
                 field_name="update_interval",
-                min_value=0.05,
-                max_value=10,
-                step=0.05,
-                unit="s",
-                parse_value=float,
+                min_value=0.0,
+                max_value=10000,
+                step=1,
+                unit="ms",
+                # HA entity is expressed in milliseconds for clarity, while
+                # internal config/runtime state remains in seconds.
+                parse_value=lambda raw: float(raw) / 1000.0,
+                format_value=lambda seconds: float(seconds) * 1000.0,
             ),
             ConfigEntity(
                 name="EM540 Master Retries",
@@ -157,11 +161,12 @@ class HAConfigEntities:
                 field_path="em540_master.timeout",
                 config_section=self._state.em540_master,
                 field_name="timeout",
-                min_value=0.05,
-                max_value=10,
-                step=0.05,
-                unit="s",
-                parse_value=float,
+                min_value=50,
+                max_value=10000,
+                step=1,
+                unit="ms",
+                parse_value=lambda raw: float(raw) / 1000.0,
+                format_value=lambda seconds: float(seconds) * 1000.0,
             ),
             ConfigEntity(
                 name="EM540 Slave Update Timeout",
@@ -233,6 +238,15 @@ class HAConfigEntities:
             self._mqtt_client.subscribe(topic)
             self._mqtt_client.message_callback_add(topic, self._on_command)
 
+    def state_value_for(self, entity: ConfigEntity) -> str:
+        """Return Home Assistant-facing state value string for an entity."""
+        value = getattr(entity.config_section, entity.field_name)
+        if entity.entity_type == "switch":
+            return "on" if value else "off"
+        if entity.format_value is not None:
+            value = entity.format_value(value)
+        return str(value)
+
     # -- command handling ----------------------------------------------------
 
     def _on_command(self, client: Any, userdata: Any, message: Any) -> None:
@@ -241,8 +255,9 @@ class HAConfigEntities:
         if entity is None:
             return
 
+        raw_value = message.payload.decode()
         try:
-            value = entity.parse_value(message.payload.decode())
+            value = entity.parse_value(raw_value)
         except (ValueError, TypeError):
             logger.warning("Invalid value for %s: %s", entity.name, message.payload)
             return
@@ -256,9 +271,8 @@ class HAConfigEntities:
         # Publish updated state (echo back for HA UI to update)
         state_topic = self.state_topic_for(entity)
         if entity.entity_type == "switch":
-            # Switches use on/off payloads
-            state_value = "on" if value else "off"
+            state_value = self.state_value_for(entity)
         else:
-            # Numbers use string representation
-            state_value = str(value)
+            # Echo the user-entered numeric payload so HA reflects exactly what was set.
+            state_value = raw_value
         self._mqtt_client.publish(state_topic, state_value, retain=True)

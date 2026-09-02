@@ -185,13 +185,8 @@ class HABridge(MeterDataListener):
             if userdata._config_entities is not None:
                 userdata._config_entities.subscribe()
                 for entity in userdata._config_entities._entities:
-                    value = getattr(entity.config_section, entity.field_name)
                     state_topic = userdata._config_entities.state_topic_for(entity)
-                    # Format state value based on entity type
-                    if entity.entity_type == "switch":
-                        state_value = "on" if value else "off"
-                    else:
-                        state_value = str(value)
+                    state_value = userdata._config_entities.state_value_for(entity)
                     client.publish(state_topic, state_value, retain=True)
         else:
             logger.info("Failed to connect, return code %d\n", rc)
