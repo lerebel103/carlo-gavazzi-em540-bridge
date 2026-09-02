@@ -527,7 +527,6 @@ class Em540Master:
 
         self._refresh_client_runtime_config()
         try:
-            logger.debug("Reading full energy block from address %s, count=%d", hex(start_addr), num_registers)
             result = await self._client.read_holding_registers(start_addr, count=num_registers, device_id=self.slave_id)
 
             if result.isError():
