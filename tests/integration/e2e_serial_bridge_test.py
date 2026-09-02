@@ -502,12 +502,19 @@ def test_end_to_end_serial_and_tcp_clients_observe_expected_data() -> None:
 
                 def _all_downstream_paths_error() -> bool:
                     def _is_error(client, address: int) -> bool:
-                        # A real Modbus exception *response* (circuit breaker firing) means
-                        # result.isError() is True without raising. A raised ModbusException
-                        # here means the transport itself failed (connection refused/timeout),
-                        # which is a different failure mode (e.g. the dead serial path bug)
-                        # and must not be conflated with the expected fail-closed behavior.
-                        result = client.read_holding_registers(address, count=2, device_id=1)
+                        # The expected fail-closed behavior is a real Modbus exception
+                        # *response* (circuit breaker firing): result.isError() is True
+                        # without raising. A raised ModbusException/OSError here means the
+                        # transport itself failed transiently (e.g. a PTY read timeout on
+                        # CI) — that must NOT count as the expected response, but it also
+                        # must not abort the test, since wait_for_condition does not catch
+                        # exceptions. So we treat a raised transport error as "not yet in
+                        # the expected state" and return False to keep polling, while never
+                        # conflating it with a genuine exception response.
+                        try:
+                            result = client.read_holding_registers(address, count=2, device_id=1)
+                        except (ModbusException, OSError, ConnectionError):
+                            return False
                         return result.isError()
 
                     em540_tcp_result = _is_error(clients.em540_tcp, 0x0000)

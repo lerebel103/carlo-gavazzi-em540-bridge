@@ -448,10 +448,14 @@ class Em540Master:
         "RS485 Master Read Failures" metric authoritative regardless of whether
         the failure aborts the tick (primary/connect/corrupt) or is tolerated
         without aborting (energy chunk).
+
+        Does not notify stats listeners here: every tick — including failure
+        ticks — calls _update_timing_stats() afterwards, which fires
+        _stats.changed() exactly once. Notifying here too would double-notify on
+        failure ticks and add avoidable work in the 10Hz path.
         """
         with self._stats.lock:
             self._stats.read_failed_total += 1
-        self._stats.changed()
 
     async def _notify_listeners_read_failed(self) -> None:
         """Signal listeners that the tick produced no usable data.
@@ -658,38 +662,49 @@ class Em540Master:
         ticks = self._dyn_reg_read_counter - self._diag_log_last_tick_count
         frame_rate = ticks / elapsed if elapsed > 0 else 0.0
 
-        # Read the current window's extrema directly without calling
-        # snapshot_and_reset_interval_extrema(), so this debug logging does not
-        # steal/reset the interval stats that HA diagnostics consumes.
+        # Capture the current window's extrema under the lock, then release it
+        # before formatting/logging. We read directly (rather than calling
+        # snapshot_and_reset_interval_extrema()) so this debug logging does not
+        # steal/reset the interval stats that HA diagnostics consumes, and we do
+        # not hold the stats lock across string formatting or handler I/O.
         with self._stats.lock:
             s = self._stats
+            dur_min = s.acquisition_duration_ms_min
+            dur_max = s.acquisition_duration_ms_max
             dur_mean = (
                 s.acquisition_duration_ms_sum / s.acquisition_duration_samples
                 if s.acquisition_duration_samples
                 else 0.0
             )
+            head_min = s.acquisition_headroom_ms_min
+            head_max = s.acquisition_headroom_ms_max
             head_mean = (
                 s.acquisition_headroom_ms_sum / s.acquisition_headroom_samples
                 if s.acquisition_headroom_samples
                 else 0.0
             )
-            logger.debug(
-                "Master diagnostics: frame_rate=%.2f Hz | "
-                "acquisition_ms min=%.2f max=%.2f mean=%.2f | "
-                "headroom_ms min=%.2f max=%.2f mean=%.2f | "
-                "overruns=%d | read_failures=%d | missed_updates=%d max_seq_gap=%d",
-                frame_rate,
-                s.acquisition_duration_ms_min,
-                s.acquisition_duration_ms_max,
-                dur_mean,
-                s.acquisition_headroom_ms_min,
-                s.acquisition_headroom_ms_max,
-                head_mean,
-                s.tick_overrun_count,
-                s.read_failed_total,
-                s.consumer_missed_updates_total,
-                s.consumer_max_seq_gap,
-            )
+            overruns = s.tick_overrun_count
+            read_failures = s.read_failed_total
+            missed_updates = s.consumer_missed_updates_total
+            max_seq_gap = s.consumer_max_seq_gap
+
+        logger.debug(
+            "Master diagnostics: frame_rate=%.2f Hz | "
+            "acquisition_ms min=%.2f max=%.2f mean=%.2f | "
+            "headroom_ms min=%.2f max=%.2f mean=%.2f | "
+            "overruns=%d | read_failures=%d | missed_updates=%d max_seq_gap=%d",
+            frame_rate,
+            dur_min,
+            dur_max,
+            dur_mean,
+            head_min,
+            head_max,
+            head_mean,
+            overruns,
+            read_failures,
+            missed_updates,
+            max_seq_gap,
+        )
 
         self._diag_log_last_time = now
         self._diag_log_last_tick_count = self._dyn_reg_read_counter

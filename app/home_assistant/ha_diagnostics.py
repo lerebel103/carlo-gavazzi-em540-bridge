@@ -423,12 +423,12 @@ class HADiagnostics:
             self._last_mqtt_rate_timestamp = now
 
     def read_failed(self):
-        # The read-failure count is sourced authoritatively from
-        # Em540MasterStats.read_failed_total in mqtt_data(), which captures every
-        # failure mode (connect, primary block, corrupt frame, energy chunk).
-        # This hook is retained for the availability-side effects driven by the
-        # HABridge listener; it intentionally no longer mutates the counter to
-        # avoid double counting against the master stat.
+        # Intentionally a no-op. The read-failure count is sourced
+        # authoritatively from Em540MasterStats.read_failed_total in mqtt_data(),
+        # which captures every failure mode (connect, primary block, corrupt
+        # frame, energy block). This method is kept only because HABridge.read_failed()
+        # calls it as part of the listener contract; it must not mutate the
+        # counter here or it would double-count against the master stat.
         pass
 
     def advertise_data(self):
