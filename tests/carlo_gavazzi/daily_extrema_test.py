@@ -1,6 +1,13 @@
+import time
 from types import SimpleNamespace
 
-from app.carlo_gavazzi.em540_master import DailyExtrema, _local_day_start
+import pytest
+
+from app.carlo_gavazzi.em540_master import (
+    DailyExtrema,
+    _local_day_start,
+    _local_next_day_start,
+)
 
 
 def _make_data(power=0.0, current_sys=0.0, vln_sys=0.0, vll_sys=0.0, phases=None):
@@ -117,3 +124,57 @@ def test_backwards_clock_jump_reanchors_window():
     snap = tracker.snapshot()
     assert snap["power_min"] == 7.0
     assert snap["power_max"] == 7.0
+
+
+@pytest.mark.parametrize(
+    "noon_struct, expected_hours",
+    [
+        # Europe/London spring-forward (2026-03-29): 23-hour local day.
+        ((2026, 3, 29, 12, 0, 0, 0, 0, -1), 23.0),
+        # Europe/London fall-back (2026-10-25): 25-hour local day.
+        ((2026, 10, 25, 12, 0, 0, 0, 0, -1), 25.0),
+    ],
+)
+def test_day_boundary_is_dst_aware(monkeypatch, noon_struct, expected_hours):
+    if not hasattr(time, "tzset"):
+        pytest.skip("time.tzset() unavailable on this platform")
+
+    monkeypatch.setenv("TZ", "Europe/London")
+    time.tzset()
+    try:
+        noon = time.mktime(noon_struct)
+        day_start = _local_day_start(noon)
+        next_day_start = _local_next_day_start(noon)
+        # A fixed +86400 would give 24.0 here; DST-aware boundary gives 23/25.
+        assert (next_day_start - day_start) / 3600.0 == expected_hours
+    finally:
+        monkeypatch.delenv("TZ", raising=False)
+        time.tzset()
+
+
+def test_rollover_uses_dst_aware_next_boundary(monkeypatch):
+    if not hasattr(time, "tzset"):
+        pytest.skip("time.tzset() unavailable on this platform")
+
+    monkeypatch.setenv("TZ", "Europe/London")
+    time.tzset()
+    try:
+        tracker = DailyExtrema()
+        # Seed at noon on a spring-forward day (23h local day).
+        noon = time.mktime((2026, 3, 29, 12, 0, 0, 0, 0, -1))
+        tracker.update(_make_data(power=100.0), noon)
+
+        # 23h30m later is still the same-day window's *next* day (past midnight),
+        # so it must roll over and re-seed. Confirm the boundary honoured the
+        # 23-hour day rather than a fixed 24h (which would not have rolled yet
+        # at local 23:30 the next day... ensure we cross real local midnight).
+        next_local_midnight = _local_next_day_start(noon)
+        just_after = next_local_midnight + 1.0
+        tracker.update(_make_data(power=42.0), just_after)
+
+        snap = tracker.snapshot()
+        assert snap["power_min"] == 42.0
+        assert snap["power_max"] == 42.0
+    finally:
+        monkeypatch.delenv("TZ", raising=False)
+        time.tzset()

@@ -127,6 +127,20 @@ def _local_day_start(epoch: float) -> float:
     return time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday, 0, 0, 0, 0, 0, -1))
 
 
+def _local_next_day_start(epoch: float) -> float:
+    """Return the epoch of the next local midnight strictly after ``epoch``.
+
+    Computed from the *following* calendar day at 00:00 with is_dst=-1 so
+    mktime resolves the correct local offset. This makes the day boundary
+    robust to DST transitions where a local day is 23 or 25 hours long; a
+    fixed ``+86400`` would drift the boundary by an hour on those days.
+    """
+    lt = time.localtime(epoch)
+    # mktime normalises out-of-range fields, so mday+1 correctly rolls month
+    # and year boundaries (e.g. Jan 31 -> Feb 1, Dec 31 -> Jan 1).
+    return time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday + 1, 0, 0, 0, 0, 0, -1))
+
+
 class DailyExtrema:
     """Tracks per-quantity, per-scope daily min/max, updated on every frame.
 
@@ -169,12 +183,15 @@ class DailyExtrema:
     def keys(self) -> tuple[str, ...]:
         return self._keys
 
-    def _reset_locked(self, day_start: float) -> None:
+    def _reset_locked(self, wall_clock: float) -> None:
         for pair in self._extrema.values():
             pair[0] = None
             pair[1] = None
-        self._day_start = day_start
-        self._next_day_start = day_start + 86400.0
+        # Anchor to the local-day window containing wall_clock. The next
+        # boundary is the following local midnight (DST-aware), not a fixed
+        # 24h offset.
+        self._day_start = _local_day_start(wall_clock)
+        self._next_day_start = _local_next_day_start(wall_clock)
         self._initialised = True
 
     @staticmethod
@@ -194,7 +211,7 @@ class DailyExtrema:
             # Handle first frame and day rollover. A backwards jump (clock
             # correction) also re-anchors the window.
             if not self._initialised or wall_clock >= self._next_day_start or wall_clock < self._day_start:
-                self._reset_locked(_local_day_start(wall_clock))
+                self._reset_locked(wall_clock)
 
             system = data.system
             phases = data.phases
