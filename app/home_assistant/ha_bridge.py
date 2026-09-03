@@ -246,6 +246,10 @@ class HABridge(MeterDataListener):
     def on_em540_master_stats(self, stats: Em540MasterStats):
         self._diagnostics.set_em540_master_stats(stats)
 
+    def set_daily_extrema_source(self, source) -> None:
+        """Register the master's DailyExtrema tracker for daily min/max diagnostics."""
+        self._diagnostics.set_daily_extrema_source(source)
+
     def _notify_loop(self) -> None:
         """Background thread to publish sensor data when notified of new data"""
         while not self._stop_event.is_set():

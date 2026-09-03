@@ -101,6 +101,124 @@ class Em540MasterStats:
         self._listeners.append(listener)
 
 
+# Quantities tracked for daily extrema. Each entry maps a logical quantity key
+# to the attribute name read from SystemData / PhaseData. System current is the
+# summed neutral current, exposed as SystemData.An (there is no system.current).
+_DAILY_EXTREMA_QUANTITIES: tuple[tuple[str, str, str], ...] = (
+    # (quantity key, system attribute, phase attribute)
+    ("power", "power", "power"),
+    ("current", "An", "current"),
+    ("voltage_ln", "line_neutral_voltage", "line_neutral_voltage"),
+    ("voltage_ll", "line_line_voltage", "line_line_voltage"),
+)
+
+# Scope suffixes: system aggregate plus the three phases (index -> suffix).
+_DAILY_EXTREMA_PHASE_SUFFIXES: tuple[str, ...] = ("l1", "l2", "l3")
+
+
+def _local_day_start(epoch: float) -> float:
+    """Return the epoch of the most recent local midnight at or before ``epoch``.
+
+    Uses the process/container local timezone. If TZ is unset, local == UTC.
+    """
+    lt = time.localtime(epoch)
+    # mktime round-trips the local wall-clock struct back to epoch, correctly
+    # accounting for the active UTC offset (including DST) at that instant.
+    return time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday, 0, 0, 0, 0, 0, -1))
+
+
+class DailyExtrema:
+    """Tracks per-quantity, per-scope daily min/max, updated on every frame.
+
+    This lives at the master because it must observe *every* upstream frame.
+    Downstream consumers (HA notify loop, MQTT publish) are deliberately
+    subsampled and would miss intermediate peaks, so extrema cannot be computed
+    there. The per-frame cost here is a handful of scalar comparisons and one
+    cached float comparison for the day boundary; no allocations occur on the
+    steady-state path.
+
+    Extrema are unset (``None``) until the first observed sample and are
+    re-seeded from the first sample after each local-midnight rollover. Values
+    are signed (power and current can be negative), so resetting to zero would
+    corrupt the first post-reset comparison; re-seeding avoids that.
+    """
+
+    def __init__(self) -> None:
+        self._lock: threading.Lock = threading.Lock()
+        # key -> [min, max]; None entries mean "no sample observed yet today".
+        self._extrema: dict[str, list[float | None]] = {}
+        self._keys: tuple[str, ...] = self._build_keys()
+        for key in self._keys:
+            self._extrema[key] = [None, None]
+        # Local-day boundary cache. next boundary is the next local midnight;
+        # the steady-state hot path only compares against it.
+        self._day_start: float = 0.0
+        self._next_day_start: float = 0.0
+        self._initialised: bool = False
+
+    @staticmethod
+    def _build_keys() -> tuple[str, ...]:
+        keys: list[str] = []
+        for quantity, _sys_attr, _phase_attr in _DAILY_EXTREMA_QUANTITIES:
+            keys.append(quantity)  # system scope
+            for suffix in _DAILY_EXTREMA_PHASE_SUFFIXES:
+                keys.append(f"{quantity}_{suffix}")
+        return tuple(keys)
+
+    @property
+    def keys(self) -> tuple[str, ...]:
+        return self._keys
+
+    def _reset_locked(self, day_start: float) -> None:
+        for pair in self._extrema.values():
+            pair[0] = None
+            pair[1] = None
+        self._day_start = day_start
+        self._next_day_start = day_start + 86400.0
+        self._initialised = True
+
+    @staticmethod
+    def _accumulate(pair: list[float | None], value: float) -> None:
+        if pair[0] is None or value < pair[0]:
+            pair[0] = value
+        if pair[1] is None or value > pair[1]:
+            pair[1] = value
+
+    def update(self, data: MeterData, wall_clock: float) -> None:
+        """Fold one frame's samples into today's extrema.
+
+        ``wall_clock`` is the frame's wall-clock time (epoch seconds) used only
+        for the local-day rollover check.
+        """
+        with self._lock:
+            # Handle first frame and day rollover. A backwards jump (clock
+            # correction) also re-anchors the window.
+            if not self._initialised or wall_clock >= self._next_day_start or wall_clock < self._day_start:
+                self._reset_locked(_local_day_start(wall_clock))
+
+            system = data.system
+            phases = data.phases
+            for quantity, sys_attr, phase_attr in _DAILY_EXTREMA_QUANTITIES:
+                self._accumulate(self._extrema[quantity], getattr(system, sys_attr))
+                for idx, suffix in enumerate(_DAILY_EXTREMA_PHASE_SUFFIXES):
+                    self._accumulate(
+                        self._extrema[f"{quantity}_{suffix}"],
+                        getattr(phases[idx], phase_attr),
+                    )
+
+    def snapshot(self) -> dict[str, float | None]:
+        """Return a flat ``{"<key>_min"/"<key>_max": value}`` mapping.
+
+        Unset extrema (no sample yet today) are reported as ``None``.
+        """
+        with self._lock:
+            result: dict[str, float | None] = {}
+            for key, (lo, hi) in self._extrema.items():
+                result[f"{key}_min"] = lo
+                result[f"{key}_max"] = hi
+            return result
+
+
 class Em540Master:
     """Represents a Modbus master that reads data from an EM540 device.
 
@@ -141,6 +259,7 @@ class Em540Master:
         self._data_seq: int = 0
         self._condition: threading.Condition = threading.Condition()
         self._stats: Em540MasterStats = Em540MasterStats()
+        self._daily_extrema: DailyExtrema = DailyExtrema()
         self._static_read_plan: tuple[int, ...] = tuple(self._front_data.frame.static_reg_map.keys())
         logger.setLevel(config.log_level)
         self._client: ModbusBaseClient
@@ -334,6 +453,10 @@ class Em540Master:
     def add_stats_listener(self, listener: Callable[[Em540MasterStats], None]) -> None:
         self._stats.add_listener(listener)
 
+    @property
+    def daily_extrema(self) -> "DailyExtrema":
+        return self._daily_extrema
+
     def remove_listener(self, listener: MeterDataListener) -> None:
         if listener in self._listeners:
             self._listeners.remove(listener)
@@ -420,6 +543,14 @@ class Em540Master:
             await self._notify_listeners_read_failed()
 
         if is_ok:
+            # Fold this frame into daily extrema BEFORE the buffer swap. This is
+            # the only point that observes every upstream frame; downstream
+            # consumers are subsampled and would miss intermediate peaks. The
+            # primary block (power/voltage/current) is always read above, so
+            # these quantities are valid on every successful frame regardless of
+            # the energy-read publish gate below.
+            self._daily_extrema.update(self._back_data, self._back_data.timestamp)
+
             # Swap buffers under the condition lock so the front buffer stays immutable
             # for listener threads (which read _front_data under _condition). The swap is
             # always performed so previous energy values can be preserved across failed reads.
