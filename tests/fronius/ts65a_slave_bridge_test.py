@@ -141,8 +141,9 @@ class TestTs65aSlaveBridge(unittest.TestCase):
             mock_server_cls.return_value = mock_server
             mock_serial_server_cls.return_value = serial_mock
             bridge = Ts65aSlaveBridge(bridge_config)
+            serial_server = bridge._build_serial_server()
 
-        self.assertIs(bridge._serial_server.context, bridge._server.context)
+        self.assertIs(serial_server.context, bridge._server.context)
 
     def test_voltage_phase_ca_uses_phase_c_line_line_voltage(self):
         bridge, _ = self._build_bridge()

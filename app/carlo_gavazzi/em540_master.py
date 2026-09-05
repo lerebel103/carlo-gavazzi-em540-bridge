@@ -43,6 +43,10 @@ class Em540MasterStats:
         self.acquisition_headroom_ms_sum: float = 0.0
         self.acquisition_headroom_samples: int = 0
         self.tick_overrun_count: int = 0
+        # Count of every failed upstream read attempt: transport not connected,
+        # primary block read failure, corrupt frame, and energy block chunk read
+        # failure. This is the authoritative "RS485 Master Read Failures" metric.
+        self.read_failed_total: int = 0
         self._listeners: list[Callable[["Em540MasterStats"], None]] = []
 
     def snapshot_and_reset_interval_extrema(self) -> dict[str, float | int]:
@@ -97,6 +101,141 @@ class Em540MasterStats:
         self._listeners.append(listener)
 
 
+# Quantities tracked for daily extrema. Each entry maps a logical quantity key
+# to the attribute name read from SystemData / PhaseData. System current is the
+# summed neutral current, exposed as SystemData.An (there is no system.current).
+_DAILY_EXTREMA_QUANTITIES: tuple[tuple[str, str, str], ...] = (
+    # (quantity key, system attribute, phase attribute)
+    ("power", "power", "power"),
+    ("current", "An", "current"),
+    ("voltage_ln", "line_neutral_voltage", "line_neutral_voltage"),
+    ("voltage_ll", "line_line_voltage", "line_line_voltage"),
+)
+
+# Scope suffixes: system aggregate plus the three phases (index -> suffix).
+_DAILY_EXTREMA_PHASE_SUFFIXES: tuple[str, ...] = ("l1", "l2", "l3")
+
+
+def _local_day_start(epoch: float) -> float:
+    """Return the epoch of the most recent local midnight at or before ``epoch``.
+
+    Uses the process/container local timezone. If TZ is unset, local == UTC.
+    """
+    lt = time.localtime(epoch)
+    # mktime round-trips the local wall-clock struct back to epoch, correctly
+    # accounting for the active UTC offset (including DST) at that instant.
+    return time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday, 0, 0, 0, 0, 0, -1))
+
+
+def _local_next_day_start(epoch: float) -> float:
+    """Return the epoch of the next local midnight strictly after ``epoch``.
+
+    Computed from the *following* calendar day at 00:00 with is_dst=-1 so
+    mktime resolves the correct local offset. This makes the day boundary
+    robust to DST transitions where a local day is 23 or 25 hours long; a
+    fixed ``+86400`` would drift the boundary by an hour on those days.
+    """
+    lt = time.localtime(epoch)
+    # mktime normalises out-of-range fields, so mday+1 correctly rolls month
+    # and year boundaries (e.g. Jan 31 -> Feb 1, Dec 31 -> Jan 1).
+    return time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday + 1, 0, 0, 0, 0, 0, -1))
+
+
+class DailyExtrema:
+    """Tracks per-quantity, per-scope daily min/max, updated on every frame.
+
+    This lives at the master because it must observe *every* upstream frame.
+    Downstream consumers (HA notify loop, MQTT publish) are deliberately
+    subsampled and would miss intermediate peaks, so extrema cannot be computed
+    there. The per-frame cost here is a handful of scalar comparisons and one
+    cached float comparison for the day boundary; no allocations occur on the
+    steady-state path.
+
+    Extrema are unset (``None``) until the first observed sample and are
+    re-seeded from the first sample after each local-midnight rollover. Values
+    are signed (power and current can be negative), so resetting to zero would
+    corrupt the first post-reset comparison; re-seeding avoids that.
+    """
+
+    def __init__(self) -> None:
+        self._lock: threading.Lock = threading.Lock()
+        # key -> [min, max]; None entries mean "no sample observed yet today".
+        self._extrema: dict[str, list[float | None]] = {}
+        self._keys: tuple[str, ...] = self._build_keys()
+        for key in self._keys:
+            self._extrema[key] = [None, None]
+        # Local-day boundary cache. next boundary is the next local midnight;
+        # the steady-state hot path only compares against it.
+        self._day_start: float = 0.0
+        self._next_day_start: float = 0.0
+        self._initialised: bool = False
+
+    @staticmethod
+    def _build_keys() -> tuple[str, ...]:
+        keys: list[str] = []
+        for quantity, _sys_attr, _phase_attr in _DAILY_EXTREMA_QUANTITIES:
+            keys.append(quantity)  # system scope
+            for suffix in _DAILY_EXTREMA_PHASE_SUFFIXES:
+                keys.append(f"{quantity}_{suffix}")
+        return tuple(keys)
+
+    @property
+    def keys(self) -> tuple[str, ...]:
+        return self._keys
+
+    def _reset_locked(self, wall_clock: float) -> None:
+        for pair in self._extrema.values():
+            pair[0] = None
+            pair[1] = None
+        # Anchor to the local-day window containing wall_clock. The next
+        # boundary is the following local midnight (DST-aware), not a fixed
+        # 24h offset.
+        self._day_start = _local_day_start(wall_clock)
+        self._next_day_start = _local_next_day_start(wall_clock)
+        self._initialised = True
+
+    @staticmethod
+    def _accumulate(pair: list[float | None], value: float) -> None:
+        if pair[0] is None or value < pair[0]:
+            pair[0] = value
+        if pair[1] is None or value > pair[1]:
+            pair[1] = value
+
+    def update(self, data: MeterData, wall_clock: float) -> None:
+        """Fold one frame's samples into today's extrema.
+
+        ``wall_clock`` is the frame's wall-clock time (epoch seconds) used only
+        for the local-day rollover check.
+        """
+        with self._lock:
+            # Handle first frame and day rollover. A backwards jump (clock
+            # correction) also re-anchors the window.
+            if not self._initialised or wall_clock >= self._next_day_start or wall_clock < self._day_start:
+                self._reset_locked(wall_clock)
+
+            system = data.system
+            phases = data.phases
+            for quantity, sys_attr, phase_attr in _DAILY_EXTREMA_QUANTITIES:
+                self._accumulate(self._extrema[quantity], getattr(system, sys_attr))
+                for idx, suffix in enumerate(_DAILY_EXTREMA_PHASE_SUFFIXES):
+                    self._accumulate(
+                        self._extrema[f"{quantity}_{suffix}"],
+                        getattr(phases[idx], phase_attr),
+                    )
+
+    def snapshot(self) -> dict[str, float | None]:
+        """Return a flat ``{"<key>_min"/"<key>_max": value}`` mapping.
+
+        Unset extrema (no sample yet today) are reported as ``None``.
+        """
+        with self._lock:
+            result: dict[str, float | None] = {}
+            for key, (lo, hi) in self._extrema.items():
+                result[f"{key}_min"] = lo
+                result[f"{key}_max"] = hi
+            return result
+
+
 class Em540Master:
     """Represents a Modbus master that reads data from an EM540 device.
 
@@ -111,6 +250,10 @@ class Em540Master:
 
     # Interval between repeated "still disconnected" log messages (seconds).
     _RECONNECT_LOG_INTERVAL: float = 30.0
+
+    # Interval between periodic diagnostics debug-log lines (seconds), emitted
+    # only when DEBUG logging is enabled for this master.
+    _DIAGNOSTICS_LOG_INTERVAL: float = 5.0
 
     # Fraction of the per-tick budget allowed as jitter before a cycle is counted as an
     # overrun. A single cycle's wall-clock duration includes Modbus I/O round-trip time,
@@ -133,6 +276,7 @@ class Em540Master:
         self._data_seq: int = 0
         self._condition: threading.Condition = threading.Condition()
         self._stats: Em540MasterStats = Em540MasterStats()
+        self._daily_extrema: DailyExtrema = DailyExtrema()
         self._static_read_plan: tuple[int, ...] = tuple(self._front_data.frame.static_reg_map.keys())
         logger.setLevel(config.log_level)
         self._client: ModbusBaseClient
@@ -151,6 +295,11 @@ class Em540Master:
         self._consecutive_connect_failures: int = 0
         self._first_failure_time: float = 0.0
         self._last_reconnect_log_time: float = 0.0
+
+        # Periodic diagnostics debug-logging state. Tracks a windowed read count
+        # so a frame rate can be derived and logged alongside the timing stats.
+        self._diag_log_last_time: float = 0.0
+        self._diag_log_last_tick_count: int = 0
 
         if config.mode == "serial":
             # Create serial client.
@@ -321,6 +470,10 @@ class Em540Master:
     def add_stats_listener(self, listener: Callable[[Em540MasterStats], None]) -> None:
         self._stats.add_listener(listener)
 
+    @property
+    def daily_extrema(self) -> "DailyExtrema":
+        return self._daily_extrema
+
     def remove_listener(self, listener: MeterDataListener) -> None:
         if listener in self._listeners:
             self._listeners.remove(listener)
@@ -352,8 +505,7 @@ class Em540Master:
 
         # No point reading if we are not connected
         if not self._client.connected:
-            for listener in self._listeners:
-                await listener.read_failed()
+            await self._notify_listeners_read_failed()
             self._update_timing_stats(
                 cycle_start=cycle_start,
                 tick_deadline_mono=tick_deadline_mono,
@@ -374,8 +526,7 @@ class Em540Master:
         is_ok = await self._read_primary_block(frame)
 
         if not is_ok:
-            for listener in self._listeners:
-                await listener.read_failed()
+            await self._notify_listeners_read_failed()
             self._update_timing_stats(
                 cycle_start=cycle_start,
                 tick_deadline_mono=tick_deadline_mono,
@@ -392,7 +543,12 @@ class Em540Master:
                 self._energy_initial_read_complete = True
                 logger.info("Initial full energy register read complete.")
         else:
-            # Preserve previously-known energy values when the read fails.
+            # Energy read failed — primary data still published this tick, so we
+            # do NOT abort or signal listeners read_failed (that would flap their
+            # circuit breakers on a partial miss). Still count it so the
+            # read-failure metric accounts for every upstream read error, and
+            # preserve previously-known energy values.
+            self._count_read_failure()
             self._backfill_energy_from_front(frame)
 
         # --- Post-read processing and publication ---
@@ -401,10 +557,17 @@ class Em540Master:
         except (struct.error, ValueError, OverflowError) as e:
             logger.warning("Corrupt frame data, dropping cycle: %s", e)
             is_ok = False
-            for listener in self._listeners:
-                await listener.read_failed()
+            await self._notify_listeners_read_failed()
 
         if is_ok:
+            # Fold this frame into daily extrema BEFORE the buffer swap. This is
+            # the only point that observes every upstream frame; downstream
+            # consumers are subsampled and would miss intermediate peaks. The
+            # primary block (power/voltage/current) is always read above, so
+            # these quantities are valid on every successful frame regardless of
+            # the energy-read publish gate below.
+            self._daily_extrema.update(self._back_data, self._back_data.timestamp)
+
             # Swap buffers under the condition lock so the front buffer stays immutable
             # for listener threads (which read _front_data under _condition). The swap is
             # always performed so previous energy values can be preserved across failed reads.
@@ -424,6 +587,36 @@ class Em540Master:
         )
 
         return is_ok
+
+    def _count_read_failure(self) -> None:
+        """Record a failed upstream read attempt in diagnostics.
+
+        Covers every read failure mode: not connected, primary block failure,
+        corrupt frame, and energy block chunk failure. This keeps the
+        "RS485 Master Read Failures" metric authoritative regardless of whether
+        the failure aborts the tick (primary/connect/corrupt) or is tolerated
+        without aborting (energy chunk).
+
+        Does not notify stats listeners here: every tick — including failure
+        ticks — calls _update_timing_stats() afterwards, which fires
+        _stats.changed() exactly once. Notifying here too would double-notify on
+        failure ticks and add avoidable work in the 10Hz path.
+        """
+        with self._stats.lock:
+            self._stats.read_failed_total += 1
+
+    async def _notify_listeners_read_failed(self) -> None:
+        """Signal listeners that the tick produced no usable data.
+
+        Also counts the failure. Used for whole-cycle failures (not connected,
+        primary block failure, corrupt frame) where downstream consumers must
+        fail closed. Energy chunk failures do NOT use this path: they count the
+        failure but keep publishing primary data, so listeners are not told the
+        cycle failed (which would flap their circuit breakers needlessly).
+        """
+        self._count_read_failure()
+        for listener in self._listeners:
+            await listener.read_failed()
 
     async def _read_primary_block(self, frame) -> bool:
         """Read the primary dynamic register block (0x0000)."""
@@ -482,7 +675,6 @@ class Em540Master:
 
         self._refresh_client_runtime_config()
         try:
-            logger.debug("Reading full energy block from address %s, count=%d", hex(start_addr), num_registers)
             result = await self._client.read_holding_registers(start_addr, count=num_registers, device_id=self.slave_id)
 
             if result.isError():
@@ -590,6 +782,79 @@ class Em540Master:
 
         # Timing stats are expected to update continuously for diagnostics consumers.
         self._stats.changed()
+
+        self._maybe_log_diagnostics()
+
+    def _maybe_log_diagnostics(self) -> None:
+        """Emit a periodic diagnostics summary when DEBUG logging is enabled.
+
+        Logs the master's frame rate (reads/second, measured over the elapsed
+        window) alongside the min/max timing stats. Rate-limited to
+        _DIAGNOSTICS_LOG_INTERVAL so it stays readable at 10Hz. Cheap when DEBUG
+        is disabled (a single isEnabledFor check).
+        """
+        if not logger.isEnabledFor(logging.DEBUG):
+            return
+
+        now = time.perf_counter()
+        if self._diag_log_last_time == 0.0:
+            self._diag_log_last_time = now
+            self._diag_log_last_tick_count = self._dyn_reg_read_counter
+            return
+
+        elapsed = now - self._diag_log_last_time
+        if elapsed < self._DIAGNOSTICS_LOG_INTERVAL:
+            return
+
+        ticks = self._dyn_reg_read_counter - self._diag_log_last_tick_count
+        frame_rate = ticks / elapsed if elapsed > 0 else 0.0
+
+        # Capture the current window's extrema under the lock, then release it
+        # before formatting/logging. We read directly (rather than calling
+        # snapshot_and_reset_interval_extrema()) so this debug logging does not
+        # steal/reset the interval stats that HA diagnostics consumes, and we do
+        # not hold the stats lock across string formatting or handler I/O.
+        with self._stats.lock:
+            s = self._stats
+            dur_min = s.acquisition_duration_ms_min
+            dur_max = s.acquisition_duration_ms_max
+            dur_mean = (
+                s.acquisition_duration_ms_sum / s.acquisition_duration_samples
+                if s.acquisition_duration_samples
+                else 0.0
+            )
+            head_min = s.acquisition_headroom_ms_min
+            head_max = s.acquisition_headroom_ms_max
+            head_mean = (
+                s.acquisition_headroom_ms_sum / s.acquisition_headroom_samples
+                if s.acquisition_headroom_samples
+                else 0.0
+            )
+            overruns = s.tick_overrun_count
+            read_failures = s.read_failed_total
+            missed_updates = s.consumer_missed_updates_total
+            max_seq_gap = s.consumer_max_seq_gap
+
+        logger.debug(
+            "Master diagnostics: frame_rate=%.2f Hz | "
+            "acquisition_ms min=%.2f max=%.2f mean=%.2f | "
+            "headroom_ms min=%.2f max=%.2f mean=%.2f | "
+            "overruns=%d | read_failures=%d | missed_updates=%d max_seq_gap=%d",
+            frame_rate,
+            dur_min,
+            dur_max,
+            dur_mean,
+            head_min,
+            head_max,
+            head_mean,
+            overruns,
+            read_failures,
+            missed_updates,
+            max_seq_gap,
+        )
+
+        self._diag_log_last_time = now
+        self._diag_log_last_tick_count = self._dyn_reg_read_counter
 
     def _copy_meter_data(self, source: MeterData, target: MeterData) -> None:
         """Copy frame register values between buffers while keeping object allocation stable."""

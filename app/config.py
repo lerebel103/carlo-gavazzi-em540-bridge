@@ -13,6 +13,7 @@ import time
 from dataclasses import dataclass, field, is_dataclass
 from pathlib import Path
 
+import serial
 import yaml
 
 logger = logging.getLogger(__name__)
@@ -265,6 +266,15 @@ class ConfigManager:
         self._validate_serial_config("em540_slave.serial", state.em540_slave.serial)
         self._validate_serial_config("ts65a_slave.serial", state.ts65a_slave.serial)
 
+        # 4b. serial device reachability — fail hard on startup rather than
+        # silently retrying/looping forever with a misconfigured port.
+        if state.em540_master.mode == "serial":
+            self._check_serial_device_reachable("em540_master.serial_port", state.em540_master.serial_port)
+        if state.em540_slave.serial.enabled:
+            self._check_serial_device_reachable("em540_slave.serial.port", state.em540_slave.serial.port)
+        if state.ts65a_slave.serial.enabled:
+            self._check_serial_device_reachable("ts65a_slave.serial.port", state.ts65a_slave.serial.port)
+
         # 5. grid_feed_in_hard_limit  (<= 0)
         if state.ts65a_slave.grid_feed_in_hard_limit > 0:
             raise ConfigError(
@@ -308,6 +318,26 @@ class ConfigManager:
             raise ConfigError(f"{name}.stopbits must be one of (1, 1.5, 2), got {serial.stopbits}")
         if serial.timeout <= 0:
             raise ConfigError(f"{name}.timeout must be > 0, got {serial.timeout}")
+
+    def _check_serial_device_reachable(self, name: str, port: str) -> None:
+        """Verify a configured serial device path can actually be opened.
+
+        Catches the common misconfiguration case (wrong/missing device path)
+        at startup instead of letting the master/slave silently retry forever
+        or letting a downstream slave bind fail without a clear diagnosis.
+        Opens and immediately closes the port. This only avoids issuing any
+        Modbus I/O; it is not otherwise side-effect free — opening the device
+        may apply default line settings via the OS/driver. Baud/parity/etc are
+        validated independently and a bad combination there would not prevent
+        the open() call from succeeding.
+        """
+        try:
+            probe = serial.Serial()
+            probe.port = port
+            probe.open()
+            probe.close()
+        except serial.SerialException as exc:
+            raise ConfigError(f"{name} '{port}' could not be opened: {exc}") from exc
 
     # -- persistence ---------------------------------------------------------
 

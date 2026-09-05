@@ -30,17 +30,20 @@ class SerialCable:
 
     def __init__(self, label: str) -> None:
         self.label = label
-        self._left_master, left_slave = pty.openpty()
-        self._right_master, right_slave = pty.openpty()
-        disable_pty_echo(left_slave)
-        disable_pty_echo(right_slave)
-        self.left_path = os.ttyname(left_slave)
-        self.right_path = os.ttyname(right_slave)
-        # Close slave fds immediately.  The PTYs stay alive via the master fds.
-        # Not holding slave fds allows subprocesses to exclusively lock either
-        # path without hitting macOS EAGAIN from the parent holding the fd.
-        os.close(left_slave)
-        os.close(right_slave)
+        self._left_master, self._left_slave = pty.openpty()
+        self._right_master, self._right_slave = pty.openpty()
+        disable_pty_echo(self._left_slave)
+        disable_pty_echo(self._right_slave)
+        self.left_path = os.ttyname(self._left_slave)
+        self.right_path = os.ttyname(self._right_slave)
+        # Keep the slave fds open for the lifetime of the cable.  On macOS,
+        # closing the last slave fd latches the master into a permanent EOF
+        # state: the relay's selector keeps reporting the master readable but
+        # os.read() returns b'' forever, so no bytes are ever forwarded — even
+        # after a client (re)opens the slave device path.  Holding the slave
+        # fds keeps the PTY line discipline live so the relay can forward data.
+        # A subprocess can still open the same slave path while we hold the fd
+        # (verified on macOS), so this does not block the service under test.
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._run, daemon=True, name=f"serial-cable-{label}")
         self._thread.start()
@@ -92,7 +95,7 @@ class SerialCable:
         """Stop the relay thread and close file descriptors."""
         self._stop.set()
         self._thread.join(timeout=2.0)
-        for fd in (self._left_master, self._right_master):
+        for fd in (self._left_master, self._right_master, self._left_slave, self._right_slave):
             try:
                 os.close(fd)
             except OSError:
@@ -101,7 +104,7 @@ class SerialCable:
     @property
     def pty_fds(self) -> tuple[int, ...]:
         """Return all PTY fds held by this cable (for preexec_fn in subprocess.Popen)."""
-        return (self._left_master, self._right_master)
+        return (self._left_master, self._right_master, self._left_slave, self._right_slave)
 
 
 def compute_modbus_crc(payload: bytes) -> bytes:
@@ -136,6 +139,12 @@ class ModbusRtuServer:
         self._stop = threading.Event()
         self._lock = threading.Lock()
         self._registers: dict[int, int] = {}
+        # Values returned only for an exact single-register read (count == 1) of a
+        # given address. Models registers whose value differs between a
+        # single-word read and a contiguous block scan (e.g. the EM540
+        # identification code at 0x000B, which shares an address with the high
+        # word of the V L3-L1 INT32 measurement).
+        self._single_word_overrides: dict[int, int] = {}
         self._requests: list[tuple[float, int, int]] = []
         self._connect_events: list[bool] = []
 
@@ -148,6 +157,17 @@ class ModbusRtuServer:
         """Replace the register map."""
         with self._lock:
             self._registers = dict(registers)
+
+    def set_single_word_overrides(self, overrides: dict[int, int]) -> None:
+        """Set values returned only for exact single-register (count==1) reads.
+
+        A block scan spanning one of these addresses still returns the value from
+        the normal register map; only a standalone single-word read returns the
+        override. This mirrors meters that multiplex an identity register onto an
+        address that is otherwise part of a wider measurement value.
+        """
+        with self._lock:
+            self._single_word_overrides = dict(overrides)
 
     def start(self) -> None:
         """Start the server thread."""
@@ -194,7 +214,10 @@ class ModbusRtuServer:
             address = (request[2] << 8) | request[3]
             count = (request[4] << 8) | request[5]
             with self._lock:
-                registers = [self._registers.get(addr, 0) for addr in range(address, address + count)]
+                if count == 1 and address in self._single_word_overrides:
+                    registers = [self._single_word_overrides[address]]
+                else:
+                    registers = [self._registers.get(addr, 0) for addr in range(address, address + count)]
                 self._requests.append((time.monotonic(), address, count))
             response = self._build_response(unit_id, function_code, registers)
             os.write(self._master_fd, response)

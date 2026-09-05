@@ -151,26 +151,16 @@ class Em540Slave(MeterDataListener):
             trace_connect=self._tcp_trace_connect,
         )
         self._tcp_server.context = self._rtu_server.context
+        # ModbusSerialServer.__init__() calls asyncio.get_running_loop() and binds its
+        # transport to whatever loop is running at construction time. Building it here
+        # (on the main event loop, during process_loop() setup) would bind it to the
+        # wrong loop, since serve_forever() actually runs on the dedicated server loop
+        # created in start(). So construction is deferred to _run_servers() below, which
+        # runs on that dedicated loop. self._device is retained for that purpose.
+        self._device = device
         self._serial_server: ModbusSerialServer | None = None
-        if self._config.serial.enabled:
-            self._serial_server = ModbusSerialServer(
-                framer=FramerType.RTU,
-                context=device,
-                port=self._config.serial.port,
-                baudrate=self._config.serial.baudrate,
-                parity=self._config.serial.parity,
-                bytesize=self._config.serial.bytesize,
-                stopbits=self._config.serial.stopbits,
-                timeout=self._config.serial.timeout,
-                handle_local_echo=self._config.serial.handle_local_echo,
-                trace_pdu=self._pdu_helper.on_pdu,
-                trace_connect=self._serial_trace_connect,
-            )
-            self._serial_server.context = self._rtu_server.context
         self._server_loop: asyncio.AbstractEventLoop | None = None
         self._servers: list[ModbusTcpServer | ModbusSerialServer] = [self._rtu_server, self._tcp_server]
-        if self._serial_server is not None:
-            self._servers.append(self._serial_server)
 
         # Direct access to the SimRuntime register array for lock-based writes.
         # This avoids routing writes through the server event loop (which caused
@@ -223,6 +213,30 @@ class Em540Slave(MeterDataListener):
         else:
             logger.info("Downstream serial client disconnected.")
 
+    def _build_serial_server(self) -> ModbusSerialServer:
+        """Construct the downstream serial server.
+
+        Must be called from within the coroutine running on the dedicated
+        server event loop (see start()), since ModbusSerialServer.__init__()
+        calls asyncio.get_running_loop() and binds its transport to whatever
+        loop is running at construction time.
+        """
+        serial_server = ModbusSerialServer(
+            framer=FramerType.RTU,
+            context=self._device,
+            port=self._config.serial.port,
+            baudrate=self._config.serial.baudrate,
+            parity=self._config.serial.parity,
+            bytesize=self._config.serial.bytesize,
+            stopbits=self._config.serial.stopbits,
+            timeout=self._config.serial.timeout,
+            handle_local_echo=self._config.serial.handle_local_echo,
+            trace_pdu=self._pdu_helper.on_pdu,
+            trace_connect=self._serial_trace_connect,
+        )
+        serial_server.context = self._rtu_server.context
+        return serial_server
+
     def add_stats_listener(self, listener: Callable[[EM540SlaveStats], None]) -> None:
         self._stats.add_listener(listener)
 
@@ -239,6 +253,12 @@ class Em540Slave(MeterDataListener):
 
         async def _run_servers():
             try:
+                if self._config.serial.enabled:
+                    # Constructed here (inside the coroutine that runs on the dedicated
+                    # server loop) so ModbusSerialServer's asyncio.get_running_loop()
+                    # call binds to the loop that actually runs serve_forever().
+                    self._serial_server = self._build_serial_server()
+                    self._servers.append(self._serial_server)
                 for server in self._servers:
                     await server.serve_forever(background=True)
                 for reaper in self._reapers:

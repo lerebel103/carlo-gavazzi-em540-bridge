@@ -44,10 +44,61 @@ def make_em540_source_frame(seed: int) -> Em540Frame:
             continue
         reg.values = [((seed + addr + i) & 0xFFFF) for i in range(len(reg.values))]
 
-    # Primary dynamic block (0x0000): current, voltage, frequency
+    # Primary dynamic block (0x0000): populate per-field with realistic,
+    # physically-scaled values so each INT32 fits the range a real EM540 emits
+    # (e.g. voltages 0-600V -> raw <= 6000, well within the low 16-bit word).
+    #
+    # This matters because several fields are read as INT32 spanning two
+    # registers; a real meter leaves the high word at 0. Blanket-filling every
+    # slot with a large synthetic value used to push a non-zero high word into
+    # register 0x000B (the device-type register the downstream slave overlays),
+    # corrupting the phase-2 line-to-line voltage read. Realistic values avoid
+    # that collision and let the end-to-end data be verified honestly.
+    #
+    # A small seed-derived delta keeps successive frames (seed=100 vs 101)
+    # distinct while staying in range.
     primary = frame.dynamic_reg_map[0x0000].values
-    for idx in range(0, len(primary), 2):
-        primary[idx : idx + 2] = encode_int32_le(seed * 100 + idx)
+    d = seed % 100  # bounded per-field variation
+
+    def _put_int32(offset: int, value: int) -> None:
+        r = encode_int32_le(value)
+        primary[offset], primary[offset + 1] = r[0], r[1]
+
+    def _put_int16(offset: int, value: int) -> None:
+        primary[offset] = value & 0xFFFF
+
+    # Phase voltages L-N (0x0000-0x0005), Volt*10  -> ~230V
+    for i in range(3):
+        _put_int32(0x00 + i * 2, 2300 + i * 10 + d)
+    # Phase voltages L-L (0x0006-0x000B), Volt*10  -> ~400V
+    for i in range(3):
+        _put_int32(0x06 + i * 2, 3990 + i * 10 + d)
+    # Phase currents (0x000C-0x0011), Ampere*1000  -> ~10A
+    for i in range(3):
+        _put_int32(0x0C + i * 2, 10000 + i * 20 + d)
+    # Phase powers (0x0012-0x0017), Watt*10
+    for i in range(3):
+        _put_int32(0x12 + i * 2, 2400 + i * 15 + d)
+    # Phase apparent powers (0x0018-0x001D), VA*10
+    for i in range(3):
+        _put_int32(0x18 + i * 2, 2500 + i * 15 + d)
+    # Phase reactive powers (0x001E-0x0023), var*10
+    for i in range(3):
+        _put_int32(0x1E + i * 2, 500 + i * 10 + d)
+    # System aggregate values (0x0024-0x002D)
+    _put_int32(0x24, 2310 + d)  # sys voltage L-N, Volt*10
+    _put_int32(0x26, 4000 + d)  # sys voltage L-L, Volt*10
+    _put_int32(0x28, 7200 + d)  # sys power, Watt*10
+    _put_int32(0x2A, 7500 + d)  # sys apparent, VA*10
+    _put_int32(0x2C, 1500 + d)  # sys reactive, var*10
+    # Power factors (0x002E-0x0031), INT16, PF*1000
+    for i in range(3):
+        _put_int16(0x2E + i, 980 + i)
+    _put_int16(0x31, 975)  # system PF
+    # Phase sequence (0x0032), INT16
+    _put_int16(0x32, 1)
+    # Frequency (0x0033), INT16, Hz*10 -> 50Hz
+    _put_int16(0x33, 500)
 
     # Energy blocks (0x0500, 0x0520): cumulative energy values
     energy = frame.dynamic_reg_map[0x0500].values

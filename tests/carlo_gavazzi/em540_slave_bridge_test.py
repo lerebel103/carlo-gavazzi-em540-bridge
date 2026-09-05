@@ -123,8 +123,9 @@ class TestEm540Slave(unittest.TestCase):
             mock_server_cls.side_effect = [rtu_mock, tcp_mock]
             mock_serial_server_cls.return_value = serial_mock
             slave = Em540Slave(config, frame)
+            serial_server = slave._build_serial_server()
 
-        self.assertIs(slave._serial_server.context, slave._rtu_server.context)
+        self.assertIs(serial_server.context, slave._rtu_server.context)
 
     # --- Requirement 12.4: REG_OFFSET is 0 ---
 

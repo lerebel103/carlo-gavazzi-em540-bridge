@@ -92,11 +92,16 @@ class PduHelper:
                     response.transaction_id = pdu.transaction_id
                 return response
 
-        # Log some exceptions so we can debug any issues with register access not accounted for...
-        # For whatever reason, Victron seems to be wanting slave_id 2, just mute this one
+        # Exception responses to unaddressed device IDs are normal operation:
+        # downstream controllers (e.g. Fronius inverters) scan a range of Modbus
+        # unit IDs probing for devices, and every probe to an ID we don't emulate
+        # yields a legitimate SLAVE_DEVICE_FAILURE. Log at DEBUG so this scanning
+        # noise stays silent at INFO but is still available when debugging genuine
+        # register-access issues.
+        # (dev_id 2 is muted entirely: Victron polls it and we never serve it.)
         if getattr(pdu, "exception_code", 0) != 0 and getattr(pdu, "dev_id", 2) != 2:
-            self.logger.error(pdu)
-            self.logger.error(f"Prior PDU: {self.last_pdu}")
+            self.logger.debug(pdu)
+            self.logger.debug(f"Prior PDU: {self.last_pdu}")
 
         self.last_pdu = pdu
         return pdu
