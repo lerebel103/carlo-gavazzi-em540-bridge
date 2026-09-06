@@ -106,6 +106,23 @@ mqtt:
   # Log level for the MQTT component
   log_level: INFO
 
+health:
+  # Heartbeat file the service writes and the Docker healthcheck reads. Kept on
+  # tmpfs (/tmp) so writes are cheap and leave no disk residue.
+  file: /tmp/em540_bridge_health.json
+  # How often (seconds) the heartbeat file is written. Keep well below the Docker
+  # healthcheck interval so the reader always sees a fresh file.
+  write_interval: 1.0
+  # Window (seconds) the acquisition rate is averaged over (smooths transient dips).
+  rate_window: 5.0
+  # Fraction of the configured rate that must be met to be healthy (0.9 == within 10%).
+  rate_margin: 0.9
+  # When em540_master.update_interval is 0 (unpaced/max rate), the actual rate must
+  # exceed this floor (reads/sec) to be healthy.
+  unpaced_min_rate_hz: 10.0
+  # TCP port the healthcheck probes for downstream-server liveness (TS65A emulation).
+  tcp_probe_port: 5003
+
 pymodbus:
   log_level: INFO
 

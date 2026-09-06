@@ -49,9 +49,11 @@ RUN chown -R lerebel103:lerebel103 /app
 # Expose Modbus and emulation ports
 EXPOSE 5001 5002 5003
 
-# Define healthcheck: ensure app process is running
-HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-  CMD ps aux | grep -v grep | grep -q 'python -m app' || exit 1
+# Healthcheck: verifies the downstream server is listening AND the upstream
+# acquisition rate is on target (see app/healthcheck.py). start-period is
+# generous so the rate-averaging window can fill before the first check.
+HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
+  CMD ["uv", "run", "--frozen", "--no-sync", "python", "-m", "app.healthcheck", "--config", "/etc/carlo-gavazzi-em540-bridge/config.yaml"]
 
 # Switch to non-root user
 USER lerebel103
