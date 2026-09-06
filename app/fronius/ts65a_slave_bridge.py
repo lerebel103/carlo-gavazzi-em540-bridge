@@ -22,6 +22,11 @@ logger = logging.getLogger("ts65a-slave")
 # Holding register function code used for async_setValues.
 _FC_HOLDING_REGISTER = 3
 
+# A specific register the Fronius client polls that this proprietary TS65A
+# emulation does not implement. Returning ILLEGAL_DATA_ADDRESS for it makes the
+# client fault and disconnect, so we return zeros for this exact read only.
+_ZERO_FILL_READ_ADDRESS = 50000
+
 # Pre-compiled struct for FLOAT32 → 2 registers (big-endian)
 _STRUCT_FLOAT32 = struct.Struct(">f")
 _STRUCT_2H = struct.Struct(">2H")
@@ -173,7 +178,19 @@ class Ts65aSlaveBridge(MeterDataListener):
         self.host = config.host
         self.port: int = config.port
         self._slave_id: int = config.slave_id
-        self._pdu_helper = PduHelper(logger, lambda: self._config.update_timeout, served_device_ids={self._slave_id})
+        self._pdu_helper = PduHelper(
+            logger,
+            lambda: self._config.update_timeout,
+            served_device_ids={self._slave_id},
+            # A Fronius client polls register 50000 (a register this proprietary
+            # TS65A emulation does not implement) and treats the resulting
+            # ILLEGAL_DATA_ADDRESS exception as a fatal meter error, disconnecting
+            # and faulting before recovering later. Return zeros for ONLY this
+            # exact read so the client stays connected; every other invalid read
+            # still returns ILLEGAL_DATA_ADDRESS. Each substitution is logged so
+            # the effect can be compared against sending the exception.
+            zero_fill_read_addresses={_ZERO_FILL_READ_ADDRESS},
+        )
         self._stats = Ts65aSlaveStats()
         logger.setLevel(config.log_level)
 

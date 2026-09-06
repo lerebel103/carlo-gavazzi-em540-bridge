@@ -163,5 +163,86 @@ class TestPduHelperCircuitBreaker(unittest.TestCase):
         self.assertEqual(calls["debug"], 0)
 
 
+class TestPduHelperZeroFillAllowList(unittest.TestCase):
+    """Narrow zero-fill: ONLY allow-listed read addresses are substituted."""
+
+    def setUp(self):
+        import time
+
+        self.time = time
+        self.calls = {"warning": 0}
+        self.logger = SimpleNamespace(
+            warning=lambda *a, **k: self.calls.__setitem__("warning", self.calls["warning"] + 1),
+            info=lambda *a, **k: None,
+            error=lambda *a, **k: None,
+            debug=lambda *a, **k: None,
+        )
+
+    def _closed_helper(self, **kwargs):
+        helper = PduHelper(self.logger, bridge_timeout=10.0, **kwargs)
+        helper.data_received(self.time.time())  # close the circuit
+        self.assertFalse(helper.circuit_open)
+        return helper
+
+    def _illegal_address_roundtrip(self, helper, address, function_code=3):
+        """Push a read request then its ILLEGAL_DATA_ADDRESS response; return the outgoing PDU."""
+        from pymodbus import ExceptionResponse
+        from pymodbus.constants import ExcCodes
+        from pymodbus.pdu.register_message import ReadHoldingRegistersRequest
+
+        request = ReadHoldingRegistersRequest(address=address, count=2, dev_id=1, transaction_id=7)
+        helper.on_pdu(False, request)
+        exc = ExceptionResponse(function_code, exception_code=int(ExcCodes.ILLEGAL_ADDRESS), device_id=1, transaction=7)
+        return helper.on_pdu(True, exc)
+
+    def test_allow_listed_address_is_zero_filled(self):
+        from pymodbus.pdu.register_message import ReadHoldingRegistersResponse
+
+        helper = self._closed_helper(served_device_ids={1}, zero_fill_read_addresses={50000})
+        out = self._illegal_address_roundtrip(helper, 50000)
+
+        self.assertIsInstance(out, ReadHoldingRegistersResponse)
+        self.assertEqual(out.registers, [0, 0])
+        self.assertEqual(out.dev_id, 1)
+        self.assertEqual(out.transaction_id, 7)
+        self.assertEqual(helper.zero_filled_read_count, 1)
+        self.assertEqual(self.calls["warning"], 1)
+
+    def test_other_out_of_range_addresses_still_return_exception(self):
+        from pymodbus import ExceptionResponse
+
+        helper = self._closed_helper(served_device_ids={1}, zero_fill_read_addresses={50000})
+
+        # A neighbouring and a distant out-of-range address must NOT be substituted.
+        for address in (49999, 50001, 60000, 0):
+            out = self._illegal_address_roundtrip(helper, address)
+            self.assertIsInstance(out, ExceptionResponse, f"address {address} should stay an exception")
+        self.assertEqual(helper.zero_filled_read_count, 0)
+
+    def test_empty_allow_list_never_zero_fills(self):
+        from pymodbus import ExceptionResponse
+
+        helper = self._closed_helper(served_device_ids={1})  # no zero_fill_read_addresses
+        out = self._illegal_address_roundtrip(helper, 50000)
+
+        self.assertIsInstance(out, ExceptionResponse)
+        self.assertEqual(helper.zero_filled_read_count, 0)
+
+    def test_non_read_function_at_allow_listed_address_is_not_zero_filled(self):
+        from pymodbus import ExceptionResponse
+        from pymodbus.constants import ExcCodes
+        from pymodbus.pdu.register_message import WriteMultipleRegistersRequest
+
+        helper = self._closed_helper(served_device_ids={1}, zero_fill_read_addresses={50000})
+
+        request = WriteMultipleRegistersRequest(address=50000, registers=[1, 2], dev_id=1, transaction_id=7)
+        helper.on_pdu(False, request)
+        exc = ExceptionResponse(16, exception_code=int(ExcCodes.ILLEGAL_ADDRESS), device_id=1, transaction=7)
+        out = helper.on_pdu(True, exc)
+
+        self.assertIsInstance(out, ExceptionResponse)
+        self.assertEqual(helper.zero_filled_read_count, 0)
+
+
 if __name__ == "__main__":
     unittest.main()

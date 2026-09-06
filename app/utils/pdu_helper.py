@@ -5,6 +5,11 @@ from typing import Optional
 from pymodbus import ExceptionResponse
 from pymodbus.constants import ExcCodes
 from pymodbus.pdu import ModbusPDU
+from pymodbus.pdu.register_message import ReadHoldingRegistersResponse
+
+# Modbus function codes for register reads.
+_FC_READ_HOLDING = 3
+_FC_READ_INPUT = 4
 
 
 class PduHelper:
@@ -13,6 +18,7 @@ class PduHelper:
         logger: logging.Logger,
         bridge_timeout: float,
         served_device_ids: Optional[set[int]] = None,
+        zero_fill_read_addresses: Optional[set[int]] = None,
     ) -> None:
         self.logger: logging.Logger = logger
         self.bridge_timeout = bridge_timeout
@@ -21,6 +27,16 @@ class PduHelper:
         # device failure) and are logged at ERROR. Exceptions to any other ID
         # are device-scan probes (see on_pdu) and are logged at DEBUG.
         self.served_device_ids: set[int] = served_device_ids or set()
+        # Specific register-read start addresses for which an ILLEGAL_DATA_ADDRESS
+        # rejection should be answered with zeros instead of the exception. This is
+        # a deliberately narrow allow-list — ONLY these exact addresses are
+        # substituted; every other out-of-range read still returns the proper
+        # ILLEGAL_DATA_ADDRESS. Used to work around a specific downstream client
+        # (Fronius) that faults when a particular unimplemented register (50000)
+        # returns an exception. Each substitution is logged so its effect can be
+        # compared against the exception behaviour.
+        self.zero_fill_read_addresses: set[int] = zero_fill_read_addresses or set()
+        self.zero_filled_read_count: int = 0
         self.last_pdu: Optional[ModbusPDU] = None
         self._last_rx_timestamp: Optional[float] = None
         self._last_warning_timestamp: float = 0
@@ -102,6 +118,15 @@ class PduHelper:
                     response.transaction_id = pdu.transaction_id
                 return response
 
+        # Narrow work-around: substitute a zero-filled response for an
+        # ILLEGAL_DATA_ADDRESS rejection, but ONLY for the specific read addresses
+        # in the allow-list. Runs on the outgoing response path (flag is True);
+        # self.last_pdu holds the request that produced this exception.
+        if flag and getattr(pdu, "exception_code", 0) == int(ExcCodes.ILLEGAL_ADDRESS):
+            zero_response = self._maybe_zero_fill(pdu)
+            if zero_response is not None:
+                return zero_response
+
         # Log exception responses, distinguishing genuine failures from scan noise:
         #  - Exceptions for a device ID we actually serve indicate a real
         #    downstream problem (illegal address/function, device failure) and are
@@ -125,6 +150,50 @@ class PduHelper:
 
         self.last_pdu = pdu
         return pdu
+
+    def _maybe_zero_fill(self, exception_pdu: ModbusPDU) -> Optional[ModbusPDU]:
+        """Return a zero-filled read response, but only for an allow-listed address.
+
+        Returns None (leave the ILLEGAL_DATA_ADDRESS exception unchanged) unless
+        the triggering request was a register read (FC 3/4) whose exact start
+        address is in ``zero_fill_read_addresses``. This is intentionally narrow:
+        no other out-of-range read is affected.
+        """
+        if not self.zero_fill_read_addresses:
+            return None
+
+        request = self.last_pdu
+        if request is None:
+            return None
+        if getattr(request, "function_code", None) not in (_FC_READ_HOLDING, _FC_READ_INPUT):
+            return None
+
+        address = getattr(request, "address", None)
+        if address not in self.zero_fill_read_addresses:
+            return None
+
+        count = getattr(request, "count", 0)
+        if not isinstance(count, int) or count <= 0:
+            return None
+
+        self.zero_filled_read_count += 1
+        self.logger.warning(
+            "Returning zeros instead of ILLEGAL_DATA_ADDRESS for allow-listed read: "
+            "dev_id=%s address=%s count=%s (zero-filled %d times so far). "
+            "Monitoring effect vs. sending the exception.",
+            getattr(request, "dev_id", "?"),
+            address,
+            count,
+            self.zero_filled_read_count,
+        )
+
+        response = ReadHoldingRegistersResponse(registers=[0] * count)
+        # Preserve addressing so the frame routes back to the right client/txn.
+        if hasattr(response, "dev_id"):
+            response.dev_id = getattr(request, "dev_id", 0)
+        if hasattr(response, "transaction_id"):
+            response.transaction_id = getattr(request, "transaction_id", 0)
+        return response
 
     def data_received(self, timestamp: float) -> None:
         self._last_rx_timestamp = timestamp
