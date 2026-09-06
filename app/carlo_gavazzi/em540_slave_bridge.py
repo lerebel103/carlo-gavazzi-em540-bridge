@@ -109,7 +109,9 @@ class Em540Slave(MeterDataListener):
         self.tcp_port: int = config.tcp_port
         self.last_pdu: object = None
         self._slave_id: int = config.slave_id
-        self._pdu_helper: PduHelper = PduHelper(logger, lambda: self._config.update_timeout)
+        self._pdu_helper: PduHelper = PduHelper(
+            logger, lambda: self._config.update_timeout, served_device_ids={self._slave_id}
+        )
         self._stats: EM540SlaveStats = EM540SlaveStats()
         logger.setLevel(config.log_level)
 

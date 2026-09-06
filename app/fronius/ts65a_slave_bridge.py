@@ -173,7 +173,7 @@ class Ts65aSlaveBridge(MeterDataListener):
         self.host = config.host
         self.port: int = config.port
         self._slave_id: int = config.slave_id
-        self._pdu_helper = PduHelper(logger, lambda: self._config.update_timeout)
+        self._pdu_helper = PduHelper(logger, lambda: self._config.update_timeout, served_device_ids={self._slave_id})
         self._stats = Ts65aSlaveStats()
         logger.setLevel(config.log_level)
 

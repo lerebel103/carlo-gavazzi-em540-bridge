@@ -8,9 +8,19 @@ from pymodbus.pdu import ModbusPDU
 
 
 class PduHelper:
-    def __init__(self, logger: logging.Logger, bridge_timeout: float) -> None:
+    def __init__(
+        self,
+        logger: logging.Logger,
+        bridge_timeout: float,
+        served_device_ids: Optional[set[int]] = None,
+    ) -> None:
         self.logger: logging.Logger = logger
         self.bridge_timeout = bridge_timeout
+        # Device IDs this bridge actually serves. Exception responses to these
+        # IDs indicate a genuine downstream failure (illegal address/function,
+        # device failure) and are logged at ERROR. Exceptions to any other ID
+        # are device-scan probes (see on_pdu) and are logged at DEBUG.
+        self.served_device_ids: set[int] = served_device_ids or set()
         self.last_pdu: Optional[ModbusPDU] = None
         self._last_rx_timestamp: Optional[float] = None
         self._last_warning_timestamp: float = 0
@@ -92,16 +102,21 @@ class PduHelper:
                     response.transaction_id = pdu.transaction_id
                 return response
 
-        # Exception responses to unaddressed device IDs are normal operation:
-        # downstream controllers (e.g. Fronius inverters) scan a range of Modbus
-        # unit IDs probing for devices, and every probe to an ID we don't emulate
-        # yields a legitimate SLAVE_DEVICE_FAILURE. Log at DEBUG so this scanning
-        # noise stays silent at INFO but is still available when debugging genuine
-        # register-access issues.
+        # Log exception responses, distinguishing genuine failures from scan noise:
+        #  - Exceptions for a device ID we actually serve indicate a real
+        #    downstream problem (illegal address/function, device failure) and are
+        #    logged at ERROR so they are visible at normal log levels.
+        #  - Exceptions for any other ID are device-scan probes: downstream
+        #    controllers (e.g. Fronius inverters) sweep a range of unit IDs looking
+        #    for devices, and every probe to an ID we don't emulate yields a
+        #    legitimate SLAVE_DEVICE_FAILURE. These are logged at DEBUG so the
+        #    scanning noise stays silent at INFO.
         # (dev_id 2 is muted entirely: Victron polls it and we never serve it.)
-        if getattr(pdu, "exception_code", 0) != 0 and getattr(pdu, "dev_id", 2) != 2:
-            self.logger.debug(pdu)
-            self.logger.debug(f"Prior PDU: {self.last_pdu}")
+        dev_id = getattr(pdu, "dev_id", 2)
+        if getattr(pdu, "exception_code", 0) != 0 and dev_id != 2:
+            log = self.logger.error if dev_id in self.served_device_ids else self.logger.debug
+            log(pdu)
+            log(f"Prior PDU: {self.last_pdu}")
 
         self.last_pdu = pdu
         return pdu

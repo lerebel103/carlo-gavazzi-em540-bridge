@@ -6,9 +6,9 @@ This project bridges a single Carlo Gavazzi EM540/EM530 meter to multiple downst
 
 It reads upstream Modbus data at a tight 10Hz target cadence and re-serves it as:
 
-- EM540-compatible Modbus/TCP and RTU-over-TCP
-- Fronius TS65A-compatible Modbus/TCP
-- MQTT telemetry for Home Assistant
+- EM540-compatible Modbus/TCP, RTU-over-TCP, and optional serial RTU
+- Fronius TS65A-compatible Modbus/TCP and optional serial RTU
+- MQTT telemetry and diagnostics for Home Assistant
 
 ## Key Commands
 
@@ -53,6 +53,16 @@ Notes:
 - Slow consumers are allowed to miss intermediate updates; this is tracked in diagnostics.
 - Heavy dynamic Modbus register groups are intentionally polled less often via `skip_n_read`.
 - MQTT is best-effort and outside the critical startup and tick paths.
+- Daily per-quantity/per-phase min/max extrema are tracked at the master on every frame
+  (`DailyExtrema`). This is the only point that observes every frame; downstream consumers are
+  subsampled and would miss peaks. The tracker is lock-free single-writer (master loop) so it never
+  blocks the tick loop; the diagnostics reader copies values without a lock. Extrema reset at local
+  midnight (DST-aware) and re-seed from the first post-boundary sample.
+- Physical serial (RTU) lines have no transport connect/disconnect events, so downstream serial-client
+  presence is inferred from request activity (`SerialActivityTracker`): a client is "active" while
+  requests arrive within `serial_idle_timeout`, and connect/disconnect counters increment on activity
+  edges evaluated at diagnostics cadence. TCP and RTU-over-TCP channels still use real transport
+  connect/disconnect events.
 
 ## Failure Model
 
@@ -61,16 +71,21 @@ Notes:
 - Short Modbus responses with unexpected register counts intentionally trigger `os._exit(1)`.
   This is a deliberate hard-fail path because it is treated as a systemic client/protocol corruption condition.
 - Ordinary Modbus connect/read transport failures should recover in-process.
+- Downstream controllers (e.g. Fronius inverters) scan a range of Modbus unit IDs to discover devices.
+  Exception responses to IDs the bridge does not serve are normal scan noise and are logged at DEBUG;
+  exceptions for a served slave ID indicate a genuine failure and are logged at ERROR (`pdu_helper.py`).
 
 ## Architecture Map
 
-- `app/main.py`: startup and tick loop scheduling
-- `app/carlo_gavazzi/em540_master.py`: upstream Modbus master, double buffering, listener dispatch
-- `app/carlo_gavazzi/em540_slave_bridge.py`: EM540 downstream slave bridge
-- `app/fronius/ts65a_slave_bridge.py`: Fronius-compatible downstream bridge
+- `app/main.py`: startup and tick loop scheduling; wires master stats and the daily-extrema source into the MQTT bridge
+- `app/carlo_gavazzi/em540_master.py`: upstream Modbus master, double buffering, listener dispatch; also hosts `Em540MasterStats` and `DailyExtrema` (per-frame daily min/max tracker)
+- `app/carlo_gavazzi/em540_slave_bridge.py`: EM540 downstream slave bridge (TCP, RTU-over-TCP, optional serial RTU)
+- `app/fronius/ts65a_slave_bridge.py`: Fronius TS65A-compatible downstream bridge (TCP, optional serial RTU)
+- `app/carlo_gavazzi/em540_slave_stats.py`, `app/fronius/ts65a_slave_stats.py`: per-bridge downstream stats, including serial-activity tracking
 - `app/home_assistant/ha_bridge.py`: MQTT bridge for Home Assistant
-- `app/home_assistant/ha_diagnostics.py`: diagnostic sensor publication
-- `app/utils/pdu_helper.py`: stale-data circuit breaker for downstream Modbus requests
+- `app/home_assistant/ha_diagnostics.py`: diagnostic sensor definitions and publication
+- `app/utils/pdu_helper.py`: stale-data circuit breaker plus served-ID-aware exception logging for downstream Modbus requests
+- `app/utils/serial_activity.py`: `SerialActivityTracker` — infers downstream serial-client presence from request activity
 
 ## Testing Guidance
 

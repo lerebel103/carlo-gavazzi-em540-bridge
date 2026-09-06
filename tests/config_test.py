@@ -408,6 +408,29 @@ def test_invalid_serial_parity_raises(tmp_path, section):
 
 
 @pytest.mark.parametrize("section", ["em540_slave", "ts65a_slave"])
+@pytest.mark.parametrize("value", [0, -1, -0.5])
+def test_non_positive_serial_idle_timeout_raises_when_serial_enabled(tmp_path, section, value):
+    path = _make_config(
+        tmp_path,
+        {f"{section}.serial.enabled": True, f"{section}.serial_idle_timeout": value},
+    )
+    with pytest.raises(ConfigError, match="serial_idle_timeout"):
+        ConfigManager(path).load()
+
+
+@pytest.mark.parametrize("section", ["em540_slave", "ts65a_slave"])
+def test_non_positive_serial_idle_timeout_ignored_when_serial_disabled(tmp_path, section):
+    # The idle timeout is only meaningful when the serial adapter is enabled, so
+    # a zero value with serial disabled must not raise.
+    path = _make_config(
+        tmp_path,
+        {f"{section}.serial.enabled": False, f"{section}.serial_idle_timeout": 0},
+    )
+    state = ConfigManager(path).load()
+    assert getattr(state, section).serial_idle_timeout == 0
+
+
+@pytest.mark.parametrize("section", ["em540_slave", "ts65a_slave"])
 @pytest.mark.parametrize("value", [None, "invalid", 1])
 def test_nested_serial_config_must_be_mapping(tmp_path, section, value):
     path = _make_config(tmp_path, {f"{section}.serial": value})

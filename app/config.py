@@ -278,8 +278,10 @@ class ConfigManager:
             self._check_serial_device_reachable("em540_master.serial_port", state.em540_master.serial_port)
         if state.em540_slave.serial.enabled:
             self._check_serial_device_reachable("em540_slave.serial.port", state.em540_slave.serial.port)
+            self._validate_serial_idle_timeout("em540_slave.serial_idle_timeout", state.em540_slave.serial_idle_timeout)
         if state.ts65a_slave.serial.enabled:
             self._check_serial_device_reachable("ts65a_slave.serial.port", state.ts65a_slave.serial.port)
+            self._validate_serial_idle_timeout("ts65a_slave.serial_idle_timeout", state.ts65a_slave.serial_idle_timeout)
 
         # 5. grid_feed_in_hard_limit  (<= 0)
         if state.ts65a_slave.grid_feed_in_hard_limit > 0:
@@ -307,6 +309,13 @@ class ConfigManager:
                 self._populate_config(current_value, value, field_path)
             else:
                 setattr(target, key, value)
+
+    def _validate_serial_idle_timeout(self, name: str, value: float) -> None:
+        # A zero/negative idle window makes every serial request look immediately
+        # stale, so the serial-active/connect diagnostics would never register a
+        # client. Only meaningful (and only checked) when the serial adapter is enabled.
+        if value <= 0:
+            raise ConfigError(f"{name} must be > 0 when serial is enabled, got {value}")
 
     def _validate_serial_config(self, name: str, serial: SlaveSerialConfig) -> None:
         if not serial.enabled:

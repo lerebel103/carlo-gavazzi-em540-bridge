@@ -155,10 +155,19 @@ class DailyExtrema:
     re-seeded from the first sample after each local-midnight rollover. Values
     are signed (power and current can be negative), so resetting to zero would
     corrupt the first post-reset comparison; re-seeding avoids that.
+
+    Concurrency: ``update()`` is called only from the master acquisition loop
+    (single writer) and is deliberately lock-free so it never blocks on the
+    diagnostics reader — blocking the 10 Hz read path is prohibited. ``snapshot()``
+    runs on the diagnostics thread and reads the shared floats without a lock.
+    Individual dict/list element reads and writes are atomic under CPython's GIL,
+    so no torn float can be observed; the only possible skew is reading a min and
+    max captured a few frames apart, which is harmless for diagnostics (the same
+    "consumers may miss intermediate updates" tolerance the master applies
+    elsewhere).
     """
 
     def __init__(self) -> None:
-        self._lock: threading.Lock = threading.Lock()
         # key -> [min, max]; None entries mean "no sample observed yet today".
         self._extrema: dict[str, list[float | None]] = {}
         self._keys: tuple[str, ...] = self._build_keys()
@@ -183,7 +192,7 @@ class DailyExtrema:
     def keys(self) -> tuple[str, ...]:
         return self._keys
 
-    def _reset_locked(self, wall_clock: float) -> None:
+    def _reset(self, wall_clock: float) -> None:
         for pair in self._extrema.values():
             pair[0] = None
             pair[1] = None
@@ -206,34 +215,36 @@ class DailyExtrema:
 
         ``wall_clock`` is the frame's wall-clock time (epoch seconds) used only
         for the local-day rollover check.
-        """
-        with self._lock:
-            # Handle first frame and day rollover. A backwards jump (clock
-            # correction) also re-anchors the window.
-            if not self._initialised or wall_clock >= self._next_day_start or wall_clock < self._day_start:
-                self._reset_locked(wall_clock)
 
-            system = data.system
-            phases = data.phases
-            for quantity, sys_attr, phase_attr in _DAILY_EXTREMA_QUANTITIES:
-                self._accumulate(self._extrema[quantity], getattr(system, sys_attr))
-                for idx, suffix in enumerate(_DAILY_EXTREMA_PHASE_SUFFIXES):
-                    self._accumulate(
-                        self._extrema[f"{quantity}_{suffix}"],
-                        getattr(phases[idx], phase_attr),
-                    )
+        Lock-free single-writer path (master loop only); see class docstring.
+        """
+        # Handle first frame and day rollover. A backwards jump (clock
+        # correction) also re-anchors the window.
+        if not self._initialised or wall_clock >= self._next_day_start or wall_clock < self._day_start:
+            self._reset(wall_clock)
+
+        system = data.system
+        phases = data.phases
+        for quantity, sys_attr, phase_attr in _DAILY_EXTREMA_QUANTITIES:
+            self._accumulate(self._extrema[quantity], getattr(system, sys_attr))
+            for idx, suffix in enumerate(_DAILY_EXTREMA_PHASE_SUFFIXES):
+                self._accumulate(
+                    self._extrema[f"{quantity}_{suffix}"],
+                    getattr(phases[idx], phase_attr),
+                )
 
     def snapshot(self) -> dict[str, float | None]:
         """Return a flat ``{"<key>_min"/"<key>_max": value}`` mapping.
 
-        Unset extrema (no sample yet today) are reported as ``None``.
+        Unset extrema (no sample yet today) are reported as ``None``. Reads the
+        shared floats without a lock so the writer (master loop) is never
+        blocked; see the class docstring for the concurrency model.
         """
-        with self._lock:
-            result: dict[str, float | None] = {}
-            for key, (lo, hi) in self._extrema.items():
-                result[f"{key}_min"] = lo
-                result[f"{key}_max"] = hi
-            return result
+        result: dict[str, float | None] = {}
+        for key, (lo, hi) in self._extrema.items():
+            result[f"{key}_min"] = lo
+            result[f"{key}_max"] = hi
+        return result
 
 
 class Em540Master:
