@@ -107,6 +107,8 @@ Notes:
 
 - **Do not edit code without explicit user permission.** Always propose changes and wait
   for approval before modifying any source files. Reading and analysing code is fine.
+- **Always require explicit user permission before pushing to GitHub (`git push`).** Local
+  commits are fine, but never push to any remote without the user explicitly asking.
 - Optimize root causes before micro-optimizing parsing code.
 - Prefer reducing upstream Modbus I/O, allocations, and contention in hot paths.
 - Be careful when changing reconnect logic; recovery must not reintroduce blocking behavior.
