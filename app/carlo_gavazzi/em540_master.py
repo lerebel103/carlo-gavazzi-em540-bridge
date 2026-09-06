@@ -174,6 +174,19 @@ class DailyExtrema:
         self._keys: tuple[str, ...] = self._build_keys()
         for key in self._keys:
             self._extrema[key] = [None, None]
+        # Precomputed per-frame update plan: a flat tuple of (pair, source, attr)
+        # entries where `pair` is the [min, max] list object for a scope/quantity,
+        # `source` is 0 for the system aggregate or a phase index (0..2), and
+        # `attr` is the attribute to read. Built once here so update() does no
+        # string formatting or dict lookups on the 10 Hz path (the pair list
+        # objects are mutated in place by _reset(), never replaced, so these
+        # references stay valid across day rollovers).
+        plan: list[tuple[list[float | None], int, str]] = []
+        for quantity, sys_attr, phase_attr in _DAILY_EXTREMA_QUANTITIES:
+            plan.append((self._extrema[quantity], -1, sys_attr))
+            for idx, suffix in enumerate(_DAILY_EXTREMA_PHASE_SUFFIXES):
+                plan.append((self._extrema[f"{quantity}_{suffix}"], idx, phase_attr))
+        self._update_plan: tuple[tuple[list[float | None], int, str], ...] = tuple(plan)
         # Local-day boundary cache. next boundary is the next local midnight;
         # the steady-state hot path only compares against it.
         self._day_start: float = 0.0
@@ -226,13 +239,10 @@ class DailyExtrema:
 
         system = data.system
         phases = data.phases
-        for quantity, sys_attr, phase_attr in _DAILY_EXTREMA_QUANTITIES:
-            self._accumulate(self._extrema[quantity], getattr(system, sys_attr))
-            for idx, suffix in enumerate(_DAILY_EXTREMA_PHASE_SUFFIXES):
-                self._accumulate(
-                    self._extrema[f"{quantity}_{suffix}"],
-                    getattr(phases[idx], phase_attr),
-                )
+        # Iterate the precomputed plan: no string building, no dict lookups.
+        for pair, source, attr in self._update_plan:
+            obj = system if source < 0 else phases[source]
+            self._accumulate(pair, getattr(obj, attr))
 
     def snapshot(self, now: float | None = None) -> dict[str, float | None]:
         """Return a flat ``{"<key>_min"/"<key>_max": value}`` mapping.
@@ -340,7 +350,17 @@ class Em540Master:
         # Bounded so a stalled/slow log handler cannot accumulate messages for the
         # lifetime of this long-running service; the newest summary wins on Full.
         self._diag_log_queue: queue.Queue[str] = queue.Queue(maxsize=1)
-        self._diag_log_thread: Thread | None = None
+        # Start the background log worker once, here at construction (off the tick
+        # loop). It blocks on the queue until a summary is enqueued, so an idle
+        # daemon thread costs essentially nothing. Starting it lazily from the
+        # tick path would put synchronous Thread.start() (OS thread creation) on
+        # the 10 Hz loop — the very stall the background worker exists to avoid.
+        self._diag_log_thread: Thread = Thread(
+            target=self._diagnostics_log_worker,
+            daemon=True,
+            name="em540-diag-log",
+        )
+        self._diag_log_thread.start()
 
         if config.mode == "serial":
             # Create serial client.
@@ -894,18 +914,10 @@ class Em540Master:
     def _enqueue_diagnostics_log(self, message: str) -> None:
         """Hand a pre-formatted diagnostics line to the background log worker.
 
-        Non-blocking: the tick loop never performs logging-handler I/O. The
-        worker thread is started lazily on first use (only when DEBUG logging is
-        actually enabled) and is a daemon so it never blocks shutdown.
+        Non-blocking and allocation-light: the tick loop never performs
+        logging-handler I/O nor thread creation (the worker is started at
+        construction). The worker is a daemon so it never blocks shutdown.
         """
-        if self._diag_log_thread is None:
-            self._diag_log_thread = Thread(
-                target=self._diagnostics_log_worker,
-                daemon=True,
-                name="em540-diag-log",
-            )
-            self._diag_log_thread.start()
-
         # Non-blocking, latest-wins: if the worker is behind (slow/stalled log
         # handler), drop the stale pending summary and enqueue the newest one so
         # the queue can never grow unbounded and the tick loop never blocks.
