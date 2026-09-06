@@ -230,6 +230,13 @@ class Em540Validator:
             self._read_stable_holding_registers(client, 0x0110, len(self.expected_blocks["remapped_0110"])),
             self._read_stable_holding_registers(client, 0x0034, len(self.expected_blocks["remapped_0034"])),
             self._read_stable_holding_registers(client, 0x0112, len(self.expected_blocks["remapped_0112"])),
+            # L3-L1 voltage at its remapped location, read independently of the
+            # 0x000B device-type overlay to prove the voltage survives it.
+            self._read_stable_holding_registers(
+                client, 0x013A, len(self.expected_blocks["remapped_013a_l3l1_voltage"])
+            ),
+            # Device type via a standalone single-register read at 0x000B.
+            self._read_stable_holding_registers(client, 0x000B, 1),
         ]
 
     def _read_stable_holding_registers(self, client, address: int, count: int) -> list[int]:
@@ -261,10 +268,29 @@ class Em540Validator:
             "remapped_0110",
             "remapped_0034",
             "remapped_0112",
+            "remapped_013a_l3l1_voltage",
+            None,  # standalone 0x000B device-type read, asserted separately below
         ]
         for read, expected_key in zip(reads, block_names):
+            if expected_key is None:
+                continue
             expected = self.expected_blocks[expected_key]
             assert read == expected, f"{label} mismatch at {expected_key}: got {read[:5]}... expected {expected[:5]}..."
+
+        # Honest, non-self-fulfilling checks for the 0x000B collision:
+        #  - The L3-L1 voltage (whose INT32 high word shares address 0x000B in the
+        #    raw block) reads back its true source value at the remapped location.
+        #  - The device type reads back correctly from a standalone 0x000B read.
+        l3l1 = reads[7]
+        expected_l3l1 = self.expected_blocks["remapped_013a_l3l1_voltage"]
+        assert l3l1 == expected_l3l1, (
+            f"{label} L3-L1 voltage corrupted by device-type overlay: got {l3l1}, expected {expected_l3l1}"
+        )
+        device_type = reads[8]
+        assert device_type == [self.expected_blocks["device_type_000b"]], (
+            f"{label} device type mismatch at standalone 0x000B read: "
+            f"got {device_type}, expected [{self.expected_blocks['device_type_000b']}]"
+        )
 
 
 class Ts65aValidator:

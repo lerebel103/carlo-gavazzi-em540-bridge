@@ -141,6 +141,13 @@ def expected_em540_blocks(frame: Em540Frame) -> dict[str, list[int]]:
     primary[0x000B] = frame_copy.static_reg_map[0x000B].values[0]
     primary[0x0033] = frame_copy.remapped_reg_map[0x0033].values[0]
 
+    # The L3-L1 line-to-line voltage is an INT32 whose high word lives at 0x000B
+    # in the raw primary block — the same address the slave overlays with the
+    # static device type. Clients that need L3-L1 read it from its remapped
+    # location (0x013A/0x013B), which the frame populates before the overlay.
+    # We expose the remapped block so the e2e test can prove the L3-L1 value
+    # survives the device-type overlay, rather than only comparing the wide
+    # primary block (where primary[0x000B] == device type is self-fulfilling).
     return {
         "static_000b": list(frame_copy.static_reg_map[0x000B].values),
         "static_5000": list(frame_copy.static_reg_map[0x5000].values),
@@ -150,6 +157,13 @@ def expected_em540_blocks(frame: Em540Frame) -> dict[str, list[int]]:
         "remapped_0110": list(frame_copy.remapped_reg_map[0x0110].values),
         "remapped_0034": list(frame_copy.remapped_reg_map[0x0034].values),
         "remapped_0112": list(frame_copy.remapped_reg_map[0x0112].values),
+        # L3-L1 voltage INT32 at its remapped location (low + high word).
+        "remapped_013a_l3l1_voltage": [
+            frame_copy.remapped_reg_map[0x013A].values[0],
+            frame_copy.remapped_reg_map[0x013B].values[0],
+        ],
+        # Device type served standalone at 0x000B (single-register identity read).
+        "device_type_000b": frame_copy.static_reg_map[0x000B].values[0],
     }
 
 
