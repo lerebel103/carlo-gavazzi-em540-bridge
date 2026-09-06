@@ -49,6 +49,11 @@ class Em540MasterConfig:
     update_interval: float = 0.1
     timeout: float = 0.08
     retries: int = 0
+    # Seconds without a fresh upstream frame before the process self-exits so
+    # Docker's restart policy recovers a wedged instance. A value <= 0 disables
+    # the watchdog entirely. Kept comfortably above the reconnect backoff ceiling
+    # (5s) so ordinary reconnects never trip it.
+    health_max_stale_s: float = 30.0
     log_level: str = "INFO"
 
 
@@ -269,6 +274,16 @@ class ConfigManager:
         for name, value in log_level_fields:
             if value not in self._VALID_LOG_LEVELS:
                 raise ConfigError(f"{name} must be one of {self._VALID_LOG_LEVELS}, got '{value}'")
+
+        # 4a. health watchdog threshold — must be a finite number. Non-positive
+        # values are allowed and disable the watchdog; a NaN/inf or non-numeric
+        # value would silently break the staleness comparison, so reject it here
+        # (bool is an int subclass and is rejected explicitly).
+        health_max_stale_s = state.em540_master.health_max_stale_s
+        if isinstance(health_max_stale_s, bool) or not isinstance(health_max_stale_s, (int, float)):
+            raise ConfigError(f"em540_master.health_max_stale_s must be a number, got {health_max_stale_s!r}")
+        if not math.isfinite(health_max_stale_s):
+            raise ConfigError(f"em540_master.health_max_stale_s must be finite, got {health_max_stale_s}")
 
         self._validate_serial_config("em540_slave.serial", state.em540_slave.serial)
         self._validate_serial_config("ts65a_slave.serial", state.ts65a_slave.serial)

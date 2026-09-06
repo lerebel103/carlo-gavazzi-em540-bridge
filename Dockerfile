@@ -54,6 +54,10 @@ EXPOSE 5001 5002 5003
 # without rebuilding. It is a pure-shell probe over a heartbeat file the app
 # writes on its diagnostics cadence (last successful upstream frame time), not a
 # process-spawning functional check, so it does not perturb the 10Hz tick loop.
+# The probe is observability only — Docker does not restart unhealthy containers.
+# Automatic recovery is driven application-side: the bridge self-exits when no
+# fresh upstream frame arrives within em540_master.health_max_stale_s, and the
+# compose restart policy restarts it.
 
 # Switch to non-root user
 USER lerebel103

@@ -3,6 +3,7 @@ import argparse
 import asyncio
 import logging
 import math
+import os
 import sys
 import time
 from contextlib import contextmanager
@@ -33,6 +34,47 @@ class _TickSignal:
     sequence: int
     deadline_mono: float
     ready_at_mono: float
+
+
+def _health_watchdog_should_exit(
+    *,
+    last_frame_wall_clock: float,
+    now_wall_clock: float,
+    process_start_wall_clock: float,
+    max_stale_s: float,
+    grace_period_s: float,
+) -> bool:
+    """Decide whether the upstream-freshness watchdog should self-exit.
+
+    Returns True when the process has been running past its startup grace
+    period yet the most recent successful upstream frame is older than
+    ``max_stale_s``. This is the "wedged / dead upstream that internal recovery
+    can't fix" condition; the caller responds by exiting so Docker's restart
+    policy recovers a fresh process.
+
+    Pure and side-effect free so it can be unit-tested without terminating the
+    interpreter. The freshness input is the last successful frame's wall-clock
+    time (``MeterData.timestamp``), which only advances on a real acquisition,
+    so a stalled tick loop or dead upstream both let it go stale.
+
+    - ``max_stale_s <= 0`` disables the watchdog (always returns False).
+    - Before the first frame (``last_frame_wall_clock <= 0``) staleness is
+      measured from process start, so a meter that never produces data still
+      triggers recovery once past the grace period.
+    - The grace period suppresses exits during boot/first-connect/reconnect
+      backoff, mirroring the Docker healthcheck ``start_period``.
+    """
+    if max_stale_s <= 0.0:
+        return False
+
+    # Still inside the startup grace window: never exit yet.
+    if now_wall_clock - process_start_wall_clock < grace_period_s:
+        return False
+
+    # Anchor freshness to the first frame if one has landed, otherwise to
+    # process start (so "never produced a frame" is caught too).
+    reference = last_frame_wall_clock if last_frame_wall_clock > 0.0 else process_start_wall_clock
+    return (now_wall_clock - reference) > max_stale_s
 
 
 class _PymodbusReconnectWarningFilter(logging.Filter):
@@ -264,20 +306,73 @@ async def process_loop(state):
         finally:
             pass
 
+    # Upstream-freshness watchdog. Docker does not restart a container merely
+    # because its healthcheck reports "unhealthy" (that only reacts to the
+    # container exiting), so the freshness signal that drives automatic recovery
+    # must be an application-side self-exit. We evaluate it here in the
+    # supervisor loop — off the pinned tick core and independent of MQTT — so a
+    # wedged acquisition loop or dead upstream that internal recovery cannot fix
+    # results in os._exit(1), letting `restart: unless-stopped` recover a fresh
+    # process. Reading em540_master.data.timestamp is a lock-free atomic float
+    # read and adds no work to the 10Hz path.
+    health_max_stale_s = float(state.em540_master.health_max_stale_s)
+    # Grace mirrors the compose healthcheck start_period so boot/first-connect/
+    # reconnect-backoff never self-kills. Bounded below by the stale threshold so
+    # a very small configured threshold still gets a sane startup window.
+    health_grace_period_s = max(health_max_stale_s, 45.0)
+    # Cap the supervisor's wait so a fully-wedged tick loop (no task ever
+    # completing) is still re-evaluated for staleness on a bounded cadence.
+    health_poll_interval_s = 5.0
+    process_start_wall_clock = time.time()
+
+    def _check_health_watchdog() -> None:
+        if health_max_stale_s <= 0.0:
+            return
+        if _health_watchdog_should_exit(
+            last_frame_wall_clock=em540_master.data.timestamp,
+            now_wall_clock=time.time(),
+            process_start_wall_clock=process_start_wall_clock,
+            max_stale_s=health_max_stale_s,
+            grace_period_s=health_grace_period_s,
+        ):
+            logger.critical(
+                "No fresh upstream frame for over %.0fs; internal recovery appears wedged. "
+                "Exiting so the container is restarted.",
+                health_max_stale_s,
+            )
+            os._exit(1)
+
     try:
         while not stop_event.is_set():
             if em540_master.has_fatal_error:
                 stop_event.set()
                 break
 
+            _check_health_watchdog()
+
             if _current_interval() > 0.0:
                 _clear_tick_queue()
                 scheduler_task = asyncio.create_task(_paced_scheduler(), name="em540-tick-scheduler")
                 worker_task = asyncio.create_task(_paced_worker(), name="em540-acquisition-worker")
-                done, pending = await asyncio.wait(
-                    {scheduler_task, worker_task},
-                    return_when=asyncio.FIRST_COMPLETED,
-                )
+                # Supervise the paced tasks, polling on a bounded timeout so the
+                # freshness watchdog is evaluated even when neither task ever
+                # completes (a fully-wedged tick loop). The tasks are created
+                # once and kept running across timeouts; we only tear them down
+                # once one of them actually finishes (interval change, fatal
+                # error, or exception).
+                while True:
+                    done, pending = await asyncio.wait(
+                        {scheduler_task, worker_task},
+                        return_when=asyncio.FIRST_COMPLETED,
+                        timeout=health_poll_interval_s,
+                    )
+                    if done:
+                        break
+                    # Timed out with both tasks still running: re-evaluate the
+                    # watchdog without disrupting the tick loop, then keep waiting.
+                    _check_health_watchdog()
+                    if stop_event.is_set():
+                        break
                 for task in pending:
                     task.cancel()
                 if pending:

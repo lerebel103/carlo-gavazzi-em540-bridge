@@ -66,6 +66,7 @@ def _make_state():
             stopbits=1,
             serial_port="/dev/null",
             update_interval=0.1,
+            health_max_stale_s=30.0,
         ),
         em540_slave=SimpleNamespace(
             host="0.0.0.0",
@@ -522,6 +523,82 @@ class TestMainLoopPriority(unittest.TestCase):
         mock_exit.assert_called_once_with(1)
         mock_logger_critical.assert_called_once()
         mock_process_loop.assert_not_awaited()
+
+
+class TestHealthWatchdog(unittest.TestCase):
+    """Validates the upstream-freshness self-exit decision (_health_watchdog_should_exit)."""
+
+    def test_disabled_when_threshold_non_positive(self):
+        # threshold <= 0 disables the watchdog regardless of staleness
+        self.assertFalse(
+            main._health_watchdog_should_exit(
+                last_frame_wall_clock=0.0,
+                now_wall_clock=10_000.0,
+                process_start_wall_clock=0.0,
+                max_stale_s=0.0,
+                grace_period_s=45.0,
+            )
+        )
+
+    def test_no_exit_within_grace_period_even_with_no_frames(self):
+        # 30s elapsed since start, grace is 45s: still booting, never exit
+        self.assertFalse(
+            main._health_watchdog_should_exit(
+                last_frame_wall_clock=0.0,
+                now_wall_clock=1_030.0,
+                process_start_wall_clock=1_000.0,
+                max_stale_s=30.0,
+                grace_period_s=45.0,
+            )
+        )
+
+    def test_exit_when_no_frame_ever_and_past_grace(self):
+        # Past grace and still no frame ever: staleness measured from start
+        self.assertTrue(
+            main._health_watchdog_should_exit(
+                last_frame_wall_clock=0.0,
+                now_wall_clock=1_050.0,
+                process_start_wall_clock=1_000.0,
+                max_stale_s=30.0,
+                grace_period_s=45.0,
+            )
+        )
+
+    def test_no_exit_when_recent_frame(self):
+        # A frame 5s ago is fresh; do not exit
+        self.assertFalse(
+            main._health_watchdog_should_exit(
+                last_frame_wall_clock=1_095.0,
+                now_wall_clock=1_100.0,
+                process_start_wall_clock=1_000.0,
+                max_stale_s=30.0,
+                grace_period_s=45.0,
+            )
+        )
+
+    def test_exit_when_frame_older_than_threshold(self):
+        # Last frame was 31s ago (> 30s threshold), past grace: exit
+        self.assertTrue(
+            main._health_watchdog_should_exit(
+                last_frame_wall_clock=1_069.0,
+                now_wall_clock=1_100.0,
+                process_start_wall_clock=1_000.0,
+                max_stale_s=30.0,
+                grace_period_s=45.0,
+            )
+        )
+
+    def test_boundary_exactly_at_threshold_does_not_exit(self):
+        # Staleness exactly equal to the threshold is not "over" it
+        self.assertFalse(
+            main._health_watchdog_should_exit(
+                last_frame_wall_clock=1_070.0,
+                now_wall_clock=1_100.0,
+                process_start_wall_clock=1_000.0,
+                max_stale_s=30.0,
+                grace_period_s=45.0,
+            )
+        )
 
 
 if __name__ == "__main__":

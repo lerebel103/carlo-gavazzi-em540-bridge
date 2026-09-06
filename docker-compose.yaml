@@ -51,15 +51,22 @@ services:
       options:
         max-size: 10m
         max-file: 3
-    # Freshness healthcheck. The bridge writes the last successful upstream
-    # frame's epoch seconds to /dev/shm on the existing 5s diagnostics cadence
-    # (off the pinned tick core, no extra thread, no process spawned by the app).
-    # If upstream dies or the acquisition loop wedges, the stamp stops advancing
-    # and this check fails after ~90s (3 x 30s), letting Docker restart a process
-    # whose internal recovery is stuck. The probe is a pure-shell integer
-    # comparison: it never boots a Python interpreter, so it cannot starve the
-    # 10Hz loop. A missing/zero file (pre-first-frame) reads as unhealthy and is
-    # absorbed by start_period during boot/reconnect.
+    # Freshness healthcheck (observability only). The bridge writes the last
+    # successful upstream frame's epoch seconds to /dev/shm on the diagnostics
+    # cadence (off the pinned tick core, no extra thread, no process spawned by
+    # the app); this probe reports the container unhealthy in `docker ps` once
+    # that stamp is stale. The probe is a pure-shell integer comparison — it
+    # never boots a Python interpreter, so it cannot starve the 10Hz loop. A
+    # missing/zero file (pre-first-frame) reads as unhealthy, absorbed by
+    # start_period during boot/reconnect.
+    #
+    # NOTE: Docker/Compose does NOT restart a container just because it is
+    # unhealthy (restart policies only react to the container exiting). Automatic
+    # recovery is therefore driven application-side: the bridge self-exits when
+    # no fresh upstream frame has arrived within em540_master.health_max_stale_s,
+    # and `restart: unless-stopped` above restarts it. This healthcheck exists
+    # purely for visibility/monitoring. Note this heartbeat file is only written
+    # when MQTT is enabled; the self-exit recovery path does not depend on MQTT.
     healthcheck:
       test:
         - CMD-SHELL
