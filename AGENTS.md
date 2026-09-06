@@ -12,7 +12,9 @@ It reads upstream Modbus data at a tight 10Hz target cadence and re-serves it as
 
 ## Key Commands
 
-- Test: `make test`
+- Test (unit, parallel): `make test`
+- Test (unit, serial): `make test-serial`
+- Test (end-to-end integration, Dockerized): `make test-integration`
 - Lint: `make lint`
 - Format: `make format`
 - Start stack: `make up`
@@ -21,8 +23,13 @@ It reads upstream Modbus data at a tight 10Hz target cadence and re-serves it as
 
 Notes:
 
-- `make test` uses `$(PYTHON) -m pytest tests/ -v` (defaults to `python3`)
-- `make lint` uses Ruff for both check and format-check
+- `make test` runs `uv run pytest tests/ -v -n auto -m "not integration"` — parallel and excluding
+  the integration suite.
+- `make test-serial` runs the same unit suite non-parallel (`-m "not integration"`), useful for
+  debugging flaky ordering or shared-state issues.
+- `make test-integration` builds `Dockerfile.integration` and runs the end-to-end suite (marked
+  `integration`) inside Docker; it is not part of `make test` and requires a working Docker engine.
+- `make lint` uses Ruff for both check and format-check.
 
 ## Agent Validation Workflow
 
@@ -92,6 +99,9 @@ Notes:
 - Prefer targeted unit tests when changing hot-path behavior.
 - Run at least the impacted suites in `tests/carlo_gavazzi`, `tests/home_assistant`, and `tests/main_test.py` when changing loop, recovery, or bridge behavior.
 - Keep tests aligned with the actual scheduler semantics. The loop may skip missed ticks rather than execute catch-up bursts.
+- Integration tests live under `tests/integration/`, are marked `integration`, and are excluded from
+  `make test`. Run them via `make test-integration` (Dockerized) when changing end-to-end behavior
+  such as downstream serial/TCP bridging, recovery, or protocol framing.
 
 ## Change Guidance
 
