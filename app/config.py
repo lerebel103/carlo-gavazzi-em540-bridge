@@ -8,6 +8,7 @@ dataclasses and handles validation and persistence.
 from __future__ import annotations
 
 import logging
+import math
 import threading
 import time
 from dataclasses import dataclass, field, is_dataclass
@@ -314,6 +315,15 @@ class ConfigManager:
         # A zero/negative idle window makes every serial request look immediately
         # stale, so the serial-active/connect diagnostics would never register a
         # client. Only meaningful (and only checked) when the serial adapter is enabled.
+        #
+        # Guard the type before comparing: a YAML string or None would raise an
+        # uncaught TypeError at `value <= 0` (bypassing main()'s fail-fast path),
+        # and NaN/inf would silently pass the comparison and permanently break the
+        # activity diagnostics. bool is rejected explicitly (it is an int subclass).
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ConfigError(f"{name} must be a number when serial is enabled, got {value!r}")
+        if not math.isfinite(value):
+            raise ConfigError(f"{name} must be finite when serial is enabled, got {value}")
         if value <= 0:
             raise ConfigError(f"{name} must be > 0 when serial is enabled, got {value}")
 

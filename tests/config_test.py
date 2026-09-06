@@ -418,6 +418,24 @@ def test_non_positive_serial_idle_timeout_raises_when_serial_enabled(tmp_path, s
         ConfigManager(path).load()
 
 
+@pytest.mark.parametrize(
+    "value",
+    [
+        "5.0",  # string
+        None,  # missing/null
+        True,  # bool (int subclass) must be rejected
+        float("nan"),  # non-finite
+        float("inf"),  # non-finite
+    ],
+)
+def test_malformed_serial_idle_timeout_normalized_to_config_error(value):
+    """Non-numeric, boolean, or non-finite idle timeouts must raise ConfigError
+    (not an uncaught TypeError, and not silently accepted)."""
+    cm = ConfigManager("/unused.yaml")
+    with pytest.raises(ConfigError, match="serial_idle_timeout"):
+        cm._validate_serial_idle_timeout("em540_slave.serial_idle_timeout", value)
+
+
 @pytest.mark.parametrize("section", ["em540_slave", "ts65a_slave"])
 def test_non_positive_serial_idle_timeout_ignored_when_serial_disabled(tmp_path, section):
     # The idle timeout is only meaningful when the serial adapter is enabled, so

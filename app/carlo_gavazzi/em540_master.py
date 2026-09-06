@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import os
+import queue
 import struct
 import threading
 import time
@@ -233,17 +234,38 @@ class DailyExtrema:
                     getattr(phases[idx], phase_attr),
                 )
 
-    def snapshot(self) -> dict[str, float | None]:
+    def snapshot(self, now: float | None = None) -> dict[str, float | None]:
         """Return a flat ``{"<key>_min"/"<key>_max": value}`` mapping.
 
         Unset extrema (no sample yet today) are reported as ``None``. Reads the
         shared floats without a lock so the writer (master loop) is never
         blocked; see the class docstring for the concurrency model.
+
+        Rollover is normally applied by ``update()`` on the next frame, but if
+        the upstream meter stops producing frames the extrema would otherwise
+        keep reporting the previous day's values indefinitely. ``now`` (wall-clock
+        epoch, defaulting to the current time) lets the reader detect that the
+        clock has left the cached day window and report all extrema as unset,
+        matching the documented "reset at local midnight" semantics even during
+        an upstream outage. The writer is not touched (single-writer preserved);
+        only the returned view is expired.
         """
+        if now is None:
+            now = time.time()
+
+        # Expire the view if we have no window yet, or the wall clock has moved
+        # outside the cached local-day window. Reads of the two boundary floats
+        # are atomic under the GIL; the writer updates them in _reset().
+        expired = not self._initialised or now >= self._next_day_start or now < self._day_start
+
         result: dict[str, float | None] = {}
         for key, (lo, hi) in self._extrema.items():
-            result[f"{key}_min"] = lo
-            result[f"{key}_max"] = hi
+            if expired:
+                result[f"{key}_min"] = None
+                result[f"{key}_max"] = None
+            else:
+                result[f"{key}_min"] = lo
+                result[f"{key}_max"] = hi
         return result
 
 
@@ -311,6 +333,12 @@ class Em540Master:
         # so a frame rate can be derived and logged alongside the timing stats.
         self._diag_log_last_time: float = 0.0
         self._diag_log_last_tick_count: int = 0
+        # The periodic DEBUG diagnostics summary must not do handler I/O on the
+        # tick loop (the main loop is reserved for upstream reads). The loop only
+        # formats the message and hands it to this bounded queue; a lazily-started
+        # daemon worker performs the actual logger.debug() call off the loop.
+        self._diag_log_queue: queue.SimpleQueue[str] = queue.SimpleQueue()
+        self._diag_log_thread: Thread | None = None
 
         if config.mode == "serial":
             # Create serial client.
@@ -846,26 +874,45 @@ class Em540Master:
             missed_updates = s.consumer_missed_updates_total
             max_seq_gap = s.consumer_max_seq_gap
 
-        logger.debug(
-            "Master diagnostics: frame_rate=%.2f Hz | "
-            "acquisition_ms min=%.2f max=%.2f mean=%.2f | "
-            "headroom_ms min=%.2f max=%.2f mean=%.2f | "
-            "overruns=%d | read_failures=%d | missed_updates=%d max_seq_gap=%d",
-            frame_rate,
-            dur_min,
-            dur_max,
-            dur_mean,
-            head_min,
-            head_max,
-            head_mean,
-            overruns,
-            read_failures,
-            missed_updates,
-            max_seq_gap,
+        # Format the message here (cheap, string building only) but hand the
+        # actual logger.debug() emission to a background worker so handler I/O
+        # (stderr/file flush) never blocks the 10Hz tick loop.
+        message = (
+            f"Master diagnostics: frame_rate={frame_rate:.2f} Hz | "
+            f"acquisition_ms min={dur_min:.2f} max={dur_max:.2f} mean={dur_mean:.2f} | "
+            f"headroom_ms min={head_min:.2f} max={head_max:.2f} mean={head_mean:.2f} | "
+            f"overruns={overruns} | read_failures={read_failures} | "
+            f"missed_updates={missed_updates} max_seq_gap={max_seq_gap}"
         )
+        self._enqueue_diagnostics_log(message)
 
         self._diag_log_last_time = now
         self._diag_log_last_tick_count = self._dyn_reg_read_counter
+
+    def _enqueue_diagnostics_log(self, message: str) -> None:
+        """Hand a pre-formatted diagnostics line to the background log worker.
+
+        Non-blocking: the tick loop never performs logging-handler I/O. The
+        worker thread is started lazily on first use (only when DEBUG logging is
+        actually enabled) and is a daemon so it never blocks shutdown.
+        """
+        if self._diag_log_thread is None:
+            self._diag_log_thread = Thread(
+                target=self._diagnostics_log_worker,
+                daemon=True,
+                name="em540-diag-log",
+            )
+            self._diag_log_thread.start()
+        self._diag_log_queue.put_nowait(message)
+
+    def _diagnostics_log_worker(self) -> None:
+        while True:
+            message = self._diag_log_queue.get()
+            try:
+                logger.debug("%s", message)
+            except Exception:
+                # Never let a logging-handler failure kill the worker.
+                pass
 
     def _copy_meter_data(self, source: MeterData, target: MeterData) -> None:
         """Copy frame register values between buffers while keeping object allocation stable."""

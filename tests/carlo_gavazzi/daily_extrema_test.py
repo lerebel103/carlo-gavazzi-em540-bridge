@@ -70,7 +70,7 @@ def test_extrema_start_unset_and_seed_from_first_frame():
     tracker = DailyExtrema()
     tracker.update(_make_data(power=1234.0), _T0)
 
-    snap = tracker.snapshot()
+    snap = tracker.snapshot(now=_T0)
     # First frame seeds both min and max to the same observed value.
     assert snap["power_min"] == 1234.0
     assert snap["power_max"] == 1234.0
@@ -84,7 +84,7 @@ def test_extrema_track_min_and_max_across_frames_including_negatives():
     tracker.update(_make_data(power=-500.0), _T0 + 1)
     tracker.update(_make_data(power=800.0), _T0 + 2)
 
-    snap = tracker.snapshot()
+    snap = tracker.snapshot(now=_T0 + 2)
     assert snap["power_min"] == -500.0
     assert snap["power_max"] == 800.0
 
@@ -105,7 +105,7 @@ def test_per_phase_and_per_quantity_scopes_are_tracked():
         _T0,
     )
 
-    snap = tracker.snapshot()
+    snap = tracker.snapshot(now=_T0)
     assert snap["current_max"] == 6.0
     assert snap["voltage_ln_max"] == 230.0
     assert snap["voltage_ll_max"] == 400.0
@@ -117,7 +117,7 @@ def test_per_phase_and_per_quantity_scopes_are_tracked():
 
 def test_snapshot_exposes_all_32_keys():
     tracker = DailyExtrema()
-    snap = tracker.snapshot()
+    snap = tracker.snapshot(now=_T0)
     assert len(snap) == 32
     # Unset before any frame.
     assert all(v is None for v in snap.values())
@@ -127,13 +127,13 @@ def test_daily_rollover_resets_and_reseeds():
     tracker = DailyExtrema()
     tracker.update(_make_data(power=1000.0), _T0)
     tracker.update(_make_data(power=-200.0), _T0 + 1)
-    assert tracker.snapshot()["power_min"] == -200.0
+    assert tracker.snapshot(now=_T0 + 1)["power_min"] == -200.0
 
     # Cross into the next local day.
     next_day = _T0 + 86400.0
     tracker.update(_make_data(power=50.0), next_day)
 
-    snap = tracker.snapshot()
+    snap = tracker.snapshot(now=next_day)
     # Re-seeded from the first post-rollover frame, not carried over.
     assert snap["power_min"] == 50.0
     assert snap["power_max"] == 50.0
@@ -147,9 +147,33 @@ def test_backwards_clock_jump_reanchors_window():
     earlier = _T0 - 86400.0
     tracker.update(_make_data(power=7.0), earlier)
 
-    snap = tracker.snapshot()
+    snap = tracker.snapshot(now=earlier)
     assert snap["power_min"] == 7.0
     assert snap["power_max"] == 7.0
+
+
+def test_snapshot_expires_to_unset_when_clock_leaves_day_window():
+    # If the upstream meter stops producing frames, update() never runs to roll
+    # over the window. snapshot(now=...) must still report the extrema as unset
+    # once the wall clock has moved past the cached day, rather than publishing
+    # yesterday's values indefinitely.
+    tracker = DailyExtrema()
+    tracker.update(_make_data(power=1234.0), _T0)
+
+    # Same day: values are live.
+    assert tracker.snapshot(now=_T0 + 60.0)["power_max"] == 1234.0
+
+    # Next local day, but no new frame arrived: the view expires to unset.
+    snap = tracker.snapshot(now=_T0 + 86400.0 + 60.0)
+    assert all(v is None for v in snap.values())
+
+
+def test_snapshot_defaults_now_to_current_time():
+    # With no now argument, a stale window (seeded years in the past) expires.
+    tracker = DailyExtrema()
+    tracker.update(_make_data(power=500.0), _T0)
+    snap = tracker.snapshot()
+    assert all(v is None for v in snap.values())
 
 
 @pytest.mark.parametrize(
@@ -181,6 +205,6 @@ def test_rollover_uses_dst_aware_next_boundary(london_tz):
     just_after = next_local_midnight + 1.0
     tracker.update(_make_data(power=42.0), just_after)
 
-    snap = tracker.snapshot()
+    snap = tracker.snapshot(now=just_after)
     assert snap["power_min"] == 42.0
     assert snap["power_max"] == 42.0

@@ -545,9 +545,11 @@ class HADiagnostics:
             return
         snapshot = source.snapshot()
         for key, sensor in self._daily_extrema_sensors.items():
-            value = snapshot.get(key)
-            if value is not None:
-                sensor.update_value(value)
+            # Write the value as-is, including None for unset/expired extrema
+            # (no sample yet today, or the day window has rolled over during an
+            # upstream outage). None serializes to JSON null, which the sensor
+            # value_template renders as unknown/unavailable in Home Assistant.
+            sensor.update_value(snapshot.get(key))
 
     def record_mqtt_publish(self, published_at: float | None = None):
         now = time.monotonic() if published_at is None else published_at
