@@ -49,10 +49,11 @@ RUN chown -R lerebel103:lerebel103 /app
 # Expose Modbus and emulation ports
 EXPOSE 5001 5002 5003
 
-# No container HEALTHCHECK: a process-liveness check is misleading (the process
-# can be alive but not serving fresh data), and a functional check that spawns a
-# process every interval starves the latency-sensitive 10Hz tick loop on a
-# single-CPU host. Monitoring is handled out-of-band via MQTT diagnostics.
+# No HEALTHCHECK in the image: the freshness healthcheck is defined in
+# docker-compose.yaml instead, so its thresholds can be tuned per deployment
+# without rebuilding. It is a pure-shell probe over a heartbeat file the app
+# writes on its diagnostics cadence (last successful upstream frame time), not a
+# process-spawning functional check, so it does not perturb the 10Hz tick loop.
 
 # Switch to non-root user
 USER lerebel103

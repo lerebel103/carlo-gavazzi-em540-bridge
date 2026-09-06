@@ -1,4 +1,5 @@
 import json
+import os
 import time
 
 from app.carlo_gavazzi.em540_master import Em540MasterStats
@@ -9,6 +10,13 @@ from app.home_assistant.ha_sensors import HA_AVAILABILITY_TOPIC, Sensor, configu
 from app.home_assistant.ha_topics import prefix_topic, topic_namespace
 
 DIAGNOSTICS_INTERVAL: float = 5  # seconds
+
+# Freshness heartbeat file consumed by the Docker healthcheck. Lives on tmpfs
+# (/dev/shm) so repeated writes never touch the SD card on a Pi. The file holds
+# the integer epoch seconds of the last successful upstream frame; the probe
+# treats a stale (or missing/zero) value as unhealthy. Kept as a module-level
+# constant so it is trivial to retarget without threading it through config.
+HEALTH_HEARTBEAT_FILE: str = "/dev/shm/em540_health"
 
 
 class HADiagnostics:
@@ -26,6 +34,12 @@ class HADiagnostics:
 
         self._start_time = time.time()
         self._data_counter = 0
+        # Wall-clock (epoch) time of the last observed upstream frame. Captured
+        # in new_data() and flushed to the health heartbeat file on the 5s
+        # diagnostics cadence. Stays at its last value if frames stop arriving,
+        # which is exactly what makes the heartbeat go stale on a wedged loop.
+        self._last_frame_wall_clock: float = 0.0
+        self._health_file: str = HEALTH_HEARTBEAT_FILE
         self._topic_prefix = topic_prefix
         self._namespace = topic_namespace(topic_prefix)
         self._availability_topic = prefix_topic(HA_AVAILABILITY_TOPIC, topic_prefix)
@@ -527,9 +541,11 @@ class HADiagnostics:
 
     def new_data(self, data: MeterData):
         # Daily extrema are computed at the master (which sees every frame) and
-        # pulled from the DailyExtrema snapshot in mqtt_data(). Nothing to do
-        # here; kept for the listener/callback contract.
-        pass
+        # pulled from the DailyExtrema snapshot in mqtt_data(). We only capture
+        # the frame's wall-clock time here so the health heartbeat written on the
+        # diagnostics cadence reflects real acquisition liveness rather than just
+        # this diagnostics thread being alive.
+        self._last_frame_wall_clock = data.timestamp
 
     def set_daily_extrema_source(self, source) -> None:
         """Register the master's DailyExtrema tracker to pull snapshots from.
@@ -633,10 +649,36 @@ class HADiagnostics:
             self.ts65a_serial_connect_count.update_value(self._ts65a_slave_stats.serial.connect_count)
             self.ts65a_serial_disconnect_count.update_value(self._ts65a_slave_stats.serial.disconnect_count)
 
+        # Flush the freshness heartbeat for the Docker healthcheck. This runs on
+        # the diagnostics cadence (off the pinned tick core), so it never adds
+        # work to the 10Hz acquisition loop.
+        self._write_health_heartbeat()
+
         sensors = self._all_sensors()
 
         payload = {sensor.safe_name: sensor.value for sensor in sensors}
         return self.state_topic, json.dumps(payload)
+
+    def _write_health_heartbeat(self) -> None:
+        """Write the last-frame epoch seconds to the health heartbeat file.
+
+        We stamp the last observed *frame* time (not "now"), so a wedged
+        acquisition loop or dead upstream goes stale even while this diagnostics
+        thread keeps running. The write is atomic (temp file + os.replace) so the
+        probe never reads a half-written value, and best-effort: health
+        monitoring must never perturb the bridge, so all errors are swallowed.
+        """
+        try:
+            tmp_path = f"{self._health_file}.tmp"
+            with open(tmp_path, "w") as health_file:
+                health_file.write(str(int(self._last_frame_wall_clock)))
+            os.replace(tmp_path, self._health_file)
+        except Exception:
+            # Intentionally silent: a failed heartbeat write must not affect
+            # diagnostics publication or the tick loop. A persistently failing
+            # write simply leaves the file stale, which the healthcheck treats
+            # as unhealthy — the safe direction.
+            pass
 
     def set_em540_slave_stats(self, stats: EM540SlaveStats):
         self._em540_slave_stats = stats

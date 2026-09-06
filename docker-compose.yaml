@@ -51,9 +51,23 @@ services:
       options:
         max-size: 10m
         max-file: 3
-    # No healthcheck: a process-liveness probe is misleading and a functional
-    # probe that spawns a process each interval starves the 10Hz tick loop on a
-    # single-CPU host. Health is observed out-of-band via MQTT diagnostics.
+    # Freshness healthcheck. The bridge writes the last successful upstream
+    # frame's epoch seconds to /dev/shm on the existing 5s diagnostics cadence
+    # (off the pinned tick core, no extra thread, no process spawned by the app).
+    # If upstream dies or the acquisition loop wedges, the stamp stops advancing
+    # and this check fails after ~90s (3 x 30s), letting Docker restart a process
+    # whose internal recovery is stuck. The probe is a pure-shell integer
+    # comparison: it never boots a Python interpreter, so it cannot starve the
+    # 10Hz loop. A missing/zero file (pre-first-frame) reads as unhealthy and is
+    # absorbed by start_period during boot/reconnect.
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - test $(( $(date +%s) - $(cat /dev/shm/em540_health 2>/dev/null || echo 0) )) -lt 20
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 45s
     # Explicitly run the bridge at high process priority inside the container.
     # This requires SYS_NICE + appropriate ulimits above.
     command:
