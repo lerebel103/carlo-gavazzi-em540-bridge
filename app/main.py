@@ -22,6 +22,12 @@ logger = logging.getLogger()
 config_manager = None
 _MIN_PACED_INTERVAL_S = 0.001
 
+# Log line format. asctime uses local time (time.localtime), which honours the
+# TZ environment variable (set via docker-compose), so timestamps are in the
+# configured local zone. %(msecs) appends milliseconds to the date/time.
+_LOG_FORMAT = "%(asctime)s.%(msecs)03d %(levelname)s %(name)s: %(message)s"
+_LOG_DATEFMT = "%Y-%m-%d %H:%M:%S"
+
 
 @dataclass(frozen=True)
 class _TickSignal:
@@ -344,9 +350,9 @@ async def main():
         # the fallback handler is installed even if some handler was already
         # configured (e.g. under an embedding launcher), so the critical message
         # is never silently suppressed.
-        logging.basicConfig(force=True)
+        logging.basicConfig(force=True, format=_LOG_FORMAT, datefmt=_LOG_DATEFMT)
         logger.critical("Invalid configuration, refusing to start: %s", exc)
         sys.exit(1)
-    logging.basicConfig(level=state.root_log_level)
+    logging.basicConfig(level=state.root_log_level, format=_LOG_FORMAT, datefmt=_LOG_DATEFMT)
     logger.info("Starting EM540 Energy Meter Bridge (%s)", version_for_display())
     await process_loop(state)
