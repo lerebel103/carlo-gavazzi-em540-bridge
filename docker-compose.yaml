@@ -51,28 +51,33 @@ services:
       options:
         max-size: 10m
         max-file: 3
-    # Freshness healthcheck (observability only). The bridge writes the last
-    # successful upstream frame's epoch seconds to /dev/shm from the always-on
-    # supervisor loop (off the pinned tick core, no extra thread, no process
-    # spawned by the app, independent of MQTT); this probe reports the container
-    # unhealthy in `docker ps` once that stamp is stale. The probe is a
-    # pure-shell integer comparison — it never boots a Python interpreter, so it
-    # cannot starve the 10Hz loop. A missing/zero file (pre-first-frame) reads as
-    # unhealthy, absorbed by start_period during boot/reconnect.
+    # Freshness healthcheck (observability). The bridge writes the last
+    # successful upstream frame's epoch seconds to /dev/shm from a dedicated
+    # watchdog thread (off the pinned tick core, no process spawned by the app,
+    # independent of MQTT); this probe reports the container unhealthy in
+    # `docker ps` once that stamp is stale. The probe is a pure-shell integer
+    # comparison — it never boots a Python interpreter, so it cannot starve the
+    # 10Hz loop. A missing/zero file (pre-first-frame) reads as unhealthy,
+    # absorbed by start_period during boot/reconnect.
     #
-    # NOTE: Docker/Compose does NOT restart a container just because it is
-    # unhealthy (restart policies only react to the container exiting). Automatic
-    # recovery is therefore driven application-side: the bridge self-exits when
-    # no fresh upstream frame has arrived within em540_master.health_max_stale_s
-    # (post the ~45s startup grace), and `restart: unless-stopped` above restarts
-    # it. This healthcheck exists purely for visibility/monitoring.
+    # Recovery ordering: Docker/Compose does NOT restart a container just because
+    # it is unhealthy (restart policies only react to the container exiting).
+    # Automatic recovery is driven application-side: the same watchdog thread
+    # self-exits when no fresh upstream frame has arrived within
+    # em540_master.health_max_stale_s (default 30s, post the ~45s startup grace),
+    # and `restart: unless-stopped` above restarts it. The probe timing below is
+    # deliberately tighter than the self-exit threshold (unhealthy at ~20-30s vs
+    # self-exit at ~30s) so the container is observably `unhealthy` BEFORE it
+    # self-exits — otherwise the app would restart before Docker ever flipped the
+    # status and the observability signal would be lost. If you raise
+    # health_max_stale_s, keep it above this probe's unhealthy time.
     healthcheck:
       test:
         - CMD-SHELL
-        - test $(( $(date +%s) - $(cat /dev/shm/em540_health 2>/dev/null || echo 0) )) -lt 20
-      interval: 30s
+        - test $(( $(date +%s) - $(cat /dev/shm/em540_health 2>/dev/null || echo 0) )) -lt 15
+      interval: 10s
       timeout: 5s
-      retries: 3
+      retries: 2
       start_period: 45s
     # Explicitly run the bridge at high process priority inside the container.
     # This requires SYS_NICE + appropriate ulimits above.

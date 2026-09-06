@@ -7,7 +7,6 @@ from app.carlo_gavazzi.meter_data import MeterData
 from app.fronius.ts65a_slave_stats import Ts65aSlaveStats
 from app.home_assistant.ha_sensors import HA_AVAILABILITY_TOPIC, Sensor, configure_sensor_topic_metadata
 from app.home_assistant.ha_topics import prefix_topic, topic_namespace
-from app.utils.health import HEALTH_HEARTBEAT_FILE, write_health_heartbeat
 
 DIAGNOSTICS_INTERVAL: float = 5  # seconds
 
@@ -27,12 +26,6 @@ class HADiagnostics:
 
         self._start_time = time.time()
         self._data_counter = 0
-        # Wall-clock (epoch) time of the last observed upstream frame. Captured
-        # in new_data() and flushed to the health heartbeat file on the 5s
-        # diagnostics cadence. Stays at its last value if frames stop arriving,
-        # which is exactly what makes the heartbeat go stale on a wedged loop.
-        self._last_frame_wall_clock: float = 0.0
-        self._health_file: str = HEALTH_HEARTBEAT_FILE
         self._topic_prefix = topic_prefix
         self._namespace = topic_namespace(topic_prefix)
         self._availability_topic = prefix_topic(HA_AVAILABILITY_TOPIC, topic_prefix)
@@ -534,11 +527,9 @@ class HADiagnostics:
 
     def new_data(self, data: MeterData):
         # Daily extrema are computed at the master (which sees every frame) and
-        # pulled from the DailyExtrema snapshot in mqtt_data(). We only capture
-        # the frame's wall-clock time here so the health heartbeat written on the
-        # diagnostics cadence reflects real acquisition liveness rather than just
-        # this diagnostics thread being alive.
-        self._last_frame_wall_clock = data.timestamp
+        # pulled from the DailyExtrema snapshot in mqtt_data(). Nothing to do
+        # here; kept for the listener/callback contract.
+        pass
 
     def set_daily_extrema_source(self, source) -> None:
         """Register the master's DailyExtrema tracker to pull snapshots from.
@@ -642,24 +633,10 @@ class HADiagnostics:
             self.ts65a_serial_connect_count.update_value(self._ts65a_slave_stats.serial.connect_count)
             self.ts65a_serial_disconnect_count.update_value(self._ts65a_slave_stats.serial.disconnect_count)
 
-        # Flush the freshness heartbeat for the Docker healthcheck. This runs on
-        # the diagnostics cadence (off the pinned tick core), so it never adds
-        # work to the 10Hz acquisition loop.
-        self._write_health_heartbeat()
-
         sensors = self._all_sensors()
 
         payload = {sensor.safe_name: sensor.value for sensor in sensors}
         return self.state_topic, json.dumps(payload)
-
-    def _write_health_heartbeat(self) -> None:
-        """Refresh the health heartbeat from the last observed frame time.
-
-        Delegates to the shared, best-effort writer. This is an opportunistic
-        refresh on the diagnostics cadence; the authoritative writer is the
-        always-on supervisor loop in app.main (independent of MQTT).
-        """
-        write_health_heartbeat(self._last_frame_wall_clock, self._health_file)
 
     def set_em540_slave_stats(self, stats: EM540SlaveStats):
         self._em540_slave_stats = stats

@@ -526,15 +526,19 @@ class TestMainLoopPriority(unittest.TestCase):
 
 
 class TestHealthWatchdog(unittest.TestCase):
-    """Validates the upstream-freshness self-exit decision (_health_watchdog_should_exit)."""
+    """Validates the upstream-freshness self-exit decision (_health_watchdog_should_exit).
+
+    All timestamps are monotonic values (never wall-clock) so a system clock
+    adjustment cannot skew the decision.
+    """
 
     def test_disabled_when_threshold_non_positive(self):
         # threshold <= 0 disables the watchdog regardless of staleness
         self.assertFalse(
             main._health_watchdog_should_exit(
-                last_frame_wall_clock=0.0,
-                now_wall_clock=10_000.0,
-                process_start_wall_clock=0.0,
+                last_frame_monotonic=0.0,
+                now_monotonic=10_000.0,
+                process_start_monotonic=0.0,
                 max_stale_s=0.0,
                 grace_period_s=45.0,
             )
@@ -544,9 +548,9 @@ class TestHealthWatchdog(unittest.TestCase):
         # 30s elapsed since start, grace is 45s: still booting, never exit
         self.assertFalse(
             main._health_watchdog_should_exit(
-                last_frame_wall_clock=0.0,
-                now_wall_clock=1_030.0,
-                process_start_wall_clock=1_000.0,
+                last_frame_monotonic=0.0,
+                now_monotonic=1_030.0,
+                process_start_monotonic=1_000.0,
                 max_stale_s=30.0,
                 grace_period_s=45.0,
             )
@@ -556,9 +560,9 @@ class TestHealthWatchdog(unittest.TestCase):
         # Past grace and still no frame ever: staleness measured from start
         self.assertTrue(
             main._health_watchdog_should_exit(
-                last_frame_wall_clock=0.0,
-                now_wall_clock=1_050.0,
-                process_start_wall_clock=1_000.0,
+                last_frame_monotonic=0.0,
+                now_monotonic=1_050.0,
+                process_start_monotonic=1_000.0,
                 max_stale_s=30.0,
                 grace_period_s=45.0,
             )
@@ -568,9 +572,9 @@ class TestHealthWatchdog(unittest.TestCase):
         # A frame 5s ago is fresh; do not exit
         self.assertFalse(
             main._health_watchdog_should_exit(
-                last_frame_wall_clock=1_095.0,
-                now_wall_clock=1_100.0,
-                process_start_wall_clock=1_000.0,
+                last_frame_monotonic=1_095.0,
+                now_monotonic=1_100.0,
+                process_start_monotonic=1_000.0,
                 max_stale_s=30.0,
                 grace_period_s=45.0,
             )
@@ -580,9 +584,9 @@ class TestHealthWatchdog(unittest.TestCase):
         # Last frame was 31s ago (> 30s threshold), past grace: exit
         self.assertTrue(
             main._health_watchdog_should_exit(
-                last_frame_wall_clock=1_069.0,
-                now_wall_clock=1_100.0,
-                process_start_wall_clock=1_000.0,
+                last_frame_monotonic=1_069.0,
+                now_monotonic=1_100.0,
+                process_start_monotonic=1_000.0,
                 max_stale_s=30.0,
                 grace_period_s=45.0,
             )
@@ -592,9 +596,9 @@ class TestHealthWatchdog(unittest.TestCase):
         # Staleness exactly equal to the threshold is not "over" it
         self.assertFalse(
             main._health_watchdog_should_exit(
-                last_frame_wall_clock=1_070.0,
-                now_wall_clock=1_100.0,
-                process_start_wall_clock=1_000.0,
+                last_frame_monotonic=1_070.0,
+                now_monotonic=1_100.0,
+                process_start_monotonic=1_000.0,
                 max_stale_s=30.0,
                 grace_period_s=45.0,
             )
