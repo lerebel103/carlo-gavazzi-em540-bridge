@@ -16,6 +16,7 @@ from app.carlo_gavazzi.em540_slave_bridge import Em540Slave
 from app.config import ConfigError, ConfigManager
 from app.fronius.ts65a_slave_bridge import Ts65aSlaveBridge
 from app.home_assistant.ha_bridge import HABridge
+from app.utils.health import write_health_heartbeat
 from app.version import version_for_display
 
 logger = logging.getLogger()
@@ -326,6 +327,11 @@ async def process_loop(state):
     process_start_wall_clock = time.time()
 
     def _check_health_watchdog() -> None:
+        # Refresh the observability heartbeat file on every check, independent of
+        # MQTT, so the Docker healthcheck reflects freshness even when the MQTT
+        # integration is disabled. Best-effort; never raises.
+        write_health_heartbeat(em540_master.data.timestamp)
+
         if health_max_stale_s <= 0.0:
             return
         if _health_watchdog_should_exit(
@@ -342,6 +348,41 @@ async def process_loop(state):
             )
             os._exit(1)
 
+    async def _supervise(tasks: set[asyncio.Task]) -> None:
+        """Wait for any task to finish, polling the freshness watchdog meanwhile.
+
+        The bounded ``asyncio.wait`` timeout guarantees ``_check_health_watchdog()``
+        runs on a fixed cadence even when a worker never completes (a fully-wedged
+        acquisition path), so the process can still self-exit. Applies to BOTH the
+        paced (scheduler + worker) and unpaced (single worker) modes so neither
+        can bypass the watchdog. Running tasks are only torn down once one of them
+        actually finishes; exceptions are re-raised to the caller.
+        """
+        pending: set[asyncio.Task] = set(tasks)
+        try:
+            while True:
+                done, pending = await asyncio.wait(
+                    tasks,
+                    return_when=asyncio.FIRST_COMPLETED,
+                    timeout=health_poll_interval_s,
+                )
+                if done:
+                    break
+                # Timed out with everything still running: re-evaluate the
+                # watchdog without disrupting the tick loop, then keep waiting.
+                _check_health_watchdog()
+                if stop_event.is_set():
+                    break
+        finally:
+            for task in pending:
+                task.cancel()
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
+        for task in done:
+            exc = task.exception()
+            if exc is not None:
+                raise exc
+
     try:
         while not stop_event.is_set():
             if em540_master.has_fatal_error:
@@ -354,35 +395,13 @@ async def process_loop(state):
                 _clear_tick_queue()
                 scheduler_task = asyncio.create_task(_paced_scheduler(), name="em540-tick-scheduler")
                 worker_task = asyncio.create_task(_paced_worker(), name="em540-acquisition-worker")
-                # Supervise the paced tasks, polling on a bounded timeout so the
-                # freshness watchdog is evaluated even when neither task ever
-                # completes (a fully-wedged tick loop). The tasks are created
-                # once and kept running across timeouts; we only tear them down
-                # once one of them actually finishes (interval change, fatal
-                # error, or exception).
-                while True:
-                    done, pending = await asyncio.wait(
-                        {scheduler_task, worker_task},
-                        return_when=asyncio.FIRST_COMPLETED,
-                        timeout=health_poll_interval_s,
-                    )
-                    if done:
-                        break
-                    # Timed out with both tasks still running: re-evaluate the
-                    # watchdog without disrupting the tick loop, then keep waiting.
-                    _check_health_watchdog()
-                    if stop_event.is_set():
-                        break
-                for task in pending:
-                    task.cancel()
-                if pending:
-                    await asyncio.gather(*pending, return_exceptions=True)
-                for task in done:
-                    exc = task.exception()
-                    if exc is not None:
-                        raise exc
+                await _supervise({scheduler_task, worker_task})
             else:
-                await _unpaced_worker()
+                # Unpaced mode also runs under supervision so a blocked
+                # _acquire_cycle() cannot starve the watchdog (the single worker
+                # is the only task, but the bounded poll still fires the check).
+                unpaced_task = asyncio.create_task(_unpaced_worker(), name="em540-unpaced-worker")
+                await _supervise({unpaced_task})
     finally:
         stop_event.set()
         _clear_tick_queue()

@@ -1,5 +1,4 @@
 import json
-import os
 import time
 
 from app.carlo_gavazzi.em540_master import Em540MasterStats
@@ -8,15 +7,9 @@ from app.carlo_gavazzi.meter_data import MeterData
 from app.fronius.ts65a_slave_stats import Ts65aSlaveStats
 from app.home_assistant.ha_sensors import HA_AVAILABILITY_TOPIC, Sensor, configure_sensor_topic_metadata
 from app.home_assistant.ha_topics import prefix_topic, topic_namespace
+from app.utils.health import HEALTH_HEARTBEAT_FILE, write_health_heartbeat
 
 DIAGNOSTICS_INTERVAL: float = 5  # seconds
-
-# Freshness heartbeat file consumed by the Docker healthcheck. Lives on tmpfs
-# (/dev/shm) so repeated writes never touch the SD card on a Pi. The file holds
-# the integer epoch seconds of the last successful upstream frame; the probe
-# treats a stale (or missing/zero) value as unhealthy. Kept as a module-level
-# constant so it is trivial to retarget without threading it through config.
-HEALTH_HEARTBEAT_FILE: str = "/dev/shm/em540_health"
 
 
 class HADiagnostics:
@@ -660,25 +653,13 @@ class HADiagnostics:
         return self.state_topic, json.dumps(payload)
 
     def _write_health_heartbeat(self) -> None:
-        """Write the last-frame epoch seconds to the health heartbeat file.
+        """Refresh the health heartbeat from the last observed frame time.
 
-        We stamp the last observed *frame* time (not "now"), so a wedged
-        acquisition loop or dead upstream goes stale even while this diagnostics
-        thread keeps running. The write is atomic (temp file + os.replace) so the
-        probe never reads a half-written value, and best-effort: health
-        monitoring must never perturb the bridge, so all errors are swallowed.
+        Delegates to the shared, best-effort writer. This is an opportunistic
+        refresh on the diagnostics cadence; the authoritative writer is the
+        always-on supervisor loop in app.main (independent of MQTT).
         """
-        try:
-            tmp_path = f"{self._health_file}.tmp"
-            with open(tmp_path, "w") as health_file:
-                health_file.write(str(int(self._last_frame_wall_clock)))
-            os.replace(tmp_path, self._health_file)
-        except Exception:
-            # Intentionally silent: a failed heartbeat write must not affect
-            # diagnostics publication or the tick loop. A persistently failing
-            # write simply leaves the file stale, which the healthcheck treats
-            # as unhealthy — the safe direction.
-            pass
+        write_health_heartbeat(self._last_frame_wall_clock, self._health_file)
 
     def set_em540_slave_stats(self, stats: EM540SlaveStats):
         self._em540_slave_stats = stats
