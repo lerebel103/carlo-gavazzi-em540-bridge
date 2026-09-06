@@ -71,6 +71,30 @@ Notes:
   edges evaluated at diagnostics cadence. TCP and RTU-over-TCP channels still use real transport
   connect/disconnect events.
 
+## Register Layout Invariants (validated against production)
+
+These are deliberate, verified behaviours. Do NOT "fix" them based on a static read of the
+code — the parsing path is validated against a real EM540/EM530 device and works correctly.
+Changing the production parsing/overlay to satisfy a theoretical concern here will break a
+working system.
+
+- **Address `0x000B` is intentionally shared.** In the EM540 map, `0x000B` is the Device Type
+  register AND the high word of the L3-L1 line-to-line voltage INT32 (which spans `0x000A`-`0x000B`).
+  The downstream slave overlays `0x000B` with the static Device Type value on purpose; this is the
+  correct real-meter behaviour.
+- **No corruption occurs at real-world values.** Line-to-line voltages are ~400 V, i.e. raw
+  `Volt*10 <= ~6000`, which fits entirely in the low word (`0x000A`). A real meter leaves the high
+  word (`0x000B`) at 0, so overlaying the Device Type there does not clobber any live voltage data.
+- **L3-L1 voltage is served from its remapped location.** Clients read L3-L1 from the remapped
+  registers `0x013A`/`0x013B`, which are populated from `0x000A`/`0x000B` before the Device Type
+  overlay is applied. The overlay therefore never costs the L3-L1 reading.
+- **Test data must use physically realistic values.** Integration/unit fixtures must scale primary
+  block fields to real ranges (e.g. L-L voltage ~400 V) so synthetic data does not push a non-zero
+  high word into `0x000B` and manufacture a collision that cannot happen on real hardware. When
+  verifying the `0x000B` overlap end-to-end, assert the L3-L1 value at its remapped location and the
+  Device Type via a standalone single-register `0x000B` read — never rely on a wide primary-block
+  comparison where `primary[0x000B] == Device Type` is self-fulfilling.
+
 ## Failure Model
 
 - Stale or failed upstream data opens a circuit breaker in downstream Modbus slave bridges.
