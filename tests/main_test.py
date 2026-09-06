@@ -73,6 +73,7 @@ def _make_state():
             tcp_port=5021,
             slave_id=1,
             update_timeout=5.0,
+            serial_idle_timeout=5.0,
             log_level="CRITICAL",
         ),
         ts65a_slave=SimpleNamespace(
@@ -80,6 +81,7 @@ def _make_state():
             port=5030,
             slave_id=1,
             update_timeout=5.0,
+            serial_idle_timeout=5.0,
             grid_feed_in_hard_limit=-10000.0,
             smoothing_num_points=10,
             log_level="CRITICAL",
@@ -161,7 +163,7 @@ class TestMainLoopPriority(unittest.TestCase):
             patch.object(main, "HABridge"),
         ):
             with self.assertRaises(_LoopBreak):
-                asyncio.run(main.process_loop())
+                asyncio.run(main.process_loop(state))
 
         self.assertEqual(mocks["master"].acquire_data.await_count, 3)
 
@@ -188,7 +190,7 @@ class TestMainLoopPriority(unittest.TestCase):
             patch.object(main, "HABridge"),
         ):
             with self.assertRaises(_LoopBreak):
-                asyncio.run(main.process_loop())
+                asyncio.run(main.process_loop(state))
 
         mocks["master"].connect.assert_awaited_once()
 
@@ -213,7 +215,7 @@ class TestMainLoopPriority(unittest.TestCase):
             patch.object(main.logging, "getLogger", return_value=pymodbus_logger) as mock_get_logger,
         ):
             with self.assertRaises(_LoopBreak):
-                asyncio.run(main.process_loop())
+                asyncio.run(main.process_loop(state))
 
         mock_get_logger.assert_called_with("pymodbus.logging")
         pymodbus_logger.addFilter.assert_called_once()
@@ -261,7 +263,7 @@ class TestMainLoopPriority(unittest.TestCase):
             patch.object(main.asyncio, "sleep", side_effect=_sleep),
         ):
             with self.assertRaises(_LoopBreak):
-                asyncio.run(main.process_loop())
+                asyncio.run(main.process_loop(state))
 
         self.assertTrue(any(delay > 0 for delay in sleep_calls))
         self.assertEqual(mocks["master"].acquire_data.await_count, 3)
@@ -300,7 +302,7 @@ class TestMainLoopPriority(unittest.TestCase):
             patch.object(main, "HABridge"),
         ):
             with self.assertRaises(_LoopBreak):
-                asyncio.run(main.process_loop())
+                asyncio.run(main.process_loop(state))
 
         self.assertEqual(mocks["master"].acquire_data.await_count, 3)
         self.assertEqual(acquire_sequence, [1, 2, 3])
@@ -331,7 +333,7 @@ class TestMainLoopPriority(unittest.TestCase):
             patch.object(main.asyncio, "sleep", new_callable=AsyncMock) as mock_sleep,
         ):
             with self.assertRaises(_LoopBreak):
-                asyncio.run(main.process_loop())
+                asyncio.run(main.process_loop(state))
 
         self.assertEqual(mocks["master"].acquire_data.await_count, 3)
         mock_sleep.assert_not_awaited()
@@ -358,7 +360,7 @@ class TestMainLoopPriority(unittest.TestCase):
             patch.object(main.asyncio, "sleep", side_effect=_sleep),
         ):
             with self.assertRaises(_LoopBreak):
-                asyncio.run(main.process_loop())
+                asyncio.run(main.process_loop(state))
 
         mocks["master"].connect.assert_awaited_once()
         self.assertEqual(mocks["master"].acquire_data.await_count, 1)
@@ -403,7 +405,7 @@ class TestMainLoopPriority(unittest.TestCase):
             patch.object(main.asyncio, "sleep", side_effect=_sleep),
         ):
             with self.assertRaises(_LoopBreak):
-                asyncio.run(main.process_loop())
+                asyncio.run(main.process_loop(state))
 
         self.assertEqual(mocks["master"].acquire_data.await_count, 6)
         self.assertTrue(any(delay > 0 for delay in sleep_calls))
@@ -439,7 +441,7 @@ class TestMainLoopPriority(unittest.TestCase):
             patch.object(main, "HABridge", return_value=mqtt_bridge),
         ):
             with self.assertRaises(_LoopBreak):
-                asyncio.run(main.process_loop())
+                asyncio.run(main.process_loop(state))
 
         mocks["master"].add_listener.assert_any_call(mqtt_bridge)
         self.assertEqual(mocks["master"].acquire_data.await_count, 1)
@@ -474,7 +476,7 @@ class TestMainLoopPriority(unittest.TestCase):
             patch.object(main, "HABridge", return_value=mqtt_bridge),
         ):
             with self.assertRaises(_LoopBreak):
-                asyncio.run(main.process_loop())
+                asyncio.run(main.process_loop(state))
 
         mqtt_bridge.stop.assert_called_once()
         mocks["master"].disconnect.assert_awaited_once()
@@ -499,6 +501,27 @@ class TestMainLoopPriority(unittest.TestCase):
             asyncio.run(main.main())
 
         mock_logger_info.assert_any_call("Starting EM540 Energy Meter Bridge (%s)", "v1.2.3")
+
+    def test_main_exits_on_invalid_config(self):
+        """A ConfigError at load time must hard-exit rather than run silently."""
+        with (
+            patch.object(main, "parse_args", return_value=SimpleNamespace(config="config.yaml")),
+            patch.object(main, "ConfigManager") as mock_cm_cls,
+            patch.object(main.logging, "basicConfig"),
+            patch.object(main, "process_loop", new_callable=AsyncMock) as mock_process_loop,
+            patch.object(main.logger, "critical") as mock_logger_critical,
+            patch.object(main.sys, "exit", side_effect=SystemExit(1)) as mock_exit,
+        ):
+            mock_cm = MagicMock()
+            mock_cm.load.side_effect = main.ConfigError("em540_master.serial_port '/dev/bad' could not be opened")
+            mock_cm_cls.return_value = mock_cm
+
+            with self.assertRaises(SystemExit):
+                asyncio.run(main.main())
+
+        mock_exit.assert_called_once_with(1)
+        mock_logger_critical.assert_called_once()
+        mock_process_loop.assert_not_awaited()
 
 
 if __name__ == "__main__":

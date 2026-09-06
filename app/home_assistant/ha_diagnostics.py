@@ -172,26 +172,19 @@ class HADiagnostics:
             entity_category="diagnostic",
             enabled_by_default=True,
         )
-        self.min_power_w = Sensor(
-            "Min Power W",
-            "W",
-            "power",
-            "measurement",
-            self.state_topic,
-            precision=1,
-            entity_category="diagnostic",
-            enabled_by_default=True,
-        )
-        self.max_power_w = Sensor(
-            "Max Power W",
-            "W",
-            "power",
-            "measurement",
-            self.state_topic,
-            precision=1,
-            entity_category="diagnostic",
-            enabled_by_default=True,
-        )
+        # Daily per-quantity, per-scope extrema. Values are sourced from the
+        # master's DailyExtrema tracker (which observes every upstream frame)
+        # and pulled in mqtt_data(). All are disabled by default to avoid
+        # cluttering Home Assistant; users can enable the ones they want.
+        #
+        # The system-power min/max entities intentionally keep their original
+        # entity names ("Min Power W" / "Max Power W") so their derived
+        # safe_name / unique_id stay stable and existing HA entities are not
+        # orphaned. Only their display_name changes to "Daily ...".
+        self._daily_extrema_source = None
+        self._daily_extrema_sensors: dict[str, Sensor] = self._build_daily_extrema_sensors()
+        self.min_power_w = self._daily_extrema_sensors["power_min"]
+        self.max_power_w = self._daily_extrema_sensors["power_max"]
 
         # TS65A specific diagnostics
         self.ts65a_tcp_client_count = Sensor(
@@ -203,6 +196,7 @@ class HADiagnostics:
             precision=0,
             entity_category="diagnostic",
             enabled_by_default=True,
+            display_name="TS65A TCP Clients",
         )
         self.ts65a_tcp_client_disconnect_count = Sensor(
             "TS65A TCP Client Disconnect Count",
@@ -213,6 +207,40 @@ class HADiagnostics:
             precision=0,
             entity_category="diagnostic",
             enabled_by_default=True,
+            display_name="TS65A TCP Disconnects",
+        )
+        self.ts65a_serial_client_active = Sensor(
+            "TS65A Serial Client Active",
+            None,
+            None,
+            "measurement",
+            self.state_topic,
+            precision=0,
+            entity_category="diagnostic",
+            enabled_by_default=True,
+            display_name="TS65A Serial Active",
+        )
+        self.ts65a_serial_connect_count = Sensor(
+            "TS65A Serial Connect Count",
+            None,
+            None,
+            "measurement",
+            self.state_topic,
+            precision=0,
+            entity_category="diagnostic",
+            enabled_by_default=True,
+            display_name="TS65A Serial Connects",
+        )
+        self.ts65a_serial_disconnect_count = Sensor(
+            "TS65A Serial Disconnect Count",
+            None,
+            None,
+            "measurement",
+            self.state_topic,
+            precision=0,
+            entity_category="diagnostic",
+            enabled_by_default=True,
+            display_name="TS65A Serial Disconnects",
         )
         self.ts65a_power_over_feed_in_limit_count = Sensor(
             "Overfeed Limit Count",
@@ -284,6 +312,7 @@ class HADiagnostics:
             precision=0,
             entity_category="diagnostic",
             enabled_by_default=True,
+            display_name="EM540 TCP (RTU) Clients",
         )
         self.em540_rtu_client_disconnect_count = Sensor(
             "EM540 RTU Client Disconnect Count",
@@ -294,6 +323,7 @@ class HADiagnostics:
             precision=0,
             entity_category="diagnostic",
             enabled_by_default=True,
+            display_name="EM540 TCP (RTU) Disconnects",
         )
         self.em540_tcp_client_count = Sensor(
             "EM540 TCP Client Count",
@@ -304,6 +334,7 @@ class HADiagnostics:
             precision=0,
             entity_category="diagnostic",
             enabled_by_default=True,
+            display_name="EM540 TCP Clients",
         )
         self.em540_tcp_client_disconnect_count = Sensor(
             "EM540 TCP Client Disconnect Count",
@@ -314,6 +345,40 @@ class HADiagnostics:
             precision=0,
             entity_category="diagnostic",
             enabled_by_default=True,
+            display_name="EM540 TCP Disconnects",
+        )
+        self.em540_serial_client_active = Sensor(
+            "EM540 Serial Client Active",
+            None,
+            None,
+            "measurement",
+            self.state_topic,
+            precision=0,
+            entity_category="diagnostic",
+            enabled_by_default=True,
+            display_name="EM540 Serial Active",
+        )
+        self.em540_serial_connect_count = Sensor(
+            "EM540 Serial Connect Count",
+            None,
+            None,
+            "measurement",
+            self.state_topic,
+            precision=0,
+            entity_category="diagnostic",
+            enabled_by_default=True,
+            display_name="EM540 Serial Connects",
+        )
+        self.em540_serial_disconnect_count = Sensor(
+            "EM540 Serial Disconnect Count",
+            None,
+            None,
+            "measurement",
+            self.state_topic,
+            precision=0,
+            entity_category="diagnostic",
+            enabled_by_default=True,
+            display_name="EM540 Serial Disconnects",
         )
         self.em540_circuit_breaker_open = Sensor(
             "EM540 Circuit Breaker Open",
@@ -363,14 +428,69 @@ class HADiagnostics:
             availability_topic=self._availability_topic,
         )
 
+    def _build_daily_extrema_sensors(self) -> dict[str, Sensor]:
+        """Create the 32 daily extrema sensors keyed by tracker snapshot key.
+
+        Keys match DailyExtrema.snapshot() output ("<quantity>[_<phase>]_<min|max>").
+        Entity names (and therefore safe_name / unique_id) are chosen so that
+        system power keeps its historical identity, while all display names read
+        as "Daily ...".
+        """
+        # quantity -> (unit, device_class, precision, human label)
+        quantity_meta: dict[str, tuple[str, str, int, str]] = {
+            "power": ("W", "power", 1, "Power"),
+            "current": ("A", "current", 2, "Current"),
+            "voltage_ln": ("V", "voltage", 1, "Voltage L-N"),
+            "voltage_ll": ("V", "voltage", 1, "Voltage L-L"),
+        }
+        # scope suffix ("" == system) -> label fragment
+        scope_labels: list[tuple[str, str]] = [
+            ("", ""),
+            ("l1", "L1"),
+            ("l2", "L2"),
+            ("l3", "L3"),
+        ]
+
+        # Preserve the historical entity identity for the system power extrema so
+        # existing Home Assistant entities are not orphaned. Maps snapshot key ->
+        # (entity name, display name).
+        legacy_names: dict[str, tuple[str, str]] = {
+            "power_min": ("Min Power W", "Daily Power Min"),
+            "power_max": ("Max Power W", "Daily Power Max"),
+        }
+
+        sensors: dict[str, Sensor] = {}
+        for quantity, (unit, device_class, precision, q_label) in quantity_meta.items():
+            for suffix, scope_label in scope_labels:
+                scope_key = quantity if suffix == "" else f"{quantity}_{suffix}"
+                for bound in ("min", "max"):
+                    key = f"{scope_key}_{bound}"
+                    if key in legacy_names:
+                        name, display_name = legacy_names[key]
+                    else:
+                        scope_txt = f" {scope_label}" if scope_label else ""
+                        name = f"Daily {q_label}{scope_txt} {bound.capitalize()}"
+                        display_name = name
+                    sensors[key] = Sensor(
+                        name,
+                        unit,
+                        device_class,
+                        "measurement",
+                        self.state_topic,
+                        precision=precision,
+                        entity_category="diagnostic",
+                        enabled_by_default=False,
+                        display_name=display_name,
+                    )
+        return sensors
+
     def _all_sensors(self) -> list[Sensor]:
         return [
             self._uptime,
             self._bridge_uptime,
             self.update_rate,
             self.mqtt_update_rate,
-            self.min_power_w,
-            self.max_power_w,
+            *self._daily_extrema_sensors.values(),
             self.read_failed_count,
             self.consumer_missed_updates_total,
             self.consumer_max_seq_gap,
@@ -385,12 +505,18 @@ class HADiagnostics:
             self.em540_rtu_client_disconnect_count,
             self.em540_tcp_client_count,
             self.em540_tcp_client_disconnect_count,
+            self.em540_serial_client_active,
+            self.em540_serial_connect_count,
+            self.em540_serial_disconnect_count,
             self.em540_circuit_breaker_open,
             self.em540_circuit_breaker_open_count,
             self.em540_stale_data_age_ms,
             self.em540_dropped_stale_request_count,
             self.ts65a_tcp_client_count,
             self.ts65a_tcp_client_disconnect_count,
+            self.ts65a_serial_client_active,
+            self.ts65a_serial_connect_count,
+            self.ts65a_serial_disconnect_count,
             self.ts65a_power_over_feed_in_limit_count,
             self.ts65a_power_over_feed_limit_max_duration,
             self.ts65a_circuit_breaker_open,
@@ -400,13 +526,30 @@ class HADiagnostics:
         ]
 
     def new_data(self, data: MeterData):
-        power = data.system.power
-        self.min_power_w.update_value(
-            min(self.min_power_w.value, power) if self.min_power_w.value is not None else power
-        )
-        self.max_power_w.update_value(
-            max(self.max_power_w.value, power) if self.max_power_w.value is not None else power
-        )
+        # Daily extrema are computed at the master (which sees every frame) and
+        # pulled from the DailyExtrema snapshot in mqtt_data(). Nothing to do
+        # here; kept for the listener/callback contract.
+        pass
+
+    def set_daily_extrema_source(self, source) -> None:
+        """Register the master's DailyExtrema tracker to pull snapshots from.
+
+        ``source`` must expose ``snapshot() -> dict[str, float | None]`` whose
+        keys match the daily extrema sensor keys.
+        """
+        self._daily_extrema_source = source
+
+    def _apply_daily_extrema(self) -> None:
+        source = getattr(self, "_daily_extrema_source", None)
+        if source is None:
+            return
+        snapshot = source.snapshot()
+        for key, sensor in self._daily_extrema_sensors.items():
+            # Write the value as-is, including None for unset/expired extrema
+            # (no sample yet today, or the day window has rolled over during an
+            # upstream outage). None serializes to JSON null, which the sensor
+            # value_template renders as unknown/unavailable in Home Assistant.
+            sensor.update_value(snapshot.get(key))
 
     def record_mqtt_publish(self, published_at: float | None = None):
         now = time.monotonic() if published_at is None else published_at
@@ -423,13 +566,22 @@ class HADiagnostics:
             self._last_mqtt_rate_timestamp = now
 
     def read_failed(self):
-        self.read_failed_count.update_value(self.read_failed_count.value + 1)
+        # Intentionally a no-op. The read-failure count is sourced
+        # authoritatively from Em540MasterStats.read_failed_total in mqtt_data(),
+        # which captures every failure mode (connect, primary block, corrupt
+        # frame, energy block). This method is kept only because HABridge.read_failed()
+        # calls it as part of the listener contract; it must not mutate the
+        # counter here or it would double-count against the master stat.
+        pass
 
     def advertise_data(self):
         return [sensor.discovery() for sensor in self._all_sensors()]
 
     def mqtt_data(self):
         import uptime
+
+        # Pull the latest daily extrema snapshot from the master tracker.
+        self._apply_daily_extrema()
 
         # Get the system uptime in seconds
         system_uptime_seconds = uptime.uptime()
@@ -449,7 +601,11 @@ class HADiagnostics:
             self.em540_circuit_breaker_open_count.update_value(self._em540_slave_stats.circuit_breaker_open_count)
             self.em540_stale_data_age_ms.update_value(self._em540_slave_stats.stale_data_age_ms)
             self.em540_dropped_stale_request_count.update_value(self._em540_slave_stats.dropped_stale_request_count)
+            self.em540_serial_client_active.update_value(1 if self._em540_slave_stats.serial.active else 0)
+            self.em540_serial_connect_count.update_value(self._em540_slave_stats.serial.connect_count)
+            self.em540_serial_disconnect_count.update_value(self._em540_slave_stats.serial.disconnect_count)
         if self._em540_master_stats is not None:
+            self.read_failed_count.update_value(self._em540_master_stats.read_failed_total)
             master_stats = self._em540_master_stats.snapshot_and_reset_interval_extrema()
             self.consumer_missed_updates_total.update_value(master_stats["consumer_missed_updates_total"])
             self.consumer_max_seq_gap.update_value(master_stats["consumer_max_seq_gap"])
@@ -473,6 +629,9 @@ class HADiagnostics:
             self.ts65a_circuit_breaker_open_count.update_value(self._ts65a_slave_stats.circuit_breaker_open_count)
             self.ts65a_stale_data_age_ms.update_value(self._ts65a_slave_stats.stale_data_age_ms)
             self.ts65a_dropped_stale_request_count.update_value(self._ts65a_slave_stats.dropped_stale_request_count)
+            self.ts65a_serial_client_active.update_value(1 if self._ts65a_slave_stats.serial.active else 0)
+            self.ts65a_serial_connect_count.update_value(self._ts65a_slave_stats.serial.connect_count)
+            self.ts65a_serial_disconnect_count.update_value(self._ts65a_slave_stats.serial.disconnect_count)
 
         sensors = self._all_sensors()
 

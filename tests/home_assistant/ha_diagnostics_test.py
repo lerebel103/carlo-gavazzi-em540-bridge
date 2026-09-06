@@ -30,6 +30,69 @@ def test_em540_tcp_client_stats_are_published_in_diagnostics_payload():
     assert payload_obj["em540_tcp_client_disconnect_count"] == 11
 
 
+def test_serial_activity_stats_are_published_for_both_bridges():
+    from app.fronius.ts65a_slave_stats import Ts65aSlaveStats
+
+    diagnostics = HADiagnostics(topic_prefix="test")
+
+    em_stats = EM540SlaveStats()
+    em_stats.serial.record_request(now=100.0)
+    em_stats.serial.evaluate(idle_timeout=5.0, now=101.0)  # active, connect=1
+    diagnostics.set_em540_slave_stats(em_stats)
+
+    ts_stats = Ts65aSlaveStats()
+    ts_stats.serial.record_request(now=100.0)
+    ts_stats.serial.evaluate(idle_timeout=5.0, now=101.0)
+    ts_stats.serial.evaluate(idle_timeout=5.0, now=200.0)  # idle -> disconnect=1
+    diagnostics.set_ts_65a_slave_stats(ts_stats)
+
+    with patch.dict("sys.modules", {"uptime": SimpleNamespace(uptime=lambda: 1)}):
+        _, payload = diagnostics.mqtt_data()
+    payload_obj = json.loads(payload)
+
+    assert payload_obj["em540_serial_client_active"] == 1
+    assert payload_obj["em540_serial_connect_count"] == 1
+    assert payload_obj["em540_serial_disconnect_count"] == 0
+
+    assert payload_obj["ts65a_serial_client_active"] == 0
+    assert payload_obj["ts65a_serial_connect_count"] == 1
+    assert payload_obj["ts65a_serial_disconnect_count"] == 1
+
+
+def test_transport_display_names_distinguish_tcp_rtu_and_serial():
+    diagnostics = HADiagnostics(topic_prefix="test")
+
+    payloads = {topic: json.loads(payload) for topic, payload in diagnostics.advertise_data()}
+
+    # Existing entity keys stay stable; only display names change for clarity.
+    assert payloads["homeassistant/sensor/em540_bridge_test_em540_rtu_client_count/config"]["name"] == (
+        "EM540 TCP (RTU) Clients"
+    )
+    assert payloads["homeassistant/sensor/em540_bridge_test_em540_tcp_client_count/config"]["name"] == (
+        "EM540 TCP Clients"
+    )
+    assert payloads["homeassistant/sensor/em540_bridge_test_em540_serial_client_active/config"]["name"] == (
+        "EM540 Serial Active"
+    )
+    assert payloads["homeassistant/sensor/em540_bridge_test_ts65a_serial_disconnect_count/config"]["name"] == (
+        "TS65A Serial Disconnects"
+    )
+
+
+def test_read_failed_count_is_published_from_master_stats():
+    diagnostics = HADiagnostics(topic_prefix="test")
+
+    master_stats = Em540MasterStats()
+    master_stats.read_failed_total = 7
+    diagnostics.set_em540_master_stats(master_stats)
+
+    with patch.dict("sys.modules", {"uptime": SimpleNamespace(uptime=lambda: 1)}):
+        _, payload = diagnostics.mqtt_data()
+    payload_obj = json.loads(payload)
+
+    assert payload_obj["rs485_master_read_failures"] == 7
+
+
 def test_master_timing_payload_prefers_worst_case_values_over_last_cycle_values():
     diagnostics = HADiagnostics(topic_prefix="test")
 
@@ -127,16 +190,20 @@ def test_only_selected_diagnostics_are_enabled_by_default():
         "bridge_uptime",
         "acq_rate",
         "tick_overruns",
-        "min_power_w",
-        "max_power_w",
         "em540_rtu_client_count",
         "em540_rtu_client_disconnect_count",
         "em540_tcp_client_count",
         "em540_tcp_client_disconnect_count",
+        "em540_serial_client_active",
+        "em540_serial_connect_count",
+        "em540_serial_disconnect_count",
         "em540_stale_data_age",
         "em540_dropped_stale_requests",
         "ts65a_tcp_client_count",
         "ts65a_tcp_client_disconnect_count",
+        "ts65a_serial_client_active",
+        "ts65a_serial_connect_count",
+        "ts65a_serial_disconnect_count",
         "overfeed_limit_count",
         "overfeed_limit_max_duration",
         "ts65a_stale_data_age",
@@ -152,3 +219,72 @@ def test_diagnostics_display_names_are_migrated_without_changing_entity_keys():
     assert payloads["homeassistant/sensor/em540_bridge_test_acq_rate/config"]["name"] == "Acq Rate"
     assert payloads["homeassistant/sensor/em540_bridge_test_acq_dur_mean/config"]["name"] == "Acq Dur Mean"
     assert payloads["homeassistant/sensor/em540_bridge_test_acq_headroom_mean/config"]["name"] == "Acq Headroom Mean"
+
+
+def test_daily_power_extrema_keep_legacy_entity_keys_with_daily_display_names():
+    diagnostics = HADiagnostics(topic_prefix="test")
+
+    payloads = {topic: json.loads(payload) for topic, payload in diagnostics.advertise_data()}
+
+    # Legacy system-power extrema keep their historical entity keys (unique_id
+    # derives from safe_name) but display as "Daily ...".
+    min_cfg = payloads["homeassistant/sensor/em540_bridge_test_min_power_w/config"]
+    max_cfg = payloads["homeassistant/sensor/em540_bridge_test_max_power_w/config"]
+    assert min_cfg["name"] == "Daily Power Min"
+    assert max_cfg["name"] == "Daily Power Max"
+    assert min_cfg["enabled_by_default"] is False
+    assert max_cfg["enabled_by_default"] is False
+
+
+def test_all_32_daily_extrema_sensors_are_declared_and_disabled_by_default():
+    diagnostics = HADiagnostics(topic_prefix="test")
+
+    extrema = diagnostics._daily_extrema_sensors
+    assert len(extrema) == 32
+    assert all(not s.enabled_by_default for s in extrema.values())
+    assert all(s.entity_category == "diagnostic" for s in extrema.values())
+
+    expected_keys = set()
+    for quantity in ("power", "current", "voltage_ln", "voltage_ll"):
+        for scope in ("", "_l1", "_l2", "_l3"):
+            for bound in ("_min", "_max"):
+                expected_keys.add(f"{quantity}{scope}{bound}")
+    assert set(extrema.keys()) == expected_keys
+
+
+def test_daily_extrema_values_are_pulled_from_master_snapshot():
+    diagnostics = HADiagnostics(topic_prefix="test")
+
+    class _FakeExtrema:
+        def snapshot(self):
+            return {
+                "power_min": -1500.0,
+                "power_max": 3200.0,
+                "current_l1_max": 12.5,
+                "voltage_ln_min": 228.4,
+                # unset extrema report None and must be skipped
+                "voltage_ll_l3_min": None,
+            }
+
+    diagnostics.set_daily_extrema_source(_FakeExtrema())
+
+    with patch.dict("sys.modules", {"uptime": SimpleNamespace(uptime=lambda: 1)}):
+        _, payload = diagnostics.mqtt_data()
+    payload_obj = json.loads(payload)
+
+    # Payload keys are the sensor safe_names. System power keeps its legacy
+    # keys; the rest are namespaced under "daily_".
+    assert payload_obj["min_power_w"] == -1500.0
+    assert payload_obj["max_power_w"] == 3200.0
+    assert payload_obj["daily_current_l1_max"] == 12.5
+    assert payload_obj["daily_voltage_l_n_min"] == 228.4
+
+
+def test_daily_extrema_source_absent_does_not_error():
+    diagnostics = HADiagnostics(topic_prefix="test")
+
+    with patch.dict("sys.modules", {"uptime": SimpleNamespace(uptime=lambda: 1)}):
+        # No source registered; mqtt_data must still succeed.
+        _, payload = diagnostics.mqtt_data()
+
+    assert json.loads(payload) is not None

@@ -51,13 +51,9 @@ services:
       options:
         max-size: 10m
         max-file: 3
-    # Healthcheck with process monitoring (Docker will restart if unhealthy)
-    healthcheck:
-      test: ps aux | grep -v grep | grep -q 'python -m app' || exit 1
-      interval: 30s
-      timeout: 5s
-      retries: 3
-      start_period: 10s
+    # No healthcheck: a process-liveness probe is misleading and a functional
+    # probe that spawns a process each interval starves the 10Hz tick loop on a
+    # single-CPU host. Health is observed out-of-band via MQTT diagnostics.
     # Explicitly run the bridge at high process priority inside the container.
     # This requires SYS_NICE + appropriate ulimits above.
     command:

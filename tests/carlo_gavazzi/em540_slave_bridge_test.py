@@ -32,6 +32,7 @@ class TestEm540Slave(unittest.TestCase):
             tcp_port=5021,
             slave_id=1,
             update_timeout=5.0,
+            serial_idle_timeout=5.0,
             log_level="WARNING",
             serial=SimpleNamespace(
                 enabled=False,
@@ -123,8 +124,9 @@ class TestEm540Slave(unittest.TestCase):
             mock_server_cls.side_effect = [rtu_mock, tcp_mock]
             mock_serial_server_cls.return_value = serial_mock
             slave = Em540Slave(config, frame)
+            serial_server = slave._build_serial_server()
 
-        self.assertIs(slave._serial_server.context, slave._rtu_server.context)
+        self.assertIs(serial_server.context, slave._rtu_server.context)
 
     # --- Requirement 12.4: REG_OFFSET is 0 ---
 
@@ -306,6 +308,26 @@ class TestEm540Slave(unittest.TestCase):
         asyncio.run(slave.new_data(meter_data))
 
         self.assertTrue(slave._stats.circuit_breaker_open)
+
+    def test_disabled_serial_does_not_evaluate_activity_or_crash_on_bad_timeout(self):
+        # serial_idle_timeout is only validated when serial is enabled, so a
+        # disabled bridge may carry an unvalidated value. new_data()/_sync_pdu_stats()
+        # must not touch serial activity (which would raise TypeError) when serial
+        # is disabled.
+        frame = Em540Frame()
+        slave, _ = self._build_slave(frame)
+        slave._config.serial.enabled = False
+        slave._config.serial_idle_timeout = None  # unvalidated, would break comparison
+
+        meter_data = MeterData()
+        meter_data._timestamp = 123.0
+
+        # Must not raise.
+        asyncio.run(slave.new_data(meter_data))
+
+        # Serial activity was never evaluated: still inactive with zero counters.
+        self.assertFalse(slave._stats.serial.active)
+        self.assertEqual(slave._stats.serial.connect_count, 0)
 
     def test_new_data_closes_circuit_once_static_sync_completed(self):
         frame = Em540Frame()

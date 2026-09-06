@@ -42,6 +42,10 @@ em540_slave:
   slave_id: 1
   # Timeout for client requests
   update_timeout: 0.5
+  # Seconds of serial-request inactivity after which a downstream serial client
+  # is reported as disconnected (serial has no transport disconnect event, so
+  # client presence is inferred from recent request activity).
+  serial_idle_timeout: 5.0
   # Log level info for this component
   log_level: INFO
   # Optional Modbus/RTU serial adapter (disabled by default)
@@ -65,6 +69,10 @@ ts65a_slave:
   slave_id: 1
   # Timeout for client requests
   update_timeout: 0.5
+  # Seconds of serial-request inactivity after which a downstream serial client
+  # is reported as disconnected (serial has no transport disconnect event, so
+  # client presence is inferred from recent request activity).
+  serial_idle_timeout: 5.0
   # Grid feed-in hard limit in Watts (negative value). This is used to track when we are over this limit
   grid_feed_in_hard_limit: -5000
   # Number of points to use for smoothing the power values when checking against the hard limit

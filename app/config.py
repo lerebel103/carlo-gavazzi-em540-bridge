@@ -8,11 +8,13 @@ dataclasses and handles validation and persistence.
 from __future__ import annotations
 
 import logging
+import math
 import threading
 import time
 from dataclasses import dataclass, field, is_dataclass
 from pathlib import Path
 
+import serial
 import yaml
 
 logger = logging.getLogger(__name__)
@@ -69,6 +71,9 @@ class Em540SlaveConfig:
     tcp_port: int = 5001
     slave_id: int = 1
     update_timeout: float = 0.5
+    # Seconds of serial-request inactivity after which a downstream serial client
+    # is considered disconnected (serial has no transport disconnect event).
+    serial_idle_timeout: float = 5.0
     log_level: str = "INFO"
     serial: SlaveSerialConfig = field(default_factory=SlaveSerialConfig)
 
@@ -79,6 +84,9 @@ class Ts65aSlaveConfig:
     port: int = 5003
     slave_id: int = 1
     update_timeout: float = 0.5
+    # Seconds of serial-request inactivity after which a downstream serial client
+    # is considered disconnected (serial has no transport disconnect event).
+    serial_idle_timeout: float = 5.0
     grid_feed_in_hard_limit: float = -5000.0
     smoothing_num_points: int = 20
     log_level: str = "INFO"
@@ -265,6 +273,17 @@ class ConfigManager:
         self._validate_serial_config("em540_slave.serial", state.em540_slave.serial)
         self._validate_serial_config("ts65a_slave.serial", state.ts65a_slave.serial)
 
+        # 4b. serial device reachability — fail hard on startup rather than
+        # silently retrying/looping forever with a misconfigured port.
+        if state.em540_master.mode == "serial":
+            self._check_serial_device_reachable("em540_master.serial_port", state.em540_master.serial_port)
+        if state.em540_slave.serial.enabled:
+            self._check_serial_device_reachable("em540_slave.serial.port", state.em540_slave.serial.port)
+            self._validate_serial_idle_timeout("em540_slave.serial_idle_timeout", state.em540_slave.serial_idle_timeout)
+        if state.ts65a_slave.serial.enabled:
+            self._check_serial_device_reachable("ts65a_slave.serial.port", state.ts65a_slave.serial.port)
+            self._validate_serial_idle_timeout("ts65a_slave.serial_idle_timeout", state.ts65a_slave.serial_idle_timeout)
+
         # 5. grid_feed_in_hard_limit  (<= 0)
         if state.ts65a_slave.grid_feed_in_hard_limit > 0:
             raise ConfigError(
@@ -292,6 +311,22 @@ class ConfigManager:
             else:
                 setattr(target, key, value)
 
+    def _validate_serial_idle_timeout(self, name: str, value: float) -> None:
+        # A zero/negative idle window makes every serial request look immediately
+        # stale, so the serial-active/connect diagnostics would never register a
+        # client. Only meaningful (and only checked) when the serial adapter is enabled.
+        #
+        # Guard the type before comparing: a YAML string or None would raise an
+        # uncaught TypeError at `value <= 0` (bypassing main()'s fail-fast path),
+        # and NaN/inf would silently pass the comparison and permanently break the
+        # activity diagnostics. bool is rejected explicitly (it is an int subclass).
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ConfigError(f"{name} must be a number when serial is enabled, got {value!r}")
+        if not math.isfinite(value):
+            raise ConfigError(f"{name} must be finite when serial is enabled, got {value}")
+        if value <= 0:
+            raise ConfigError(f"{name} must be > 0 when serial is enabled, got {value}")
+
     def _validate_serial_config(self, name: str, serial: SlaveSerialConfig) -> None:
         if not serial.enabled:
             return
@@ -308,6 +343,32 @@ class ConfigManager:
             raise ConfigError(f"{name}.stopbits must be one of (1, 1.5, 2), got {serial.stopbits}")
         if serial.timeout <= 0:
             raise ConfigError(f"{name}.timeout must be > 0, got {serial.timeout}")
+
+    def _check_serial_device_reachable(self, name: str, port: str) -> None:
+        """Verify a configured serial device path can actually be opened.
+
+        Catches the common misconfiguration case (wrong/missing device path)
+        at startup instead of letting the master/slave silently retry forever
+        or letting a downstream slave bind fail without a clear diagnosis.
+        Opens and immediately closes the port. This only avoids issuing any
+        Modbus I/O; it is not otherwise side-effect free — opening the device
+        may apply default line settings via the OS/driver. Baud/parity/etc are
+        validated independently and a bad combination there would not prevent
+        the open() call from succeeding.
+        """
+        try:
+            probe = serial.Serial()
+            probe.port = port
+            probe.open()
+            probe.close()
+        except serial.SerialException as exc:
+            raise ConfigError(f"{name} '{port}' could not be opened: {exc}") from exc
+        except (ValueError, TypeError) as exc:
+            # pyserial's port setter raises ValueError/TypeError for malformed
+            # non-string values (e.g. a YAML list/int). Normalize to ConfigError
+            # so it flows through main()'s fail-fast startup handler instead of
+            # escaping as an unhandled traceback.
+            raise ConfigError(f"{name} '{port}' is not a valid serial device path: {exc}") from exc
 
     # -- persistence ---------------------------------------------------------
 

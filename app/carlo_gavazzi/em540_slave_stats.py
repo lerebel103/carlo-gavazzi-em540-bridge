@@ -1,6 +1,8 @@
 import logging
 from typing import Callable
 
+from app.utils.serial_activity import SerialActivityTracker
+
 _logger = logging.getLogger(__name__)
 
 
@@ -11,6 +13,11 @@ class EM540SlaveStats:
 
         self.tcp_client_count: int = 0
         self.tcp_client_disconnect_count: int = 0
+
+        # Serial (RTU-over-physical-port) activity. Serial has no transport
+        # connect/disconnect events, so presence is inferred from recent request
+        # activity. See SerialActivityTracker.
+        self.serial = SerialActivityTracker()
 
         self.circuit_breaker_open: bool = True
         self.circuit_breaker_open_count: int = 0

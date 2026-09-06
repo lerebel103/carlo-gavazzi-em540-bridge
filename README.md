@@ -148,44 +148,62 @@ The following measurement sensors are published to Home Assistant and refreshed 
 | Apparent Energy kvah   | kVAh  | energy         | total_increasing | 2         |
 | Run Hours              | h     | duration       | total_increasing | 1         |
 
-The following diagnostic sensors are also published (entity category: `diagnostic`):
+The following diagnostic sensors are also published (entity category: `diagnostic`). Many are disabled
+by default in Home Assistant to reduce clutter; enable the ones you need from the device page. All
+state classes are `measurement`.
 
-| Sensor Name                        | Unit | Device Class | State Class | Precision |
-|------------------------------------|------|--------------|-------------|-----------|
-| Sys Uptime                         | s    | duration     | measurement | 0         |
-| Bridge Uptime                      | s    | duration     | measurement | 0         |
-| Acq Rate                           | Hz   | frequency    | measurement | 2         |
-| MQTT Data Update Rate              | Hz   | frequency    | measurement | 2         |
-| RS485 Master Read Failures         |      |              | measurement | 0         |
-| RS485 Consumer Missed Updates      |      |              | measurement | 0         |
-| RS485 Consumer Max Seq Gap         |      |              | measurement | 0         |
-| Acq Dur Min                        | ms   | duration     | measurement | 2         |
-| Acq Dur Max                        | ms   | duration     | measurement | 2         |
-| Acq Dur Mean                       | ms   | duration     | measurement | 2         |
-| Acq Headroom Min                   | ms   | duration     | measurement | 2         |
-| Acq Headroom Max                   | ms   | duration     | measurement | 2         |
-| Acq Headroom Mean                  | ms   | duration     | measurement | 2         |
-| Tick Overruns                      |      |              | measurement | 0         |
-| Min Power W                        | W    | power        | measurement | 1         |
-| Max Power W                        | W    | power        | measurement | 1         |
-| EM540 RTU Client Count             |      |              | measurement | 0         |
-| EM540 RTU Client Disconnect Count  |      |              | measurement | 0         |
-| EM540 Circuit Breaker Open         |      |              | measurement | 0         |
-| EM540 Circuit Breaker Open Count   |      |              | measurement | 0         |
-| EM540 Stale Data Age               | ms   | duration     | measurement | 1         |
-| EM540 Dropped Stale Requests       |      |              | measurement | 0         |
-| TS65A TCP Client Count             |      |              | measurement | 0         |
-| TS65A TCP Client Disconnect Count  |      |              | measurement | 0         |
-| Overfeed Limit Count               |      |              | measurement | 0         |
-| Overfeed Limit Max Duration        | ms   | duration     | measurement | 2         |
-| TS65A Circuit Breaker Open         |      |              | measurement | 0         |
-| TS65A Circuit Breaker Open Count   |      |              | measurement | 0         |
-| TS65A Stale Data Age               | ms   | duration     | measurement | 1         |
-| TS65A Dropped Stale Requests       |      |              | measurement | 0         |
+| Sensor Name                       | Unit | Device Class | Precision | Enabled by default |
+|-----------------------------------|------|--------------|-----------|--------------------|
+| Sys Uptime                        | s    | duration     | 0         | yes                |
+| Bridge Uptime                     | s    | duration     | 0         | yes                |
+| Acq Rate                          | Hz   | frequency    | 2         | yes                |
+| MQTT Data Update Rate             | Hz   | frequency    | 2         | no                 |
+| RS485 Master Read Failures        |      |              | 0         | no                 |
+| RS485 Consumer Missed Updates     |      |              | 0         | no                 |
+| RS485 Consumer Max Seq Gap        |      |              | 0         | no                 |
+| Acq Dur Min                       | ms   | duration     | 2         | no                 |
+| Acq Dur Max                       | ms   | duration     | 2         | no                 |
+| Acq Dur Mean                      | ms   | duration     | 2         | no                 |
+| Acq Headroom Min                  | ms   | duration     | 2         | no                 |
+| Acq Headroom Max                  | ms   | duration     | 2         | no                 |
+| Acq Headroom Mean                 | ms   | duration     | 2         | no                 |
+| Tick Overruns                     |      |              | 0         | yes                |
+| EM540 TCP Clients                 |      |              | 0         | yes                |
+| EM540 TCP Disconnects             |      |              | 0         | yes                |
+| EM540 TCP (RTU) Clients           |      |              | 0         | yes                |
+| EM540 TCP (RTU) Disconnects       |      |              | 0         | yes                |
+| EM540 Serial Active               |      |              | 0         | yes                |
+| EM540 Serial Connects             |      |              | 0         | yes                |
+| EM540 Serial Disconnects          |      |              | 0         | yes                |
+| EM540 Circuit Breaker Open        |      |              | 0         | no                 |
+| EM540 Circuit Breaker Open Count  |      |              | 0         | no                 |
+| EM540 Stale Data Age              | ms   | duration     | 1         | yes                |
+| EM540 Dropped Stale Requests      |      |              | 0         | yes                |
+| TS65A TCP Clients                 |      |              | 0         | yes                |
+| TS65A TCP Disconnects             |      |              | 0         | yes                |
+| TS65A Serial Active               |      |              | 0         | yes                |
+| TS65A Serial Connects             |      |              | 0         | yes                |
+| TS65A Serial Disconnects          |      |              | 0         | yes                |
+| Overfeed Limit Count              |      |              | 0         | yes                |
+| Overfeed Limit Max Duration       | ms   | duration     | 2         | yes                |
+| TS65A Circuit Breaker Open        |      |              | 0         | no                 |
+| TS65A Circuit Breaker Open Count  |      |              | 0         | no                 |
+| TS65A Stale Data Age              | ms   | duration     | 1         | yes                |
+| TS65A Dropped Stale Requests      |      |              | 0         | no                 |
 
-## Home Assistant Diagnostics Screenshot
+Transport diagnostics distinguish the downstream channels each bridge can serve:
 
-<img src="media/HA%20Diagnostics.jpg" alt="Home Assistant diagnostics" width="420" />
+- **TCP** — standard Modbus/TCP.
+- **TCP (RTU)** — RTU framing over a TCP socket (EM540 bridge only).
+- **Serial** — Modbus/RTU over a physical serial adapter. A serial line has no transport
+  connect/disconnect event, so `Serial Active` (1/0), `Serial Connects`, and `Serial Disconnects`
+  are inferred from request activity: a client is considered connected while requests arrive within
+  `serial_idle_timeout` seconds, and the connect/disconnect counters increment on the activity edges.
+
+In addition, per-quantity **daily min/max extrema** are published for Power, Current, Voltage L-N,
+and Voltage L-L, at both system and per-phase (L1/L2/L3) scope (for example `Daily Power Min`,
+`Daily Voltage L-N L2 Max`). These are evaluated on every upstream frame at the master and reset at
+local midnight. All daily extrema sensors are disabled by default.
 
 ## References
 

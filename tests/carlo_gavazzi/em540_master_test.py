@@ -108,6 +108,72 @@ class TestEm540Master(unittest.TestCase):
         listener.read_failed.assert_awaited_once()
 
     # -----------------------------------------------------------------------
+    # Read-failure counter: every failure mode increments read_failed_total
+    # -----------------------------------------------------------------------
+    def test_disconnected_increments_read_failed_total(self):
+        """A disconnected tick counts as a read failure."""
+        type(self.mock_client).connected = PropertyMock(return_value=False)
+
+        self.assertEqual(self.master._stats.read_failed_total, 0)
+        asyncio.run(self.master.acquire_data())
+        self.assertEqual(self.master._stats.read_failed_total, 1)
+
+    def test_primary_error_response_increments_read_failed_total(self):
+        """A primary block Modbus error response counts as a read failure."""
+        type(self.mock_client).connected = PropertyMock(return_value=True)
+
+        error_result = MagicMock()
+        error_result.isError.return_value = True
+        self.mock_client.read_holding_registers = AsyncMock(return_value=error_result)
+
+        asyncio.run(self.master.acquire_data())
+        self.assertEqual(self.master._stats.read_failed_total, 1)
+
+    def test_primary_io_exception_increments_read_failed_total(self):
+        """A primary block ModbusIOException counts as a read failure."""
+        type(self.mock_client).connected = PropertyMock(return_value=True)
+        self.mock_client.read_holding_registers = AsyncMock(side_effect=ModbusIOException("no response"))
+
+        asyncio.run(self.master.acquire_data())
+        self.assertEqual(self.master._stats.read_failed_total, 1)
+
+    def test_energy_chunk_failure_increments_read_failed_total_without_aborting_tick(self):
+        """An energy chunk read failure is counted but does NOT fail the tick.
+
+        The primary block read succeeds and publishes; only the energy chunk fails.
+        The read-failure counter must still increment, and listeners must NOT be
+        told read_failed (which would flap their circuit breakers on a partial miss).
+        """
+        type(self.mock_client).connected = PropertyMock(return_value=True)
+
+        primary_reg = self.master._back_data.frame.dynamic_reg_map[0x0000]
+        primary_count = len(primary_reg.values)
+
+        # First tick reads primary (success) then energy chunk 0 (error).
+        good_primary = MagicMock()
+        good_primary.isError.return_value = False
+        good_primary.registers = [0] * primary_count
+
+        energy_error = MagicMock()
+        energy_error.isError.return_value = True
+
+        self.mock_client.read_holding_registers = AsyncMock(side_effect=[good_primary, energy_error])
+
+        listener = MagicMock(spec=MeterDataListener)
+        listener.new_data = AsyncMock()
+        listener.read_failed = AsyncMock()
+        self.master.add_listener(listener)
+
+        result = asyncio.run(self.master.acquire_data())
+
+        # Primary data was read successfully, so the tick succeeds.
+        self.assertTrue(result)
+        # The energy chunk failure was still counted.
+        self.assertEqual(self.master._stats.read_failed_total, 1)
+        # Listeners are NOT told the read failed for an energy-only miss.
+        listener.read_failed.assert_not_awaited()
+
+    # -----------------------------------------------------------------------
     # Requirement 9.3: register count mismatch → os._exit(1)
     # -----------------------------------------------------------------------
     def test_register_count_mismatch_discards_and_returns_false(self):

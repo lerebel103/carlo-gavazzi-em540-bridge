@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import struct
+import time
 from threading import Event, Lock, Thread
 from typing import Callable
 
@@ -20,6 +21,13 @@ logger = logging.getLogger("ts65a-slave")
 
 # Holding register function code used for async_setValues.
 _FC_HOLDING_REGISTER = 3
+
+# A specific register the Fronius client polls that this proprietary TS65A
+# emulation does not otherwise implement. Returning ILLEGAL_DATA_ADDRESS for it
+# makes the client fault and disconnect, so we serve it as a zero-valued
+# compatibility register in the datastore (see _TS65A_STATIC_REGISTERS) and
+# observe/log reads of it via the PDU trace hook.
+_COMPAT_ZERO_REGISTER = 50000
 
 # Pre-compiled struct for FLOAT32 → 2 registers (big-endian)
 _STRUCT_FLOAT32 = struct.Struct(">f")
@@ -147,6 +155,11 @@ _TS65A_STATIC_REGISTERS: tuple[tuple[int, list[int]], ...] = (
     ),
     (40193, [0, 0]),  # Event
     (40195, [65535, 0]),  # End Block
+    # Compatibility register (see _COMPAT_ZERO_REGISTER). A Fronius client polls
+    # address 50000 (2 registers) which this proprietary TS65A layout does not
+    # otherwise define; serve it as zeros so the read succeeds instead of
+    # returning ILLEGAL_DATA_ADDRESS (which made the client fault/disconnect).
+    (50000, [0, 0]),
 )
 
 
@@ -172,7 +185,17 @@ class Ts65aSlaveBridge(MeterDataListener):
         self.host = config.host
         self.port: int = config.port
         self._slave_id: int = config.slave_id
-        self._pdu_helper = PduHelper(logger, lambda: self._config.update_timeout)
+        self._pdu_helper = PduHelper(
+            logger,
+            lambda: self._config.update_timeout,
+            served_device_ids={self._slave_id},
+            # Observe (and rate-limited log) reads of the compatibility register
+            # so its polling can be monitored, regardless of which client issues
+            # them. The register itself is served with zeros from the datastore
+            # (see _TS65A_STATIC_REGISTERS), so the read succeeds normally rather
+            # than returning ILLEGAL_DATA_ADDRESS.
+            log_read_addresses={_COMPAT_ZERO_REGISTER},
+        )
         self._stats = Ts65aSlaveStats()
         logger.setLevel(config.log_level)
 
@@ -193,27 +216,17 @@ class Ts65aSlaveBridge(MeterDataListener):
             trace_connect=self._trace_connect,
         )
         self._serial_server: ModbusSerialServer | None = None
-        if self._config.serial.enabled:
-            self._serial_server = ModbusSerialServer(
-                framer=FramerType.RTU,
-                context=device,
-                port=self._config.serial.port,
-                baudrate=self._config.serial.baudrate,
-                parity=self._config.serial.parity,
-                bytesize=self._config.serial.bytesize,
-                stopbits=self._config.serial.stopbits,
-                timeout=self._config.serial.timeout,
-                handle_local_echo=self._config.serial.handle_local_echo,
-                trace_pdu=self._pdu_helper.on_pdu,
-                trace_connect=self._serial_trace_connect,
-            )
-            self._serial_server.context = self._server.context
+        # ModbusSerialServer.__init__() calls asyncio.get_running_loop() and binds its
+        # transport to whatever loop is running at construction time. Building it here
+        # (on the main event loop, during process_loop() setup) would bind it to the
+        # wrong loop, since serve_forever() actually runs on the dedicated server loop
+        # created in start(). So construction is deferred to _run_server() below, which
+        # runs on that dedicated loop. self._device is retained for that purpose.
+        self._device = device
         self._dynamic_start_address: int = 40071
         self._dynamic_register_buffer: list[int] = [0] * (len(self._dynamic_values()) * 2)
         self._server_loop: asyncio.AbstractEventLoop | None = None
         self._servers: list[ModbusTcpServer | ModbusSerialServer] = [self._server]
-        if self._serial_server is not None:
-            self._servers.append(self._serial_server)
 
         # Direct access to the SimRuntime register array for lock-based writes.
         # This avoids routing writes through the server event loop (which caused
@@ -250,6 +263,42 @@ class Ts65aSlaveBridge(MeterDataListener):
         else:
             logger.info("Downstream TS65A serial client disconnected.")
 
+    def _serial_trace_pdu(self, flag, pdu):
+        """Serial trace hook: record request activity, then run shared PDU logic.
+
+        Serial has no transport connect/disconnect events, so downstream client
+        presence is inferred from request activity. ``flag`` is False for
+        incoming requests and True for outgoing responses; only incoming
+        requests count as client activity.
+        """
+        if not flag:
+            self._stats.serial.record_request(time.monotonic())
+        return self._pdu_helper.on_pdu(flag, pdu)
+
+    def _build_serial_server(self) -> ModbusSerialServer:
+        """Construct the downstream serial server.
+
+        Must be called from within the coroutine running on the dedicated
+        server event loop (see start()), since ModbusSerialServer.__init__()
+        calls asyncio.get_running_loop() and binds its transport to whatever
+        loop is running at construction time.
+        """
+        serial_server = ModbusSerialServer(
+            framer=FramerType.RTU,
+            context=self._device,
+            port=self._config.serial.port,
+            baudrate=self._config.serial.baudrate,
+            parity=self._config.serial.parity,
+            bytesize=self._config.serial.bytesize,
+            stopbits=self._config.serial.stopbits,
+            timeout=self._config.serial.timeout,
+            handle_local_echo=self._config.serial.handle_local_echo,
+            trace_pdu=self._serial_trace_pdu,
+            trace_connect=self._serial_trace_connect,
+        )
+        serial_server.context = self._server.context
+        return serial_server
+
     def add_stats_listener(self, listener: Callable[["Ts65aSlaveStats"], None]):
         self._stats.add_listener(listener)
 
@@ -264,6 +313,12 @@ class Ts65aSlaveBridge(MeterDataListener):
 
         async def _run_server():
             try:
+                if self._config.serial.enabled:
+                    # Constructed here (inside the coroutine that runs on the dedicated
+                    # server loop) so ModbusSerialServer's asyncio.get_running_loop()
+                    # call binds to the loop that actually runs serve_forever().
+                    self._serial_server = self._build_serial_server()
+                    self._servers.append(self._serial_server)
                 for server in self._servers:
                     await server.serve_forever(background=True)
                 self._reaper.start(self._server_loop)
@@ -306,6 +361,12 @@ class Ts65aSlaveBridge(MeterDataListener):
         self._stats.circuit_breaker_open = self._pdu_helper.circuit_open
         self._stats.circuit_breaker_open_count = self._pdu_helper.circuit_open_count
         self._stats.dropped_stale_request_count = self._pdu_helper.dropped_request_count
+        # Only evaluate serial activity when the serial adapter is enabled.
+        # serial_idle_timeout is only validated when serial is enabled, so a
+        # disabled bridge may carry an unvalidated value (null/string) that would
+        # raise TypeError here and break listener processing every tick.
+        if self._config.serial.enabled:
+            self._stats.serial.evaluate(self._config.serial_idle_timeout, time.monotonic())
         self._stats.changed()
 
     def _dynamic_values(self) -> tuple[float, ...]:

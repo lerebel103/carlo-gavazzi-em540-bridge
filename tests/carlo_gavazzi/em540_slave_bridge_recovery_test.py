@@ -41,6 +41,7 @@ def _make_config(tcp_port: int, rtu_port: int):
         tcp_port=tcp_port,
         slave_id=1,
         update_timeout=0.5,  # Match production config
+        serial_idle_timeout=5.0,
         log_level="DEBUG",
         serial=SimpleNamespace(
             enabled=False,

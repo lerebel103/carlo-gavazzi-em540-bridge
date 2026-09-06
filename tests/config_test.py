@@ -24,6 +24,23 @@ from app.config import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _skip_serial_device_reachability_check(request):
+    """Unit tests don't have real serial hardware attached.
+
+    ConfigManager._validate() probes configured serial device paths by
+    opening them. Patch that check out for tests that aren't specifically
+    exercising it, so tests can use placeholder paths like /dev/ttyUSB0.
+    Tests marked with @pytest.mark.real_serial_check exercise the real
+    implementation instead.
+    """
+    if "real_serial_check" in request.keywords:
+        yield
+        return
+    with patch.object(ConfigManager, "_check_serial_device_reachable"):
+        yield
+
+
 @pytest.fixture()
 def valid_yaml(tmp_path):
     """Return path to a minimal valid config file."""
@@ -391,11 +408,110 @@ def test_invalid_serial_parity_raises(tmp_path, section):
 
 
 @pytest.mark.parametrize("section", ["em540_slave", "ts65a_slave"])
+@pytest.mark.parametrize("value", [0, -1, -0.5])
+def test_non_positive_serial_idle_timeout_raises_when_serial_enabled(tmp_path, section, value):
+    path = _make_config(
+        tmp_path,
+        {f"{section}.serial.enabled": True, f"{section}.serial_idle_timeout": value},
+    )
+    with pytest.raises(ConfigError, match="serial_idle_timeout"):
+        ConfigManager(path).load()
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "5.0",  # string
+        None,  # missing/null
+        True,  # bool (int subclass) must be rejected
+        float("nan"),  # non-finite
+        float("inf"),  # non-finite
+    ],
+)
+def test_malformed_serial_idle_timeout_normalized_to_config_error(value):
+    """Non-numeric, boolean, or non-finite idle timeouts must raise ConfigError
+    (not an uncaught TypeError, and not silently accepted)."""
+    cm = ConfigManager("/unused.yaml")
+    with pytest.raises(ConfigError, match="serial_idle_timeout"):
+        cm._validate_serial_idle_timeout("em540_slave.serial_idle_timeout", value)
+
+
+@pytest.mark.parametrize("section", ["em540_slave", "ts65a_slave"])
+def test_non_positive_serial_idle_timeout_ignored_when_serial_disabled(tmp_path, section):
+    # The idle timeout is only meaningful when the serial adapter is enabled, so
+    # a zero value with serial disabled must not raise.
+    path = _make_config(
+        tmp_path,
+        {f"{section}.serial.enabled": False, f"{section}.serial_idle_timeout": 0},
+    )
+    state = ConfigManager(path).load()
+    assert getattr(state, section).serial_idle_timeout == 0
+
+
+@pytest.mark.parametrize("section", ["em540_slave", "ts65a_slave"])
 @pytest.mark.parametrize("value", [None, "invalid", 1])
 def test_nested_serial_config_must_be_mapping(tmp_path, section, value):
     path = _make_config(tmp_path, {f"{section}.serial": value})
     with pytest.raises(ConfigError, match=rf"{section}\.serial must be a mapping"):
         ConfigManager(path).load()
+
+
+# -- serial device reachability --
+#
+# These tests exercise the real _check_serial_device_reachable() implementation
+# (rather than the autouse patched stub) against actual pyserial failures, so
+# they don't need real hardware but do need the check itself to run.
+
+
+@pytest.mark.real_serial_check
+def test_unreachable_master_serial_port_raises(tmp_path):
+    path = _make_config(tmp_path, {"em540_master.mode": "serial", "em540_master.serial_port": "/dev/ttyDOESNOTEXIST99"})
+    with pytest.raises(ConfigError, match="em540_master.serial_port"):
+        ConfigManager(path).load()
+
+
+@pytest.mark.real_serial_check
+@pytest.mark.parametrize("bad_port", [123, ["/dev/ttyUSB0"], {"port": "x"}])
+def test_malformed_serial_port_normalized_to_config_error(bad_port):
+    """pyserial raises ValueError/TypeError for non-string ports; the reachability
+    probe must normalize those to ConfigError so main()'s fail-fast handler catches them."""
+    cm = ConfigManager("/unused.yaml")
+    with pytest.raises(ConfigError, match="valid serial device path"):
+        cm._check_serial_device_reachable("em540_slave.serial.port", bad_port)
+
+
+@pytest.mark.real_serial_check
+@pytest.mark.parametrize("section", ["em540_slave", "ts65a_slave"])
+def test_unreachable_downstream_serial_port_raises(tmp_path, section):
+    path = _make_config(
+        tmp_path,
+        {f"{section}.serial.enabled": True, f"{section}.serial.port": "/dev/ttyDOESNOTEXIST99"},
+    )
+    with pytest.raises(ConfigError, match=f"{section}\\.serial\\.port"):
+        ConfigManager(path).load()
+
+
+@pytest.mark.real_serial_check
+def test_master_serial_check_skipped_when_mode_is_tcp(tmp_path):
+    """The master's serial_port should not be probed at all when mode is 'tcp'."""
+    path = _make_config(
+        tmp_path,
+        {"em540_master.mode": "tcp", "em540_master.serial_port": "/dev/ttyDOESNOTEXIST99"},
+    )
+    state = ConfigManager(path).load()
+    assert state.em540_master.mode == "tcp"
+
+
+@pytest.mark.real_serial_check
+@pytest.mark.parametrize("section", ["em540_slave", "ts65a_slave"])
+def test_downstream_serial_check_skipped_when_disabled(tmp_path, section):
+    """A disabled downstream serial adapter should not be probed."""
+    path = _make_config(
+        tmp_path,
+        {f"{section}.serial.enabled": False, f"{section}.serial.port": "/dev/ttyDOESNOTEXIST99"},
+    )
+    state = ConfigManager(path).load()
+    assert getattr(state, section).serial.enabled is False
 
 
 # -- pymodbus / root log_level validation --

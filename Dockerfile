@@ -49,9 +49,10 @@ RUN chown -R lerebel103:lerebel103 /app
 # Expose Modbus and emulation ports
 EXPOSE 5001 5002 5003
 
-# Define healthcheck: ensure app process is running
-HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-  CMD ps aux | grep -v grep | grep -q 'python -m app' || exit 1
+# No container HEALTHCHECK: a process-liveness check is misleading (the process
+# can be alive but not serving fresh data), and a functional check that spawns a
+# process every interval starves the latency-sensitive 10Hz tick loop on a
+# single-CPU host. Monitoring is handled out-of-band via MQTT diagnostics.
 
 # Switch to non-root user
 USER lerebel103

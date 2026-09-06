@@ -95,6 +95,14 @@ class TestHABridge(unittest.TestCase):
 
         mock_client.publish.assert_any_call(HA_AVAILABILITY_TOPIC, "offline", retain=True)
 
+    def test_set_daily_extrema_source_forwards_to_diagnostics(self):
+        self.bridge._diagnostics.set_daily_extrema_source = MagicMock()
+        source = MagicMock()
+
+        self.bridge.set_daily_extrema_source(source)
+
+        self.bridge._diagnostics.set_daily_extrema_source.assert_called_once_with(source)
+
     def test_new_data_triggers_update(self):
         data = MeterData()
         data._timestamp = 100
