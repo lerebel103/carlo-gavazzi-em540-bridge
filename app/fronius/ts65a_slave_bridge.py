@@ -339,7 +339,12 @@ class Ts65aSlaveBridge(MeterDataListener):
         self._stats.circuit_breaker_open = self._pdu_helper.circuit_open
         self._stats.circuit_breaker_open_count = self._pdu_helper.circuit_open_count
         self._stats.dropped_stale_request_count = self._pdu_helper.dropped_request_count
-        self._stats.serial.evaluate(self._config.serial_idle_timeout, time.monotonic())
+        # Only evaluate serial activity when the serial adapter is enabled.
+        # serial_idle_timeout is only validated when serial is enabled, so a
+        # disabled bridge may carry an unvalidated value (null/string) that would
+        # raise TypeError here and break listener processing every tick.
+        if self._config.serial.enabled:
+            self._stats.serial.evaluate(self._config.serial_idle_timeout, time.monotonic())
         self._stats.changed()
 
     def _dynamic_values(self) -> tuple[float, ...]:

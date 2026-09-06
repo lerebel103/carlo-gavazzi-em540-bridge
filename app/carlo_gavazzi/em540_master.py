@@ -337,7 +337,9 @@ class Em540Master:
         # tick loop (the main loop is reserved for upstream reads). The loop only
         # formats the message and hands it to this bounded queue; a lazily-started
         # daemon worker performs the actual logger.debug() call off the loop.
-        self._diag_log_queue: queue.SimpleQueue[str] = queue.SimpleQueue()
+        # Bounded so a stalled/slow log handler cannot accumulate messages for the
+        # lifetime of this long-running service; the newest summary wins on Full.
+        self._diag_log_queue: queue.Queue[str] = queue.Queue(maxsize=1)
         self._diag_log_thread: Thread | None = None
 
         if config.mode == "serial":
@@ -903,7 +905,21 @@ class Em540Master:
                 name="em540-diag-log",
             )
             self._diag_log_thread.start()
-        self._diag_log_queue.put_nowait(message)
+
+        # Non-blocking, latest-wins: if the worker is behind (slow/stalled log
+        # handler), drop the stale pending summary and enqueue the newest one so
+        # the queue can never grow unbounded and the tick loop never blocks.
+        try:
+            self._diag_log_queue.put_nowait(message)
+        except queue.Full:
+            try:
+                self._diag_log_queue.get_nowait()
+            except queue.Empty:
+                pass
+            try:
+                self._diag_log_queue.put_nowait(message)
+            except queue.Full:
+                pass
 
     def _diagnostics_log_worker(self) -> None:
         while True:
