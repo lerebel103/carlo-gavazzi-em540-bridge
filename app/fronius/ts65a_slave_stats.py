@@ -2,6 +2,7 @@ import logging
 from typing import Callable
 
 from app.carlo_gavazzi.meter_data import MeterData
+from app.utils.serial_activity import SerialActivityTracker
 
 _logger = logging.getLogger(__name__)
 
@@ -15,6 +16,9 @@ class Ts65aSlaveStats:
 
         self.tcp_client_count: int = 0
         self.tcp_client_disconnect_count: int = 0
+
+        # Serial (RTU-over-physical-port) activity, inferred from request traffic.
+        self.serial = SerialActivityTracker()
 
         self.power_over_feed_in_limit_count: int = 0
         self.power_over_feed_limit_max_duration_sec: float = 0.0

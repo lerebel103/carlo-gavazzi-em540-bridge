@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import struct
+import time
 from threading import Event, Lock, Thread
 from typing import Callable
 
@@ -240,6 +241,18 @@ class Ts65aSlaveBridge(MeterDataListener):
         else:
             logger.info("Downstream TS65A serial client disconnected.")
 
+    def _serial_trace_pdu(self, flag, pdu):
+        """Serial trace hook: record request activity, then run shared PDU logic.
+
+        Serial has no transport connect/disconnect events, so downstream client
+        presence is inferred from request activity. ``flag`` is False for
+        incoming requests and True for outgoing responses; only incoming
+        requests count as client activity.
+        """
+        if not flag:
+            self._stats.serial.record_request(time.monotonic())
+        return self._pdu_helper.on_pdu(flag, pdu)
+
     def _build_serial_server(self) -> ModbusSerialServer:
         """Construct the downstream serial server.
 
@@ -258,7 +271,7 @@ class Ts65aSlaveBridge(MeterDataListener):
             stopbits=self._config.serial.stopbits,
             timeout=self._config.serial.timeout,
             handle_local_echo=self._config.serial.handle_local_echo,
-            trace_pdu=self._pdu_helper.on_pdu,
+            trace_pdu=self._serial_trace_pdu,
             trace_connect=self._serial_trace_connect,
         )
         serial_server.context = self._server.context
@@ -326,6 +339,7 @@ class Ts65aSlaveBridge(MeterDataListener):
         self._stats.circuit_breaker_open = self._pdu_helper.circuit_open
         self._stats.circuit_breaker_open_count = self._pdu_helper.circuit_open_count
         self._stats.dropped_stale_request_count = self._pdu_helper.dropped_request_count
+        self._stats.serial.evaluate(self._config.serial_idle_timeout, time.monotonic())
         self._stats.changed()
 
     def _dynamic_values(self) -> tuple[float, ...]:

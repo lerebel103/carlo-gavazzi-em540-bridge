@@ -70,6 +70,9 @@ class Em540SlaveConfig:
     tcp_port: int = 5001
     slave_id: int = 1
     update_timeout: float = 0.5
+    # Seconds of serial-request inactivity after which a downstream serial client
+    # is considered disconnected (serial has no transport disconnect event).
+    serial_idle_timeout: float = 5.0
     log_level: str = "INFO"
     serial: SlaveSerialConfig = field(default_factory=SlaveSerialConfig)
 
@@ -80,6 +83,9 @@ class Ts65aSlaveConfig:
     port: int = 5003
     slave_id: int = 1
     update_timeout: float = 0.5
+    # Seconds of serial-request inactivity after which a downstream serial client
+    # is considered disconnected (serial has no transport disconnect event).
+    serial_idle_timeout: float = 5.0
     grid_feed_in_hard_limit: float = -5000.0
     smoothing_num_points: int = 20
     log_level: str = "INFO"

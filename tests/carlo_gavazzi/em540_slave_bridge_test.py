@@ -32,6 +32,7 @@ class TestEm540Slave(unittest.TestCase):
             tcp_port=5021,
             slave_id=1,
             update_timeout=5.0,
+            serial_idle_timeout=5.0,
             log_level="WARNING",
             serial=SimpleNamespace(
                 enabled=False,

@@ -30,6 +30,55 @@ def test_em540_tcp_client_stats_are_published_in_diagnostics_payload():
     assert payload_obj["em540_tcp_client_disconnect_count"] == 11
 
 
+def test_serial_activity_stats_are_published_for_both_bridges():
+    from app.fronius.ts65a_slave_stats import Ts65aSlaveStats
+
+    diagnostics = HADiagnostics(topic_prefix="test")
+
+    em_stats = EM540SlaveStats()
+    em_stats.serial.record_request(now=100.0)
+    em_stats.serial.evaluate(idle_timeout=5.0, now=101.0)  # active, connect=1
+    diagnostics.set_em540_slave_stats(em_stats)
+
+    ts_stats = Ts65aSlaveStats()
+    ts_stats.serial.record_request(now=100.0)
+    ts_stats.serial.evaluate(idle_timeout=5.0, now=101.0)
+    ts_stats.serial.evaluate(idle_timeout=5.0, now=200.0)  # idle -> disconnect=1
+    diagnostics.set_ts_65a_slave_stats(ts_stats)
+
+    with patch.dict("sys.modules", {"uptime": SimpleNamespace(uptime=lambda: 1)}):
+        _, payload = diagnostics.mqtt_data()
+    payload_obj = json.loads(payload)
+
+    assert payload_obj["em540_serial_client_active"] == 1
+    assert payload_obj["em540_serial_connect_count"] == 1
+    assert payload_obj["em540_serial_disconnect_count"] == 0
+
+    assert payload_obj["ts65a_serial_client_active"] == 0
+    assert payload_obj["ts65a_serial_connect_count"] == 1
+    assert payload_obj["ts65a_serial_disconnect_count"] == 1
+
+
+def test_transport_display_names_distinguish_tcp_rtu_and_serial():
+    diagnostics = HADiagnostics(topic_prefix="test")
+
+    payloads = {topic: json.loads(payload) for topic, payload in diagnostics.advertise_data()}
+
+    # Existing entity keys stay stable; only display names change for clarity.
+    assert payloads["homeassistant/sensor/em540_bridge_test_em540_rtu_client_count/config"]["name"] == (
+        "EM540 TCP (RTU) Clients"
+    )
+    assert payloads["homeassistant/sensor/em540_bridge_test_em540_tcp_client_count/config"]["name"] == (
+        "EM540 TCP Clients"
+    )
+    assert payloads["homeassistant/sensor/em540_bridge_test_em540_serial_client_active/config"]["name"] == (
+        "EM540 Serial Active"
+    )
+    assert payloads["homeassistant/sensor/em540_bridge_test_ts65a_serial_disconnect_count/config"]["name"] == (
+        "TS65A Serial Disconnects"
+    )
+
+
 def test_read_failed_count_is_published_from_master_stats():
     diagnostics = HADiagnostics(topic_prefix="test")
 
@@ -145,10 +194,16 @@ def test_only_selected_diagnostics_are_enabled_by_default():
         "em540_rtu_client_disconnect_count",
         "em540_tcp_client_count",
         "em540_tcp_client_disconnect_count",
+        "em540_serial_client_active",
+        "em540_serial_connect_count",
+        "em540_serial_disconnect_count",
         "em540_stale_data_age",
         "em540_dropped_stale_requests",
         "ts65a_tcp_client_count",
         "ts65a_tcp_client_disconnect_count",
+        "ts65a_serial_client_active",
+        "ts65a_serial_connect_count",
+        "ts65a_serial_disconnect_count",
         "overfeed_limit_count",
         "overfeed_limit_max_duration",
         "ts65a_stale_data_age",

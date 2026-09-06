@@ -196,6 +196,7 @@ class HADiagnostics:
             precision=0,
             entity_category="diagnostic",
             enabled_by_default=True,
+            display_name="TS65A TCP Clients",
         )
         self.ts65a_tcp_client_disconnect_count = Sensor(
             "TS65A TCP Client Disconnect Count",
@@ -206,6 +207,40 @@ class HADiagnostics:
             precision=0,
             entity_category="diagnostic",
             enabled_by_default=True,
+            display_name="TS65A TCP Disconnects",
+        )
+        self.ts65a_serial_client_active = Sensor(
+            "TS65A Serial Client Active",
+            None,
+            None,
+            "measurement",
+            self.state_topic,
+            precision=0,
+            entity_category="diagnostic",
+            enabled_by_default=True,
+            display_name="TS65A Serial Active",
+        )
+        self.ts65a_serial_connect_count = Sensor(
+            "TS65A Serial Connect Count",
+            None,
+            None,
+            "measurement",
+            self.state_topic,
+            precision=0,
+            entity_category="diagnostic",
+            enabled_by_default=True,
+            display_name="TS65A Serial Connects",
+        )
+        self.ts65a_serial_disconnect_count = Sensor(
+            "TS65A Serial Disconnect Count",
+            None,
+            None,
+            "measurement",
+            self.state_topic,
+            precision=0,
+            entity_category="diagnostic",
+            enabled_by_default=True,
+            display_name="TS65A Serial Disconnects",
         )
         self.ts65a_power_over_feed_in_limit_count = Sensor(
             "Overfeed Limit Count",
@@ -277,6 +312,7 @@ class HADiagnostics:
             precision=0,
             entity_category="diagnostic",
             enabled_by_default=True,
+            display_name="EM540 TCP (RTU) Clients",
         )
         self.em540_rtu_client_disconnect_count = Sensor(
             "EM540 RTU Client Disconnect Count",
@@ -287,6 +323,7 @@ class HADiagnostics:
             precision=0,
             entity_category="diagnostic",
             enabled_by_default=True,
+            display_name="EM540 TCP (RTU) Disconnects",
         )
         self.em540_tcp_client_count = Sensor(
             "EM540 TCP Client Count",
@@ -297,6 +334,7 @@ class HADiagnostics:
             precision=0,
             entity_category="diagnostic",
             enabled_by_default=True,
+            display_name="EM540 TCP Clients",
         )
         self.em540_tcp_client_disconnect_count = Sensor(
             "EM540 TCP Client Disconnect Count",
@@ -307,6 +345,40 @@ class HADiagnostics:
             precision=0,
             entity_category="diagnostic",
             enabled_by_default=True,
+            display_name="EM540 TCP Disconnects",
+        )
+        self.em540_serial_client_active = Sensor(
+            "EM540 Serial Client Active",
+            None,
+            None,
+            "measurement",
+            self.state_topic,
+            precision=0,
+            entity_category="diagnostic",
+            enabled_by_default=True,
+            display_name="EM540 Serial Active",
+        )
+        self.em540_serial_connect_count = Sensor(
+            "EM540 Serial Connect Count",
+            None,
+            None,
+            "measurement",
+            self.state_topic,
+            precision=0,
+            entity_category="diagnostic",
+            enabled_by_default=True,
+            display_name="EM540 Serial Connects",
+        )
+        self.em540_serial_disconnect_count = Sensor(
+            "EM540 Serial Disconnect Count",
+            None,
+            None,
+            "measurement",
+            self.state_topic,
+            precision=0,
+            entity_category="diagnostic",
+            enabled_by_default=True,
+            display_name="EM540 Serial Disconnects",
         )
         self.em540_circuit_breaker_open = Sensor(
             "EM540 Circuit Breaker Open",
@@ -433,12 +505,18 @@ class HADiagnostics:
             self.em540_rtu_client_disconnect_count,
             self.em540_tcp_client_count,
             self.em540_tcp_client_disconnect_count,
+            self.em540_serial_client_active,
+            self.em540_serial_connect_count,
+            self.em540_serial_disconnect_count,
             self.em540_circuit_breaker_open,
             self.em540_circuit_breaker_open_count,
             self.em540_stale_data_age_ms,
             self.em540_dropped_stale_request_count,
             self.ts65a_tcp_client_count,
             self.ts65a_tcp_client_disconnect_count,
+            self.ts65a_serial_client_active,
+            self.ts65a_serial_connect_count,
+            self.ts65a_serial_disconnect_count,
             self.ts65a_power_over_feed_in_limit_count,
             self.ts65a_power_over_feed_limit_max_duration,
             self.ts65a_circuit_breaker_open,
@@ -521,6 +599,9 @@ class HADiagnostics:
             self.em540_circuit_breaker_open_count.update_value(self._em540_slave_stats.circuit_breaker_open_count)
             self.em540_stale_data_age_ms.update_value(self._em540_slave_stats.stale_data_age_ms)
             self.em540_dropped_stale_request_count.update_value(self._em540_slave_stats.dropped_stale_request_count)
+            self.em540_serial_client_active.update_value(1 if self._em540_slave_stats.serial.active else 0)
+            self.em540_serial_connect_count.update_value(self._em540_slave_stats.serial.connect_count)
+            self.em540_serial_disconnect_count.update_value(self._em540_slave_stats.serial.disconnect_count)
         if self._em540_master_stats is not None:
             self.read_failed_count.update_value(self._em540_master_stats.read_failed_total)
             master_stats = self._em540_master_stats.snapshot_and_reset_interval_extrema()
@@ -546,6 +627,9 @@ class HADiagnostics:
             self.ts65a_circuit_breaker_open_count.update_value(self._ts65a_slave_stats.circuit_breaker_open_count)
             self.ts65a_stale_data_age_ms.update_value(self._ts65a_slave_stats.stale_data_age_ms)
             self.ts65a_dropped_stale_request_count.update_value(self._ts65a_slave_stats.dropped_stale_request_count)
+            self.ts65a_serial_client_active.update_value(1 if self._ts65a_slave_stats.serial.active else 0)
+            self.ts65a_serial_connect_count.update_value(self._ts65a_slave_stats.serial.connect_count)
+            self.ts65a_serial_disconnect_count.update_value(self._ts65a_slave_stats.serial.disconnect_count)
 
         sensors = self._all_sensors()
 

@@ -73,6 +73,7 @@ def _make_state():
             tcp_port=5021,
             slave_id=1,
             update_timeout=5.0,
+            serial_idle_timeout=5.0,
             log_level="CRITICAL",
         ),
         ts65a_slave=SimpleNamespace(
@@ -80,6 +81,7 @@ def _make_state():
             port=5030,
             slave_id=1,
             update_timeout=5.0,
+            serial_idle_timeout=5.0,
             grid_feed_in_hard_limit=-10000.0,
             smoothing_num_points=10,
             log_level="CRITICAL",
