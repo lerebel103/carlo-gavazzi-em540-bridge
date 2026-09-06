@@ -14,7 +14,6 @@ from app.carlo_gavazzi.em540_master import Em540Master
 from app.carlo_gavazzi.em540_slave_bridge import Em540Slave
 from app.config import ConfigError, ConfigManager
 from app.fronius.ts65a_slave_bridge import Ts65aSlaveBridge
-from app.health import HealthMonitor
 from app.home_assistant.ha_bridge import HABridge
 from app.version import version_for_display
 
@@ -98,18 +97,6 @@ async def process_loop(state):
     config_manager.start_flush_loop()
     await em540_slave.start()
     await ts65a_slave.start()
-
-    # Health monitor: writes a heartbeat file with the measured acquisition rate
-    # for the Docker healthcheck to read. Runs on its own daemon thread (off the
-    # tick loop) and derives the rate from the master's published-frame sequence.
-    health_monitor = HealthMonitor(
-        read_sequence=lambda: em540_master.data_sequence,
-        update_interval=float(state.em540_master.update_interval),
-        file_path=state.health.file,
-        write_interval=state.health.write_interval,
-        rate_window=state.health.rate_window,
-    )
-    health_monitor.start()
 
     reconnect_backoff = float(state.em540_master.update_interval)
     reconnect_backoff = reconnect_backoff if reconnect_backoff > 0.0 else 0.1
@@ -308,7 +295,6 @@ async def process_loop(state):
             tick_queue.put_nowait(None)
         except asyncio.QueueFull:
             pass
-        health_monitor.stop()
         em540_master.stop_listeners()
         em540_slave.stop()
         ts65a_slave.stop()

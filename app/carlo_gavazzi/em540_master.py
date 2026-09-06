@@ -507,17 +507,6 @@ class Em540Master:
     def data(self) -> MeterData:
         return self._front_data
 
-    @property
-    def data_sequence(self) -> int:
-        """Monotonic counter of successfully published frames.
-
-        Advances only when a frame is published to listeners (static data valid
-        and the initial energy read complete). Reading it is a plain int load
-        (atomic under the GIL); used by the health monitor to derive the actual
-        acquisition rate without touching the tick loop.
-        """
-        return self._data_seq
-
     async def disconnect(self) -> None:
         # Simulate disconnecting from the EM540 device
         if self._client.connected:

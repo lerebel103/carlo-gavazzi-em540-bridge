@@ -49,11 +49,10 @@ RUN chown -R lerebel103:lerebel103 /app
 # Expose Modbus and emulation ports
 EXPOSE 5001 5002 5003
 
-# Healthcheck: verifies the downstream server is listening AND the upstream
-# acquisition rate is on target (see app/healthcheck.py). start-period is
-# generous so the rate-averaging window can fill before the first check.
-HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
-  CMD ["uv", "run", "--frozen", "--no-sync", "python", "-m", "app.healthcheck", "--config", "/etc/carlo-gavazzi-em540-bridge/config.yaml"]
+# No container HEALTHCHECK: a process-liveness check is misleading (the process
+# can be alive but not serving fresh data), and a functional check that spawns a
+# process every interval starves the latency-sensitive 10Hz tick loop on a
+# single-CPU host. Monitoring is handled out-of-band via MQTT diagnostics.
 
 # Switch to non-root user
 USER lerebel103

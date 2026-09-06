@@ -95,14 +95,6 @@ def _make_state():
             update_interval=0.5,
             log_level="CRITICAL",
         ),
-        health=SimpleNamespace(
-            file="/tmp/test_health.json",
-            write_interval=1.0,
-            rate_window=5.0,
-            rate_margin=0.9,
-            unpaced_min_rate_hz=10.0,
-            tcp_probe_port=5030,
-        ),
     )
 
 
@@ -122,7 +114,6 @@ def _setup_mocks():
     mock_master.add_listener = MagicMock()
     mock_master.data = MagicMock()
     mock_master.data.frame = MagicMock()
-    mock_master.data_sequence = 0
 
     mock_slave = MagicMock()
     mock_slave.start = AsyncMock()
@@ -145,13 +136,6 @@ def _patch_config_manager(state):
 
 class TestMainLoopPriority(unittest.TestCase):
     """Validates: Requirements 11.1, 11.2, 11.3"""
-
-    def setUp(self):
-        # process_loop() constructs a HealthMonitor that starts a daemon thread.
-        # Patch it out for these loop-behaviour tests so no real thread spawns.
-        patcher = patch.object(main, "HealthMonitor")
-        self.addCleanup(patcher.stop)
-        patcher.start()
 
     # ------------------------------------------------------------------
     # Requirement 11.1: acquire_data called at configured update_interval

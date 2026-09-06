@@ -51,26 +51,9 @@ services:
       options:
         max-size: 10m
         max-file: 3
-    # Healthcheck: verifies the downstream TS65A server is listening AND the
-    # upstream acquisition rate is on target (see app/healthcheck.py). Docker
-    # marks the container unhealthy (and restart:unless-stopped bounces it) if
-    # reads stall or the server stops accepting connections.
-    healthcheck:
-      test:
-        - CMD
-        - uv
-        - run
-        - --frozen
-        - --no-sync
-        - python
-        - -m
-        - app.healthcheck
-        - --config
-        - /etc/carlo-gavazzi-em540-bridge/config.yaml
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 30s
+    # No healthcheck: a process-liveness probe is misleading and a functional
+    # probe that spawns a process each interval starves the 10Hz tick loop on a
+    # single-CPU host. Health is observed out-of-band via MQTT diagnostics.
     # Explicitly run the bridge at high process priority inside the container.
     # This requires SYS_NICE + appropriate ulimits above.
     command:

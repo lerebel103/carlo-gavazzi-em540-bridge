@@ -105,28 +105,6 @@ class MqttConfig:
     log_level: str = "INFO"
 
 
-@dataclass
-class HealthConfig:
-    # Path to the heartbeat/health file the app writes and the Docker healthcheck
-    # reads. Kept on tmpfs (/tmp) so writes are cheap and leave no disk residue.
-    file: str = "/tmp/em540_bridge_health.json"
-    # How often (seconds) the health monitor writes the file. Must be well below
-    # the Docker healthcheck interval so the reader always sees a fresh file.
-    write_interval: float = 1.0
-    # Window (seconds) over which the acquisition rate is averaged. A few seconds
-    # smooths transient dips so the healthcheck does not flap.
-    rate_window: float = 5.0
-    # Fraction of the configured rate that must be met to be considered healthy.
-    # e.g. 0.9 == within a 10% margin below the configured rate.
-    rate_margin: float = 0.9
-    # When update_interval is 0 (unpaced/max rate), the actual rate must exceed
-    # this floor (reads/sec) to be healthy.
-    unpaced_min_rate_hz: float = 10.0
-    # TCP port the healthcheck connects to for downstream-server liveness. Defaults
-    # to the TS65A emulation port, the one critical consumers use.
-    tcp_probe_port: int = 5003
-
-
 # ---------------------------------------------------------------------------
 # Top-level application state
 # ---------------------------------------------------------------------------
@@ -138,7 +116,6 @@ class AppState:
     em540_slave: Em540SlaveConfig = field(default_factory=Em540SlaveConfig)
     ts65a_slave: Ts65aSlaveConfig = field(default_factory=Ts65aSlaveConfig)
     mqtt: MqttConfig = field(default_factory=MqttConfig)
-    health: HealthConfig = field(default_factory=HealthConfig)
     pymodbus_log_level: str = "INFO"
     root_log_level: str = "INFO"
 
