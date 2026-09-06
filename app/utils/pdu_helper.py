@@ -5,11 +5,9 @@ from typing import Optional
 from pymodbus import ExceptionResponse
 from pymodbus.constants import ExcCodes
 from pymodbus.pdu import ModbusPDU
-from pymodbus.pdu.register_message import ReadHoldingRegistersResponse
 
-# Modbus function codes for register reads.
-_FC_READ_HOLDING = 3
-_FC_READ_INPUT = 4
+# Minimum seconds between repeated "watched address polled" logs, per address.
+_WATCH_LOG_INTERVAL_S = 10.0
 
 
 class PduHelper:
@@ -18,7 +16,7 @@ class PduHelper:
         logger: logging.Logger,
         bridge_timeout: float,
         served_device_ids: Optional[set[int]] = None,
-        zero_fill_read_addresses: Optional[set[int]] = None,
+        log_read_addresses: Optional[set[int]] = None,
     ) -> None:
         self.logger: logging.Logger = logger
         self.bridge_timeout = bridge_timeout
@@ -27,16 +25,16 @@ class PduHelper:
         # device failure) and are logged at ERROR. Exceptions to any other ID
         # are device-scan probes (see on_pdu) and are logged at DEBUG.
         self.served_device_ids: set[int] = served_device_ids or set()
-        # Specific register-read start addresses for which an ILLEGAL_DATA_ADDRESS
-        # rejection should be answered with zeros instead of the exception. This is
-        # a deliberately narrow allow-list — ONLY these exact addresses are
-        # substituted; every other out-of-range read still returns the proper
-        # ILLEGAL_DATA_ADDRESS. Used to work around a specific downstream client
-        # (Fronius) that faults when a particular unimplemented register (50000)
-        # returns an exception. Each substitution is logged so its effect can be
-        # compared against the exception behaviour.
-        self.zero_fill_read_addresses: set[int] = zero_fill_read_addresses or set()
-        self.zero_filled_read_count: int = 0
+        # Specific register-read start addresses to observe. Whenever an incoming
+        # request reads one of these addresses it is counted and logged (rate
+        # limited), regardless of which client issued it. Used to monitor a
+        # register that a downstream client polls but this emulation serves as a
+        # compatibility value (e.g. 50000). Detection is done on the request PDU
+        # itself, so it is race-free even with concurrent connections.
+        self.log_read_addresses: set[int] = log_read_addresses or set()
+        # address -> observed count, and address -> last-logged monotonic time.
+        self.watched_read_counts: dict[int, int] = dict.fromkeys(self.log_read_addresses, 0)
+        self._watched_last_log: dict[int, float] = {}
         self.last_pdu: Optional[ModbusPDU] = None
         self._last_rx_timestamp: Optional[float] = None
         self._last_warning_timestamp: float = 0
@@ -118,14 +116,11 @@ class PduHelper:
                     response.transaction_id = pdu.transaction_id
                 return response
 
-        # Narrow work-around: substitute a zero-filled response for an
-        # ILLEGAL_DATA_ADDRESS rejection, but ONLY for the specific read addresses
-        # in the allow-list. Runs on the outgoing response path (flag is True);
-        # self.last_pdu holds the request that produced this exception.
-        if flag and getattr(pdu, "exception_code", 0) == int(ExcCodes.ILLEGAL_ADDRESS):
-            zero_response = self._maybe_zero_fill(pdu)
-            if zero_response is not None:
-                return zero_response
+        # Observe reads of watched addresses. Done on the inbound request pass
+        # (flag is False), using the request PDU directly, so it is race-free
+        # regardless of which client issued it or how many connections are active.
+        if not flag and self.log_read_addresses:
+            self._note_watched_read(pdu, now)
 
         # Log exception responses, distinguishing genuine failures from scan noise:
         #  - Exceptions for a device ID we actually serve indicate a real
@@ -151,49 +146,31 @@ class PduHelper:
         self.last_pdu = pdu
         return pdu
 
-    def _maybe_zero_fill(self, exception_pdu: ModbusPDU) -> Optional[ModbusPDU]:
-        """Return a zero-filled read response, but only for an allow-listed address.
+    def _note_watched_read(self, request: ModbusPDU, now: float) -> None:
+        """Count and (rate-limited) log a read of a watched address.
 
-        Returns None (leave the ILLEGAL_DATA_ADDRESS exception unchanged) unless
-        the triggering request was a register read (FC 3/4) whose exact start
-        address is in ``zero_fill_read_addresses``. This is intentionally narrow:
-        no other out-of-range read is affected.
+        Uses the incoming request PDU directly, so it is client-agnostic and
+        race-free. The count is always incremented; the log is emitted at most
+        once per ``_WATCH_LOG_INTERVAL_S`` per address to avoid handler-I/O
+        spam on the server loop, since the address is polled continuously.
         """
-        if not self.zero_fill_read_addresses:
-            return None
-
-        request = self.last_pdu
-        if request is None:
-            return None
-        if getattr(request, "function_code", None) not in (_FC_READ_HOLDING, _FC_READ_INPUT):
-            return None
-
         address = getattr(request, "address", None)
-        if address not in self.zero_fill_read_addresses:
-            return None
+        if address not in self.log_read_addresses:
+            return
 
-        count = getattr(request, "count", 0)
-        if not isinstance(count, int) or count <= 0:
-            return None
+        count = self.watched_read_counts.get(address, 0) + 1
+        self.watched_read_counts[address] = count
 
-        self.zero_filled_read_count += 1
-        self.logger.warning(
-            "Returning zeros instead of ILLEGAL_DATA_ADDRESS for allow-listed read: "
-            "dev_id=%s address=%s count=%s (zero-filled %d times so far). "
-            "Monitoring effect vs. sending the exception.",
-            getattr(request, "dev_id", "?"),
-            address,
-            count,
-            self.zero_filled_read_count,
-        )
-
-        response = ReadHoldingRegistersResponse(registers=[0] * count)
-        # Preserve addressing so the frame routes back to the right client/txn.
-        if hasattr(response, "dev_id"):
-            response.dev_id = getattr(request, "dev_id", 0)
-        if hasattr(response, "transaction_id"):
-            response.transaction_id = getattr(request, "transaction_id", 0)
-        return response
+        last_log = self._watched_last_log.get(address, 0.0)
+        if (now - last_log) >= _WATCH_LOG_INTERVAL_S:
+            self._watched_last_log[address] = now
+            self.logger.info(
+                "Watched register read observed: address=%s count=%s (served as compatibility value; "
+                "polled %d times so far)",
+                address,
+                getattr(request, "count", "?"),
+                count,
+            )
 
     def data_received(self, timestamp: float) -> None:
         self._last_rx_timestamp = timestamp

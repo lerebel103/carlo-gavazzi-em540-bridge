@@ -146,6 +146,29 @@ class TestTs65aSlaveBridge(unittest.TestCase):
 
         self.assertIs(serial_server.context, bridge._server.context)
 
+    def test_compatibility_register_50000_is_served_as_zeros(self):
+        # A Fronius client polls register 50000, which the proprietary TS65A
+        # layout does not otherwise define. It must be served as zeros (not
+        # ILLEGAL_DATA_ADDRESS) so the client does not fault/disconnect.
+        import asyncio
+
+        from pymodbus import FramerType
+        from pymodbus.constants import ExcCodes
+        from pymodbus.server import ModbusTcpServer
+
+        async def _check():
+            device = _build_ts65a_simdata(1)
+            server = ModbusTcpServer(framer=FramerType.SOCKET, context=device, address=("127.0.0.1", 0))
+            core = server.context
+            served = await core.async_getValues(1, 3, 50000, 2)
+            # A neighbouring undefined address must still be rejected.
+            neighbour = await core.async_getValues(1, 3, 49999, 2)
+            return served, neighbour
+
+        served, neighbour = asyncio.run(_check())
+        self.assertEqual(served, [0, 0])
+        self.assertEqual(neighbour, ExcCodes.ILLEGAL_ADDRESS)
+
     def test_voltage_phase_ca_uses_phase_c_line_line_voltage(self):
         bridge, _ = self._build_bridge()
         data = MeterData()
