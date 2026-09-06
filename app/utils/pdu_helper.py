@@ -111,10 +111,15 @@ class PduHelper:
         #    for devices, and every probe to an ID we don't emulate yields a
         #    legitimate SLAVE_DEVICE_FAILURE. These are logged at DEBUG so the
         #    scanning noise stays silent at INFO.
-        # (dev_id 2 is muted entirely: Victron polls it and we never serve it.)
+        # Victron polls unit ID 2 even when we don't emulate it; those exception
+        # responses are muted entirely as known noise. But if this bridge is
+        # actually configured to serve ID 2, exceptions for it are genuine
+        # failures and must not be suppressed.
         dev_id = getattr(pdu, "dev_id", 2)
-        if getattr(pdu, "exception_code", 0) != 0 and dev_id != 2:
-            log = self.logger.error if dev_id in self.served_device_ids else self.logger.debug
+        served = dev_id in self.served_device_ids
+        muted = dev_id == 2 and not served
+        if getattr(pdu, "exception_code", 0) != 0 and not muted:
+            log = self.logger.error if served else self.logger.debug
             log(pdu)
             log(f"Prior PDU: {self.last_pdu}")
 

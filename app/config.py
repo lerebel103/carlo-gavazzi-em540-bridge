@@ -353,6 +353,12 @@ class ConfigManager:
             probe.close()
         except serial.SerialException as exc:
             raise ConfigError(f"{name} '{port}' could not be opened: {exc}") from exc
+        except (ValueError, TypeError) as exc:
+            # pyserial's port setter raises ValueError/TypeError for malformed
+            # non-string values (e.g. a YAML list/int). Normalize to ConfigError
+            # so it flows through main()'s fail-fast startup handler instead of
+            # escaping as an unhandled traceback.
+            raise ConfigError(f"{name} '{port}' is not a valid serial device path: {exc}") from exc
 
     # -- persistence ---------------------------------------------------------
 

@@ -61,8 +61,11 @@ def parse_args():
     return parser.parse_args()
 
 
-async def process_loop():
-    state = config_manager.load()
+async def process_loop(state):
+    # ``state`` is the already-validated config loaded in main(). We reuse it
+    # rather than reloading here: a second load() would re-run the serial-device
+    # reachability probe (opening/closing every configured port again) and any
+    # ConfigError it raised would bypass main()'s fail-fast startup handler.
     pymodbus_apply_logging_config(state.pymodbus_log_level)
 
     em540_master = Em540Master(state.em540_master)
@@ -332,4 +335,4 @@ async def main():
         sys.exit(1)
     logging.basicConfig(level=state.root_log_level)
     logger.info("Starting EM540 Energy Meter Bridge (%s)", version_for_display())
-    await process_loop()
+    await process_loop(state)

@@ -453,6 +453,16 @@ def test_unreachable_master_serial_port_raises(tmp_path):
 
 
 @pytest.mark.real_serial_check
+@pytest.mark.parametrize("bad_port", [123, ["/dev/ttyUSB0"], {"port": "x"}])
+def test_malformed_serial_port_normalized_to_config_error(bad_port):
+    """pyserial raises ValueError/TypeError for non-string ports; the reachability
+    probe must normalize those to ConfigError so main()'s fail-fast handler catches them."""
+    cm = ConfigManager("/unused.yaml")
+    with pytest.raises(ConfigError, match="valid serial device path"):
+        cm._check_serial_device_reachable("em540_slave.serial.port", bad_port)
+
+
+@pytest.mark.real_serial_check
 @pytest.mark.parametrize("section", ["em540_slave", "ts65a_slave"])
 def test_unreachable_downstream_serial_port_raises(tmp_path, section):
     path = _make_config(

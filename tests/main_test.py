@@ -163,7 +163,7 @@ class TestMainLoopPriority(unittest.TestCase):
             patch.object(main, "HABridge"),
         ):
             with self.assertRaises(_LoopBreak):
-                asyncio.run(main.process_loop())
+                asyncio.run(main.process_loop(state))
 
         self.assertEqual(mocks["master"].acquire_data.await_count, 3)
 
@@ -190,7 +190,7 @@ class TestMainLoopPriority(unittest.TestCase):
             patch.object(main, "HABridge"),
         ):
             with self.assertRaises(_LoopBreak):
-                asyncio.run(main.process_loop())
+                asyncio.run(main.process_loop(state))
 
         mocks["master"].connect.assert_awaited_once()
 
@@ -215,7 +215,7 @@ class TestMainLoopPriority(unittest.TestCase):
             patch.object(main.logging, "getLogger", return_value=pymodbus_logger) as mock_get_logger,
         ):
             with self.assertRaises(_LoopBreak):
-                asyncio.run(main.process_loop())
+                asyncio.run(main.process_loop(state))
 
         mock_get_logger.assert_called_with("pymodbus.logging")
         pymodbus_logger.addFilter.assert_called_once()
@@ -263,7 +263,7 @@ class TestMainLoopPriority(unittest.TestCase):
             patch.object(main.asyncio, "sleep", side_effect=_sleep),
         ):
             with self.assertRaises(_LoopBreak):
-                asyncio.run(main.process_loop())
+                asyncio.run(main.process_loop(state))
 
         self.assertTrue(any(delay > 0 for delay in sleep_calls))
         self.assertEqual(mocks["master"].acquire_data.await_count, 3)
@@ -302,7 +302,7 @@ class TestMainLoopPriority(unittest.TestCase):
             patch.object(main, "HABridge"),
         ):
             with self.assertRaises(_LoopBreak):
-                asyncio.run(main.process_loop())
+                asyncio.run(main.process_loop(state))
 
         self.assertEqual(mocks["master"].acquire_data.await_count, 3)
         self.assertEqual(acquire_sequence, [1, 2, 3])
@@ -333,7 +333,7 @@ class TestMainLoopPriority(unittest.TestCase):
             patch.object(main.asyncio, "sleep", new_callable=AsyncMock) as mock_sleep,
         ):
             with self.assertRaises(_LoopBreak):
-                asyncio.run(main.process_loop())
+                asyncio.run(main.process_loop(state))
 
         self.assertEqual(mocks["master"].acquire_data.await_count, 3)
         mock_sleep.assert_not_awaited()
@@ -360,7 +360,7 @@ class TestMainLoopPriority(unittest.TestCase):
             patch.object(main.asyncio, "sleep", side_effect=_sleep),
         ):
             with self.assertRaises(_LoopBreak):
-                asyncio.run(main.process_loop())
+                asyncio.run(main.process_loop(state))
 
         mocks["master"].connect.assert_awaited_once()
         self.assertEqual(mocks["master"].acquire_data.await_count, 1)
@@ -405,7 +405,7 @@ class TestMainLoopPriority(unittest.TestCase):
             patch.object(main.asyncio, "sleep", side_effect=_sleep),
         ):
             with self.assertRaises(_LoopBreak):
-                asyncio.run(main.process_loop())
+                asyncio.run(main.process_loop(state))
 
         self.assertEqual(mocks["master"].acquire_data.await_count, 6)
         self.assertTrue(any(delay > 0 for delay in sleep_calls))
@@ -441,7 +441,7 @@ class TestMainLoopPriority(unittest.TestCase):
             patch.object(main, "HABridge", return_value=mqtt_bridge),
         ):
             with self.assertRaises(_LoopBreak):
-                asyncio.run(main.process_loop())
+                asyncio.run(main.process_loop(state))
 
         mocks["master"].add_listener.assert_any_call(mqtt_bridge)
         self.assertEqual(mocks["master"].acquire_data.await_count, 1)
@@ -476,7 +476,7 @@ class TestMainLoopPriority(unittest.TestCase):
             patch.object(main, "HABridge", return_value=mqtt_bridge),
         ):
             with self.assertRaises(_LoopBreak):
-                asyncio.run(main.process_loop())
+                asyncio.run(main.process_loop(state))
 
         mqtt_bridge.stop.assert_called_once()
         mocks["master"].disconnect.assert_awaited_once()

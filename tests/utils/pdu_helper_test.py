@@ -117,6 +117,51 @@ class TestPduHelperCircuitBreaker(unittest.TestCase):
         self.assertEqual(calls["error"], 2)  # the PDU and the "Prior PDU" line
         self.assertEqual(calls["debug"], 0)
 
+    def test_device_id_2_is_logged_at_error_when_it_is_a_served_id(self):
+        # ID 2 is normally muted (Victron noise), but if the bridge is configured
+        # to serve ID 2, its exceptions are genuine failures and must surface.
+        calls = {"error": 0, "debug": 0}
+        logger = SimpleNamespace(
+            warning=lambda *a, **k: None,
+            info=lambda *a, **k: None,
+            error=lambda *a, **k: calls.__setitem__("error", calls["error"] + 1),
+            debug=lambda *a, **k: calls.__setitem__("debug", calls["debug"] + 1),
+        )
+        import time
+
+        helper = PduHelper(logger, bridge_timeout=10.0, served_device_ids={2})
+        helper.data_received(time.time())
+
+        exc_pdu = _make_pdu(function_code=131, dev_id=2)
+        exc_pdu.exception_code = 4
+
+        helper.on_pdu(False, exc_pdu)
+
+        self.assertEqual(calls["error"], 2)
+        self.assertEqual(calls["debug"], 0)
+
+    def test_device_id_2_is_muted_when_not_served(self):
+        calls = {"error": 0, "debug": 0}
+        logger = SimpleNamespace(
+            warning=lambda *a, **k: None,
+            info=lambda *a, **k: None,
+            error=lambda *a, **k: calls.__setitem__("error", calls["error"] + 1),
+            debug=lambda *a, **k: calls.__setitem__("debug", calls["debug"] + 1),
+        )
+        import time
+
+        helper = PduHelper(logger, bridge_timeout=10.0, served_device_ids={1})
+        helper.data_received(time.time())
+
+        exc_pdu = _make_pdu(function_code=131, dev_id=2)
+        exc_pdu.exception_code = 4
+
+        helper.on_pdu(False, exc_pdu)
+
+        # Fully muted: neither error nor debug.
+        self.assertEqual(calls["error"], 0)
+        self.assertEqual(calls["debug"], 0)
+
 
 if __name__ == "__main__":
     unittest.main()
