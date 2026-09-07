@@ -51,9 +51,41 @@ services:
       options:
         max-size: 10m
         max-file: 3
-    # No healthcheck: a process-liveness probe is misleading and a functional
-    # probe that spawns a process each interval starves the 10Hz tick loop on a
-    # single-CPU host. Health is observed out-of-band via MQTT diagnostics.
+    # Freshness healthcheck (observability). The bridge writes the last
+    # successful upstream frame's epoch seconds to /dev/shm from a dedicated
+    # watchdog thread (off the pinned tick core, no process spawned by the app,
+    # independent of MQTT); this probe reports the container unhealthy in
+    # `docker ps` once that stamp is stale. The probe is a pure-shell integer
+    # comparison — it never boots a Python interpreter, so it cannot starve the
+    # 10Hz loop. A missing/zero file (pre-first-frame) reads as unhealthy,
+    # absorbed by start_period during boot/reconnect.
+    #
+    # Recovery ordering: Docker/Compose does NOT restart a container just because
+    # it is unhealthy (restart policies only react to the container exiting).
+    # Automatic recovery is driven application-side: the same watchdog thread
+    # self-exits when no fresh upstream frame has arrived within
+    # em540_master.health_max_stale_s, and `restart: unless-stopped` above
+    # restarts it. The probe timing is deliberately tuned so the container is
+    # observably `unhealthy` BEFORE the app self-exits — otherwise it would
+    # restart before Docker ever flipped the status and the observability signal
+    # would be lost. Worst-case unhealthy time (probe reads a stamp already up to
+    # the 15s age limit old, then needs `retries` consecutive failures spaced by
+    # `interval`):
+    #   steady-state: 15 (age limit) + retries*interval = 15 + 2*5 = ~25s
+    #   cold start:   start_period suppresses failures, then retries*interval
+    #                 after it = 20 + 2*5 = ~30s
+    # The app keeps self-exit strictly later: steady-state >= health_max_stale_s
+    # (clamped to a >=25s floor) + poll, and cold start is gated by a 40s grace.
+    # If you raise health_max_stale_s that only widens the margin; the code
+    # enforces the lower bound so this ordering cannot be misconfigured away.
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - test $(( $(date +%s) - $(cat /dev/shm/em540_health 2>/dev/null || echo 0) )) -lt 15
+      interval: 5s
+      timeout: 3s
+      retries: 2
+      start_period: 20s
     # Explicitly run the bridge at high process priority inside the container.
     # This requires SYS_NICE + appropriate ulimits above.
     command:

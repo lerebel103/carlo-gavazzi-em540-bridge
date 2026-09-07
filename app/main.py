@@ -3,6 +3,7 @@ import argparse
 import asyncio
 import logging
 import math
+import os
 import sys
 import time
 from contextlib import contextmanager
@@ -15,6 +16,7 @@ from app.carlo_gavazzi.em540_slave_bridge import Em540Slave
 from app.config import ConfigError, ConfigManager
 from app.fronius.ts65a_slave_bridge import Ts65aSlaveBridge
 from app.home_assistant.ha_bridge import HABridge
+from app.utils.health import HealthWatchdog
 from app.version import version_for_display
 
 logger = logging.getLogger()
@@ -33,6 +35,47 @@ class _TickSignal:
     sequence: int
     deadline_mono: float
     ready_at_mono: float
+
+
+def _health_watchdog_should_exit(
+    *,
+    last_frame_monotonic: float,
+    now_monotonic: float,
+    process_start_monotonic: float,
+    max_stale_s: float,
+    grace_period_s: float,
+) -> bool:
+    """Decide whether the upstream-freshness watchdog should self-exit.
+
+    Returns True when the process has been running past its startup grace
+    period yet the most recent successful upstream frame is older than
+    ``max_stale_s``. This is the "wedged / dead upstream that internal recovery
+    can't fix" condition; the caller responds by exiting so Docker's restart
+    policy recovers a fresh process.
+
+    All times are ``time.monotonic()`` values (never wall-clock), so a system
+    clock adjustment cannot make a stale frame look fresh or trigger a false
+    restart. Pure and side-effect free so it can be unit-tested without
+    terminating the interpreter.
+
+    - ``max_stale_s <= 0`` disables the watchdog (always returns False).
+    - Before the first frame (``last_frame_monotonic <= 0``) staleness is
+      measured from process start, so a meter that never produces data still
+      triggers recovery once past the grace period.
+    - The grace period suppresses exits during boot/first-connect/reconnect
+      backoff, mirroring the Docker healthcheck ``start_period``.
+    """
+    if max_stale_s <= 0.0:
+        return False
+
+    # Still inside the startup grace window: never exit yet.
+    if now_monotonic - process_start_monotonic < grace_period_s:
+        return False
+
+    # Anchor freshness to the first frame if one has landed, otherwise to
+    # process start (so "never produced a frame" is caught too).
+    reference = last_frame_monotonic if last_frame_monotonic > 0.0 else process_start_monotonic
+    return (now_monotonic - reference) > max_stale_s
 
 
 class _PymodbusReconnectWarningFilter(logging.Filter):
@@ -264,6 +307,71 @@ async def process_loop(state):
         finally:
             pass
 
+    # Upstream-freshness watchdog. Docker does not restart a container merely
+    # because its healthcheck reports "unhealthy" (that only reacts to the
+    # container exiting), so the freshness signal that drives automatic recovery
+    # must be an application-side self-exit. The watchdog runs on its OWN daemon
+    # thread (not the asyncio event loop reserved for the tick path): a watchdog
+    # that must detect a wedged event loop cannot live on that loop, and its
+    # heartbeat file I/O must not run there either. It reads a lock-free
+    # monotonic last-frame timestamp from the master to decide staleness and,
+    # when wedged, calls os._exit(1) so `restart: unless-stopped` recovers a
+    # fresh process. It is independent of MQTT.
+    health_max_stale_s = float(state.em540_master.health_max_stale_s)
+    health_poll_interval_s = 2.0
+    # Recovery-ordering invariant: the container must be observably `unhealthy`
+    # in Docker BEFORE the app self-exits, otherwise it would restart before the
+    # health status ever flipped and the observability signal would be lost.
+    #
+    # The compose probe reaches `unhealthy` in a bounded worst case (see the
+    # healthcheck comment in docker-compose.yaml for the arithmetic):
+    #   steady-state: ~threshold + retries*interval  (~10 + 2*5 = ~20s)
+    #   cold start:   ~start_period + retries*interval (~20 + 2*5 = ~30s)
+    # We keep the self-exit strictly later than both:
+    #   - Steady-state self-exit = health_max_stale_s + poll (default 30 + 2).
+    #     Floor health_max_stale_s at _HEALTH_MIN_STALE_S so a small configured
+    #     value can never dip under the probe's steady-state unhealthy window.
+    #   - Cold-start self-exit is gated by the grace period, set above the probe's
+    #     cold-start unhealthy window (_HEALTH_GRACE_PERIOD_S).
+    _HEALTH_MIN_STALE_S = 25.0
+    _HEALTH_GRACE_PERIOD_S = 40.0
+    if 0.0 < health_max_stale_s < _HEALTH_MIN_STALE_S:
+        logger.warning(
+            "em540_master.health_max_stale_s=%.1fs is below the %.1fs floor required to keep the "
+            "Docker 'unhealthy' transition ahead of self-exit; clamping to %.1fs.",
+            health_max_stale_s,
+            _HEALTH_MIN_STALE_S,
+            _HEALTH_MIN_STALE_S,
+        )
+        health_max_stale_s = _HEALTH_MIN_STALE_S
+    health_grace_period_s = _HEALTH_GRACE_PERIOD_S
+    process_start_monotonic = time.monotonic()
+
+    def _should_exit(last_frame_monotonic: float, now_monotonic: float) -> bool:
+        should_exit = _health_watchdog_should_exit(
+            last_frame_monotonic=last_frame_monotonic,
+            now_monotonic=now_monotonic,
+            process_start_monotonic=process_start_monotonic,
+            max_stale_s=health_max_stale_s,
+            grace_period_s=health_grace_period_s,
+        )
+        if should_exit:
+            logger.critical(
+                "No fresh upstream frame for over %.0fs; internal recovery appears wedged. "
+                "Exiting so the container is restarted.",
+                health_max_stale_s,
+            )
+        return should_exit
+
+    health_watchdog = HealthWatchdog(
+        read_last_frame_monotonic=lambda: em540_master.last_frame_monotonic,
+        read_last_frame_wall_clock=lambda: em540_master.data.timestamp,
+        should_exit=_should_exit,
+        poll_interval_s=health_poll_interval_s,
+        on_stale=lambda: os._exit(1),
+    )
+    health_watchdog.start()
+
     try:
         while not stop_event.is_set():
             if em540_master.has_fatal_error:
@@ -290,6 +398,7 @@ async def process_loop(state):
                 await _unpaced_worker()
     finally:
         stop_event.set()
+        health_watchdog.stop()
         _clear_tick_queue()
         try:
             tick_queue.put_nowait(None)

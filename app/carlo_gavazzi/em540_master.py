@@ -328,6 +328,14 @@ class Em540Master:
         self._energy_initial_read_complete: bool = False
         self._fatal_error: threading.Event = threading.Event()
 
+        # Monotonic timestamp (time.monotonic) of the last successful frame
+        # publication, used by the freshness watchdog. Monotonic (not wall-clock)
+        # so a system-clock adjustment cannot make a stale frame look fresh or
+        # trigger a false restart. 0.0 means "no frame published yet". Written
+        # only from the acquisition loop (single writer, lock-free — a single
+        # float store is atomic under CPython) and read from the watchdog thread.
+        self._last_frame_monotonic: float = 0.0
+
         # Register count mismatch tracking. Transient mismatches (e.g. stale RTU
         # responses after reconnection) are tolerated and discarded. If mismatches
         # persist consecutively, the stream is considered unrecoverably corrupt.
@@ -557,6 +565,15 @@ class Em540Master:
     def connected(self) -> bool:
         return self._client.connected
 
+    @property
+    def last_frame_monotonic(self) -> float:
+        """time.monotonic() of the last successful frame publication (0.0 if none).
+
+        Lock-free read of a single float written only by the acquisition loop;
+        intended for the freshness watchdog running on a separate thread.
+        """
+        return self._last_frame_monotonic
+
     async def acquire_data(
         self,
         tick_deadline_mono: float | None = None,
@@ -628,6 +645,12 @@ class Em540Master:
             # these quantities are valid on every successful frame regardless of
             # the energy-read publish gate below.
             self._daily_extrema.update(self._back_data, self._back_data.timestamp)
+
+            # Freshness watchdog heartbeat: record the monotonic time of this
+            # successful frame. Single lock-free float store on the tick path
+            # (same cost profile as the extrema update above). The watchdog
+            # thread reads this to decide whether acquisition has wedged.
+            self._last_frame_monotonic = time.monotonic()
 
             # Swap buffers under the condition lock so the front buffer stays immutable
             # for listener threads (which read _front_data under _condition). The swap is

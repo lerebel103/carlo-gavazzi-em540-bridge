@@ -1410,3 +1410,27 @@ def test_property_non_persisted_fields_preserved_on_write(non_persisted_values):
             assert actual == expected, (
                 f"Non-persisted field {dotted_key} changed after _write(): expected {expected!r}, got {actual!r}"
             )
+
+
+def test_health_max_stale_default_when_omitted(tmp_path):
+    # Not present in a minimal config -> dataclass default applies.
+    path = _make_config(tmp_path, {})
+    state = ConfigManager(path).load()
+    assert state.em540_master.health_max_stale_s == 30.0
+
+
+@pytest.mark.parametrize("value", [0, -1, -5.5])
+def test_non_positive_health_max_stale_disables_and_is_accepted(tmp_path, value):
+    # Non-positive disables the watchdog and must load without error.
+    path = _make_config(tmp_path, {"em540_master.health_max_stale_s": value})
+    state = ConfigManager(path).load()
+    assert state.em540_master.health_max_stale_s == value
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), "soon", True, None])
+def test_malformed_health_max_stale_raises(tmp_path, value):
+    # Non-numeric, boolean, or non-finite thresholds must raise ConfigError so
+    # the staleness comparison can never silently misbehave.
+    path = _make_config(tmp_path, {"em540_master.health_max_stale_s": value})
+    with pytest.raises(ConfigError, match="health_max_stale_s"):
+        ConfigManager(path).load()

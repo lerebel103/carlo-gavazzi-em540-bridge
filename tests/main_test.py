@@ -66,6 +66,7 @@ def _make_state():
             stopbits=1,
             serial_port="/dev/null",
             update_interval=0.1,
+            health_max_stale_s=30.0,
         ),
         em540_slave=SimpleNamespace(
             host="0.0.0.0",
@@ -522,6 +523,119 @@ class TestMainLoopPriority(unittest.TestCase):
         mock_exit.assert_called_once_with(1)
         mock_logger_critical.assert_called_once()
         mock_process_loop.assert_not_awaited()
+
+    def test_sub_floor_health_max_stale_is_clamped_with_warning(self):
+        """A health_max_stale_s below the ordering floor is clamped and warned about."""
+        state = _make_state()
+        state.em540_master.health_max_stale_s = 5.0  # below the ~25s floor
+        mocks = _setup_mocks()
+        call_count = {"n": 0}
+
+        async def _acquire(*args, **kwargs):
+            call_count["n"] += 1
+            if call_count["n"] >= 1:
+                raise _LoopBreak()
+            return True
+
+        mocks["master"].acquire_data = AsyncMock(side_effect=_acquire)
+
+        with (
+            _patch_config_manager(state),
+            patch.object(main, "pymodbus_apply_logging_config"),
+            patch.object(main, "Em540Master", return_value=mocks["master"]),
+            patch.object(main, "Em540Slave", return_value=mocks["slave"]),
+            patch.object(main, "Ts65aSlaveBridge", return_value=mocks["ts65a"]),
+            patch.object(main, "HABridge"),
+            patch.object(main.logger, "warning") as mock_warning,
+        ):
+            with self.assertRaises(_LoopBreak):
+                asyncio.run(main.process_loop(state))
+
+        # The clamp warning must have fired, naming the offending value.
+        self.assertTrue(
+            any("health_max_stale_s" in str(call.args[0]) for call in mock_warning.call_args_list),
+            f"expected a clamp warning; got {mock_warning.call_args_list!r}",
+        )
+
+
+class TestHealthWatchdog(unittest.TestCase):
+    """Validates the upstream-freshness self-exit decision (_health_watchdog_should_exit).
+
+    All timestamps are monotonic values (never wall-clock) so a system clock
+    adjustment cannot skew the decision.
+    """
+
+    def test_disabled_when_threshold_non_positive(self):
+        # threshold <= 0 disables the watchdog regardless of staleness
+        self.assertFalse(
+            main._health_watchdog_should_exit(
+                last_frame_monotonic=0.0,
+                now_monotonic=10_000.0,
+                process_start_monotonic=0.0,
+                max_stale_s=0.0,
+                grace_period_s=45.0,
+            )
+        )
+
+    def test_no_exit_within_grace_period_even_with_no_frames(self):
+        # 30s elapsed since start, grace is 45s: still booting, never exit
+        self.assertFalse(
+            main._health_watchdog_should_exit(
+                last_frame_monotonic=0.0,
+                now_monotonic=1_030.0,
+                process_start_monotonic=1_000.0,
+                max_stale_s=30.0,
+                grace_period_s=45.0,
+            )
+        )
+
+    def test_exit_when_no_frame_ever_and_past_grace(self):
+        # Past grace and still no frame ever: staleness measured from start
+        self.assertTrue(
+            main._health_watchdog_should_exit(
+                last_frame_monotonic=0.0,
+                now_monotonic=1_050.0,
+                process_start_monotonic=1_000.0,
+                max_stale_s=30.0,
+                grace_period_s=45.0,
+            )
+        )
+
+    def test_no_exit_when_recent_frame(self):
+        # A frame 5s ago is fresh; do not exit
+        self.assertFalse(
+            main._health_watchdog_should_exit(
+                last_frame_monotonic=1_095.0,
+                now_monotonic=1_100.0,
+                process_start_monotonic=1_000.0,
+                max_stale_s=30.0,
+                grace_period_s=45.0,
+            )
+        )
+
+    def test_exit_when_frame_older_than_threshold(self):
+        # Last frame was 31s ago (> 30s threshold), past grace: exit
+        self.assertTrue(
+            main._health_watchdog_should_exit(
+                last_frame_monotonic=1_069.0,
+                now_monotonic=1_100.0,
+                process_start_monotonic=1_000.0,
+                max_stale_s=30.0,
+                grace_period_s=45.0,
+            )
+        )
+
+    def test_boundary_exactly_at_threshold_does_not_exit(self):
+        # Staleness exactly equal to the threshold is not "over" it
+        self.assertFalse(
+            main._health_watchdog_should_exit(
+                last_frame_monotonic=1_070.0,
+                now_monotonic=1_100.0,
+                process_start_monotonic=1_000.0,
+                max_stale_s=30.0,
+                grace_period_s=45.0,
+            )
+        )
 
 
 if __name__ == "__main__":

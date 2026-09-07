@@ -275,6 +275,38 @@ class TestEm540Master(unittest.TestCase):
         self.assertTrue(result)
         mock_notify.assert_called_once()
 
+    def test_acquire_data_updates_last_frame_monotonic_on_success(self):
+        """A successful acquire records a monotonic timestamp for the freshness watchdog."""
+        type(self.mock_client).connected = PropertyMock(return_value=True)
+
+        # No frame yet -> monotonic stamp starts at 0.0.
+        self.assertEqual(self.master.last_frame_monotonic, 0.0)
+
+        frame = self.master.data.frame
+        responses = _build_first_tick_responses(frame)
+        self.mock_client.read_holding_registers = AsyncMock(side_effect=responses)
+
+        with patch("app.carlo_gavazzi.em540_master.time.monotonic", return_value=1234.5):
+            with patch.object(self.master._condition, "notify"):
+                result = asyncio.run(self.master.acquire_data())
+
+        self.assertTrue(result)
+        self.assertEqual(self.master.last_frame_monotonic, 1234.5)
+
+    def test_acquire_data_does_not_update_last_frame_monotonic_on_failure(self):
+        """A failed primary read must not advance the freshness watchdog timestamp."""
+        type(self.mock_client).connected = PropertyMock(return_value=True)
+
+        error = MagicMock()
+        error.isError.return_value = True
+        self.mock_client.read_holding_registers = AsyncMock(return_value=error)
+
+        with patch.object(self.master._condition, "notify"):
+            result = asyncio.run(self.master.acquire_data())
+
+        self.assertFalse(result)
+        self.assertEqual(self.master.last_frame_monotonic, 0.0)
+
     # -----------------------------------------------------------------------
     # Requirement 10.2: successful acquire reads dynamic registers
     # -----------------------------------------------------------------------
