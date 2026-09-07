@@ -16,6 +16,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 - (Fixes in development)
 
+## [0.4.1] - 2026-09-06
+
+### Added
+- Upstream-freshness watchdog that self-exits (so Docker's `restart: unless-stopped` recovers a fresh process) when no successful upstream frame has arrived within `em540_master.health_max_stale_s` (default 30s). Runs on a dedicated daemon thread using a monotonic clock, off the asyncio event loop reserved for the 10Hz tick path.
+- Observability Docker Compose healthcheck backed by a tmpfs heartbeat file (`/dev/shm/em540_health`) written by the watchdog thread; a pure-shell probe reports the container unhealthy once the frame timestamp goes stale, independent of MQTT.
+- `em540_master.health_max_stale_s` configuration option (set to 0 or negative to disable the watchdog).
+
+### Changed
+- Probe and self-exit timings are coordinated so the container is observably `unhealthy` before the application self-exits; sub-floor `health_max_stale_s` values are clamped at runtime with a warning to preserve this ordering.
+
 ## [0.3.0] - 2026-08-22
 
 ### Added
