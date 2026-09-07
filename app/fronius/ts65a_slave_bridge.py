@@ -298,11 +298,18 @@ class Ts65aSlaveBridge(MeterDataListener):
 
         # TEMPORARY DIAGNOSTIC — REMOVE BEFORE MERGE.
         # Capture the decoded PDU into the ring, then trigger a dump when the
-        # inverter reads the compatibility register 50000 (its fault probe).
-        # Triggering on the inbound request means the ring still holds the
-        # lead-up exchanges; the dump runs off-loop so this stays non-blocking.
+        # inverter READS the compatibility register 50000 (its fault probe).
+        # Gate on read function codes (3 = read holding, 4 = read input) so an
+        # unrelated write to 50000 cannot consume the cooldown and suppress the
+        # real fault-probe dump. Triggering on the inbound request means the ring
+        # still holds the lead-up exchanges; the dump runs off-loop so this stays
+        # non-blocking.
         self._trace_ring.record_pdu(flag, pdu)
-        if not flag and getattr(pdu, "address", None) == _COMPAT_ZERO_REGISTER:
+        if (
+            not flag
+            and getattr(pdu, "address", None) == _COMPAT_ZERO_REGISTER
+            and getattr(pdu, "function_code", None) in (3, 4)
+        ):
             self._trace_ring.request_dump(f"read {_COMPAT_ZERO_REGISTER}")
 
         return self._pdu_helper.on_pdu(flag, pdu)

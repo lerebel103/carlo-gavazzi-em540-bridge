@@ -51,9 +51,16 @@ DEFAULT_RING_SIZE: int = 400
 # Minimum seconds between dumps, so a burst of trigger reads yields one dump.
 DEFAULT_DUMP_COOLDOWN_S: float = 60.0
 
-# Cap on raw-packet hex captured per record (bytes). Modbus RTU frames are
-# small; this only guards against a pathological oversized buffer.
-_MAX_PACKET_BYTES: int = 64
+# Cap on raw-packet hex captured per record (bytes). Must retain a complete
+# legal frame — the whole point is to capture framing/CRC evidence. The largest
+# Modbus RTU ADU is 256 bytes (1 addr + 253 PDU + 2 CRC); a real TS65A response
+# for the ~90-register dynamic block is ~185 bytes. 260 leaves headroom while
+# still guarding against a pathological oversized buffer.
+_MAX_PACKET_BYTES: int = 260
+
+# Cap on decoded register values captured per PDU record. The TS65A dynamic
+# block is ~90 registers; keep well above that so no register value is dropped.
+_MAX_PDU_REGISTERS: int = 256
 
 # Sentinel enqueued to ask the worker to stop.
 _STOP = object()
@@ -104,7 +111,10 @@ class PduTraceRing:
         self._ring: deque[TraceRecord] = deque(maxlen=ring_size)
         self._seq: int = 0
         self._dump_cooldown_s = dump_cooldown_s
-        self._last_dump_mono: float = 0.0
+        # -inf (not 0.0) so the first trigger always fires: time.monotonic() can
+        # be less than the cooldown shortly after boot, and 0.0 would swallow the
+        # very first register-50000 observation in that window.
+        self._last_dump_mono: float = float("-inf")
 
         # Bounded trigger queue: newest dump request wins on overflow so a storm
         # of trigger reads cannot back up the worker.
@@ -143,7 +153,7 @@ class PduTraceRing:
         registers = getattr(pdu, "registers", None)
         payload = ""
         if registers:
-            payload = " ".join(f"{int(r) & 0xFFFF:04x}" for r in registers[:_MAX_PACKET_BYTES])
+            payload = " ".join(f"{int(r) & 0xFFFF:04x}" for r in registers[:_MAX_PDU_REGISTERS])
         self._ring.append(
             TraceRecord(
                 seq=seq,

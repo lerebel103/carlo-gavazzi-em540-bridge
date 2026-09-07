@@ -109,6 +109,24 @@ class TestPduTraceRingCapture(unittest.TestCase):
         self.assertIsNone(rec.addr)
         self.assertEqual(rec.payload_hex, "")
 
+    def test_full_rtu_frame_is_retained_without_truncation(self):
+        # A ~90-register read response is ~185 bytes on the wire. The whole point
+        # of the raw-packet capture is framing/CRC evidence, so a legal-size frame
+        # must be retained in full (including the trailing CRC).
+        frame = bytes(range(256))[:185]
+        self.ring.record_packet(True, frame)
+        rec = list(self.ring._ring)[-1]
+        # payload_hex is space-separated bytes; count must equal the frame length.
+        self.assertEqual(len(rec.payload_hex.split(" ")), len(frame))
+        self.assertTrue(rec.payload_hex.endswith(f"{frame[-1]:02x}"))
+
+    def test_all_pdu_registers_are_retained(self):
+        # The TS65A dynamic block is ~90 registers; none must be dropped.
+        registers = list(range(90))
+        self.ring.record_pdu(True, _make_pdu(registers=registers))
+        rec = list(self.ring._ring)[-1]
+        self.assertEqual(len(rec.payload_hex.split(" ")), len(registers))
+
 
 class TestPduTraceRingDump(unittest.TestCase):
     def setUp(self):
@@ -187,6 +205,18 @@ class TestPduTraceRingCooldown(unittest.TestCase):
         self.assertTrue(_wait_for(lambda: len(logger.snapshot()) >= 1))
         # Only the first dump was emitted.
         self.assertEqual(len(logger.snapshot()), 1)
+
+    def test_first_dump_not_suppressed_near_boot(self):
+        # With a large cooldown and a fresh ring, the very first trigger must
+        # still fire. Regression guard for initialising _last_dump_mono to 0.0,
+        # which suppressed the first dump when monotonic uptime < cooldown.
+        logger = _CapturingLogger()
+        ring = PduTraceRing(logger, ring_size=10, dump_cooldown_s=3600.0)
+        self.addCleanup(ring.stop)
+
+        ring.record_packet(False, b"\x00")
+        self.assertTrue(ring.request_dump("read 50000"))
+        self.assertTrue(_wait_for(lambda: len(logger.snapshot()) >= 1))
 
 
 if __name__ == "__main__":
