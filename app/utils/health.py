@@ -5,11 +5,11 @@ The bridge writes the integer epoch seconds of the last successful upstream
 frame to a small file on tmpfs. A shell-based Docker healthcheck reads that file
 and reports the container unhealthy once the value is stale (or missing/zero).
 
-The writer is deliberately independent of MQTT/Home Assistant: it is invoked
-from the always-on supervisor loop in ``app.main`` so the healthcheck reflects
-real acquisition liveness even when the optional MQTT integration is disabled.
-The Home Assistant diagnostics path also refreshes it opportunistically on its
-own cadence, but that path is not required for the file to exist.
+There is a single writer: the dedicated ``HealthWatchdog`` daemon thread (see
+below), started from ``app.main``. It runs off the asyncio event loop reserved
+for the tick path and is independent of the optional MQTT/Home Assistant
+integration, so the healthcheck reflects real acquisition liveness in every
+supported configuration. No other component writes this file.
 """
 
 import logging

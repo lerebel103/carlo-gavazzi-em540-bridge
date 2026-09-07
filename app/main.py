@@ -318,11 +318,33 @@ async def process_loop(state):
     # when wedged, calls os._exit(1) so `restart: unless-stopped` recovers a
     # fresh process. It is independent of MQTT.
     health_max_stale_s = float(state.em540_master.health_max_stale_s)
-    # Grace mirrors the compose healthcheck start_period so boot/first-connect/
-    # reconnect-backoff never self-kills. Bounded below by the stale threshold so
-    # a very small configured threshold still gets a sane startup window.
-    health_grace_period_s = max(health_max_stale_s, 45.0)
     health_poll_interval_s = 2.0
+    # Recovery-ordering invariant: the container must be observably `unhealthy`
+    # in Docker BEFORE the app self-exits, otherwise it would restart before the
+    # health status ever flipped and the observability signal would be lost.
+    #
+    # The compose probe reaches `unhealthy` in a bounded worst case (see the
+    # healthcheck comment in docker-compose.yaml for the arithmetic):
+    #   steady-state: ~threshold + retries*interval  (~10 + 2*5 = ~20s)
+    #   cold start:   ~start_period + retries*interval (~20 + 2*5 = ~30s)
+    # We keep the self-exit strictly later than both:
+    #   - Steady-state self-exit = health_max_stale_s + poll (default 30 + 2).
+    #     Floor health_max_stale_s at _HEALTH_MIN_STALE_S so a small configured
+    #     value can never dip under the probe's steady-state unhealthy window.
+    #   - Cold-start self-exit is gated by the grace period, set above the probe's
+    #     cold-start unhealthy window (_HEALTH_GRACE_PERIOD_S).
+    _HEALTH_MIN_STALE_S = 25.0
+    _HEALTH_GRACE_PERIOD_S = 40.0
+    if 0.0 < health_max_stale_s < _HEALTH_MIN_STALE_S:
+        logger.warning(
+            "em540_master.health_max_stale_s=%.1fs is below the %.1fs floor required to keep the "
+            "Docker 'unhealthy' transition ahead of self-exit; clamping to %.1fs.",
+            health_max_stale_s,
+            _HEALTH_MIN_STALE_S,
+            _HEALTH_MIN_STALE_S,
+        )
+        health_max_stale_s = _HEALTH_MIN_STALE_S
+    health_grace_period_s = _HEALTH_GRACE_PERIOD_S
     process_start_monotonic = time.monotonic()
 
     def _should_exit(last_frame_monotonic: float, now_monotonic: float) -> bool:

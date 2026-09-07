@@ -524,6 +524,39 @@ class TestMainLoopPriority(unittest.TestCase):
         mock_logger_critical.assert_called_once()
         mock_process_loop.assert_not_awaited()
 
+    def test_sub_floor_health_max_stale_is_clamped_with_warning(self):
+        """A health_max_stale_s below the ordering floor is clamped and warned about."""
+        state = _make_state()
+        state.em540_master.health_max_stale_s = 5.0  # below the ~25s floor
+        mocks = _setup_mocks()
+        call_count = {"n": 0}
+
+        async def _acquire(*args, **kwargs):
+            call_count["n"] += 1
+            if call_count["n"] >= 1:
+                raise _LoopBreak()
+            return True
+
+        mocks["master"].acquire_data = AsyncMock(side_effect=_acquire)
+
+        with (
+            _patch_config_manager(state),
+            patch.object(main, "pymodbus_apply_logging_config"),
+            patch.object(main, "Em540Master", return_value=mocks["master"]),
+            patch.object(main, "Em540Slave", return_value=mocks["slave"]),
+            patch.object(main, "Ts65aSlaveBridge", return_value=mocks["ts65a"]),
+            patch.object(main, "HABridge"),
+            patch.object(main.logger, "warning") as mock_warning,
+        ):
+            with self.assertRaises(_LoopBreak):
+                asyncio.run(main.process_loop(state))
+
+        # The clamp warning must have fired, naming the offending value.
+        self.assertTrue(
+            any("health_max_stale_s" in str(call.args[0]) for call in mock_warning.call_args_list),
+            f"expected a clamp warning; got {mock_warning.call_args_list!r}",
+        )
+
 
 class TestHealthWatchdog(unittest.TestCase):
     """Validates the upstream-freshness self-exit decision (_health_watchdog_should_exit).

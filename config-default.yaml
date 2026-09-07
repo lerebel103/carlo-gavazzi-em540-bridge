@@ -30,7 +30,9 @@ em540_master:
   # Upstream-freshness watchdog: seconds without a fresh upstream frame before
   # the process self-exits so Docker's restart policy recovers a wedged
   # instance. Set to 0 (or negative) to disable. Keep comfortably above the
-  # reconnect backoff ceiling (5s) so ordinary reconnects never trip it.
+  # reconnect backoff ceiling (5s) so ordinary reconnects never trip it. Values
+  # between 0 and ~25s are clamped up at runtime so the Docker 'unhealthy'
+  # transition always precedes self-exit (see docker-compose.yaml healthcheck).
   health_max_stale_s: 30.0
   # Log level for the master component
   log_level: INFO

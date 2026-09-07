@@ -64,21 +64,28 @@ services:
     # it is unhealthy (restart policies only react to the container exiting).
     # Automatic recovery is driven application-side: the same watchdog thread
     # self-exits when no fresh upstream frame has arrived within
-    # em540_master.health_max_stale_s (default 30s, post the ~45s startup grace),
-    # and `restart: unless-stopped` above restarts it. The probe timing below is
-    # deliberately tighter than the self-exit threshold (unhealthy at ~20-30s vs
-    # self-exit at ~30s) so the container is observably `unhealthy` BEFORE it
-    # self-exits — otherwise the app would restart before Docker ever flipped the
-    # status and the observability signal would be lost. If you raise
-    # health_max_stale_s, keep it above this probe's unhealthy time.
+    # em540_master.health_max_stale_s, and `restart: unless-stopped` above
+    # restarts it. The probe timing is deliberately tuned so the container is
+    # observably `unhealthy` BEFORE the app self-exits — otherwise it would
+    # restart before Docker ever flipped the status and the observability signal
+    # would be lost. Worst-case unhealthy time (probe reads a stamp already up to
+    # the 15s age limit old, then needs `retries` consecutive failures spaced by
+    # `interval`):
+    #   steady-state: 15 (age limit) + retries*interval = 15 + 2*5 = ~25s
+    #   cold start:   start_period suppresses failures, then retries*interval
+    #                 after it = 20 + 2*5 = ~30s
+    # The app keeps self-exit strictly later: steady-state >= health_max_stale_s
+    # (clamped to a >=25s floor) + poll, and cold start is gated by a 40s grace.
+    # If you raise health_max_stale_s that only widens the margin; the code
+    # enforces the lower bound so this ordering cannot be misconfigured away.
     healthcheck:
       test:
         - CMD-SHELL
         - test $(( $(date +%s) - $(cat /dev/shm/em540_health 2>/dev/null || echo 0) )) -lt 15
-      interval: 10s
-      timeout: 5s
+      interval: 5s
+      timeout: 3s
       retries: 2
-      start_period: 45s
+      start_period: 20s
     # Explicitly run the bridge at high process priority inside the container.
     # This requires SYS_NICE + appropriate ulimits above.
     command:
