@@ -17,6 +17,9 @@ from app.fronius.ts65a_slave_stats import Ts65aSlaveStats
 from app.utils.idle_connection_reaper import IdleConnectionReaper
 from app.utils.pdu_helper import PduHelper
 
+# TEMPORARY DIAGNOSTIC — REMOVE BEFORE MERGE. See app/utils/pdu_trace_ring.py.
+from app.utils.pdu_trace_ring import PduTraceRing
+
 logger = logging.getLogger("ts65a-slave")
 
 # Holding register function code used for async_setValues.
@@ -199,6 +202,14 @@ class Ts65aSlaveBridge(MeterDataListener):
         self._stats = Ts65aSlaveStats()
         logger.setLevel(config.log_level)
 
+        # TEMPORARY DIAGNOSTIC — REMOVE BEFORE MERGE.
+        # Always-on ring buffer of serial exchanges (raw bytes + decoded PDUs,
+        # both directions). Dumped as one CSV log block when register 50000 is
+        # read, so the exchanges leading into the inverter's fault probe can be
+        # reconstructed. Capture is inline+cheap; the dump runs off-loop on the
+        # ring's own daemon worker (see app/utils/pdu_trace_ring.py).
+        self._trace_ring = PduTraceRing(logger)
+
         self.meter_data = Ts65aMeterData(
             config.smoothing_window_seconds,
             config.grid_feed_in_hard_limit,
@@ -263,6 +274,17 @@ class Ts65aSlaveBridge(MeterDataListener):
         else:
             logger.info("Downstream TS65A serial client disconnected.")
 
+    def _serial_trace_packet(self, sending, data):
+        """TEMPORARY DIAGNOSTIC — REMOVE BEFORE MERGE.
+
+        Raw byte-layer trace hook. Fires before framing on rx and after framing
+        on tx, so it captures corrupt/partial frames and CRC errors that never
+        produce a decoded PDU. Capture only, then pass the bytes through
+        unchanged.
+        """
+        self._trace_ring.record_packet(sending, data)
+        return data
+
     def _serial_trace_pdu(self, flag, pdu):
         """Serial trace hook: record request activity, then run shared PDU logic.
 
@@ -273,6 +295,16 @@ class Ts65aSlaveBridge(MeterDataListener):
         """
         if not flag:
             self._stats.serial.record_request(time.monotonic())
+
+        # TEMPORARY DIAGNOSTIC — REMOVE BEFORE MERGE.
+        # Capture the decoded PDU into the ring, then trigger a dump when the
+        # inverter reads the compatibility register 50000 (its fault probe).
+        # Triggering on the inbound request means the ring still holds the
+        # lead-up exchanges; the dump runs off-loop so this stays non-blocking.
+        self._trace_ring.record_pdu(flag, pdu)
+        if not flag and getattr(pdu, "address", None) == _COMPAT_ZERO_REGISTER:
+            self._trace_ring.request_dump(f"read {_COMPAT_ZERO_REGISTER}")
+
         return self._pdu_helper.on_pdu(flag, pdu)
 
     def _build_serial_server(self) -> ModbusSerialServer:
@@ -293,6 +325,8 @@ class Ts65aSlaveBridge(MeterDataListener):
             stopbits=self._config.serial.stopbits,
             timeout=self._config.serial.timeout,
             handle_local_echo=self._config.serial.handle_local_echo,
+            # TEMPORARY DIAGNOSTIC — REMOVE BEFORE MERGE (trace_packet hook).
+            trace_packet=self._serial_trace_packet,
             trace_pdu=self._serial_trace_pdu,
             trace_connect=self._serial_trace_connect,
         )
@@ -343,6 +377,8 @@ class Ts65aSlaveBridge(MeterDataListener):
 
     def stop(self):
         """Stop the server and clean up the dedicated event loop."""
+        # TEMPORARY DIAGNOSTIC — REMOVE BEFORE MERGE.
+        self._trace_ring.stop()
         self._reaper.stop()
         for server in self._servers:
             close = getattr(server, "close", None)
