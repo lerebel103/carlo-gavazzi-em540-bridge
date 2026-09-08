@@ -502,15 +502,20 @@ class Em540Master:
                     return
                 else:
                     self._static_data_valid = True
+                    fresh_static_read = True
                     # Keep both buffers aligned so skipped reads in dynamic maps keep prior values.
                     self._copy_meter_data(self._front_data, self._back_data)
+            else:
+                fresh_static_read = False
 
-            # Read/log meter config and optionally correct it. Runs every connect
-            # (even when static data was already valid from a prior connect) so a
-            # reconnect re-asserts the desired meter state. Deliberately
+            # Read/log meter config and optionally correct it. On the first
+            # connect the static read above just populated these registers, so no
+            # extra read is needed. On a reconnect the static read is skipped, so
+            # _apply_meter_config re-reads the (few) config registers itself so a
+            # changed mode/measuring-system/wiring status is observed. Deliberately
             # non-fatal: a failed/rejected config write must not prevent the
             # bridge from serving otherwise-valid meter data.
-            await self._apply_meter_config(self._front_data.frame)
+            await self._apply_meter_config(refresh_from_device=not fresh_static_read)
 
             # Connection fully ready (TCP connected and static data available).
             self._consecutive_connect_failures = 0
@@ -1131,32 +1136,35 @@ class Em540Master:
         """
         return dict(self._meter_config)
 
-    async def _apply_meter_config(self, frame) -> None:
+    async def _apply_meter_config(self, refresh_from_device: bool) -> None:
         """Log the meter's config registers and optionally correct them.
 
         The three registers (measurement mode 0x1103, measuring system 0x1002,
-        wrong-connection status 0x1105) are part of the static read plan. On the
-        first connect they are already populated; on a reconnect the static read
-        is skipped (``_static_data_valid`` stays True), so we re-read them here
-        first to observe any change (e.g. wiring status, or a mode changed on the
-        device) before logging and enforcing. The re-read is best-effort:
-        failures fall back to the cached values and never fail the connection.
+        wrong-connection status 0x1105) are part of the static read plan.
 
-        We decode and log all three on every connect, cache them, and — when the
-        corresponding config flag is enabled — write the Victron default if the
-        current value differs, then read the register back to confirm.
+        On the first connect the caller has just performed the full static read,
+        so ``refresh_from_device`` is False and no extra Modbus traffic occurs
+        here. On a reconnect the static read is skipped, so ``refresh_from_device``
+        is True and we re-read just these registers (three extra reads, only on
+        reconnect) to observe any change — a wiring-status change, or a mode
+        changed on the device — before logging and enforcing. The re-read is
+        best-effort and atomic: on any failure the cached values are kept intact.
+
+        We decode and log all three, cache them, and — when the corresponding
+        config flag is enabled — write the Victron default if the current value
+        differs, then read the register back to confirm. All register mutations
+        are committed to BOTH buffers together (never the published front buffer
+        in place, and never a partial set), so listener workers can only ever
+        observe a fully-consistent snapshot.
 
         Writes are best-effort: a rejected write (e.g. a read-only register on a
         MID/PFx meter) or a transport error is logged and swallowed so it never
         fails the connection.
         """
-        static = frame.static_reg_map
+        if refresh_from_device:
+            await self._refresh_meter_config_registers()
 
-        # Refresh the config registers so reconnects see current values rather
-        # than the cached snapshot from an earlier connect. Non-fatal: on failure
-        # we keep whatever is already in the static map.
-        await self._refresh_meter_config_registers(frame)
-
+        static = self._front_data.frame.static_reg_map
         measurement_mode = static[REG_MEASUREMENT_MODE].values[0]
         measuring_system = static[REG_MEASURING_SYSTEM].values[0]
         wrong_connection = static[REG_WRONG_CONNECTION_BLOCK].values[WRONG_CONNECTION_STATUS_OFFSET]
@@ -1193,7 +1201,7 @@ class Em540Master:
             )
             if await self._write_register(REG_MEASUREMENT_MODE, MEASUREMENT_MODE_BIDIRECTIONAL):
                 actual = await self._read_config_register_back(REG_MEASUREMENT_MODE, MEASUREMENT_MODE_BIDIRECTIONAL)
-                self._set_config_register(frame, REG_MEASUREMENT_MODE, actual)
+                self._set_config_register(REG_MEASUREMENT_MODE, actual)
                 self._meter_config["measurement_mode"] = actual
                 logger.info(
                     "EM540 measurement mode after write: %s",
@@ -1209,31 +1217,57 @@ class Em540Master:
             )
             if await self._write_register(REG_MEASURING_SYSTEM, MEASURING_SYSTEM_3PN):
                 actual = await self._read_config_register_back(REG_MEASURING_SYSTEM, MEASURING_SYSTEM_3PN)
-                self._set_config_register(frame, REG_MEASURING_SYSTEM, actual)
+                self._set_config_register(REG_MEASURING_SYSTEM, actual)
                 self._meter_config["measuring_system"] = actual
                 logger.info(
                     "EM540 measuring system after write: %s",
                     describe_register_value(actual, MEASURING_SYSTEM_LABELS),
                 )
 
-    async def _refresh_meter_config_registers(self, frame) -> None:
-        """Re-read the config registers into ``frame``'s static map (best-effort).
+    async def _refresh_meter_config_registers(self) -> None:
+        """Re-read the config registers from the device (reconnect only, best-effort).
 
-        The static read is skipped on reconnects, so without this the config
-        snapshot would be stale after the first connect. Reads the two config
-        registers plus the wrong-connection block; on any failure the existing
-        cached values are left in place (non-fatal).
+        Reads into isolated local storage first and only commits to the buffers
+        once ALL reads succeed. This guarantees:
+          * the published front buffer is never mutated in place mid-refresh, so
+            listener workers cannot observe a partially-updated snapshot;
+          * a failure part-way through leaves the cached values fully intact
+            (no mixed old/new state).
+        On any read failure the whole refresh is abandoned and cached values are
+        kept (non-fatal).
         """
         config_addrs = (REG_MEASUREMENT_MODE, REG_MEASURING_SYSTEM, REG_WRONG_CONNECTION_BLOCK)
-        if not await self._read_registers(frame.static_reg_map, reg_addrs=config_addrs):
-            logger.debug("Failed to refresh EM540 config registers on connect; using cached values.")
+        staged: dict[int, list[int]] = {}
+        try:
+            for addr in config_addrs:
+                expected = len(self._front_data.frame.static_reg_map[addr].values)
+                result = await self._client.read_holding_registers(addr, count=expected, device_id=self.slave_id)
+                if result.isError() or len(result.registers) != expected:
+                    logger.debug("Failed to refresh EM540 config register %s; keeping cached values.", hex(addr))
+                    return
+                staged[addr] = list(result.registers)
+        except (ModbusIOException, ModbusException) as ex:
+            logger.debug("Error refreshing EM540 config registers (%s); keeping cached values.", ex)
             return
 
-        # Mirror the freshly-read values into the other buffer so a tick-driven
-        # buffer swap can't resurrect the pre-refresh values in published data.
-        other = self._back_data if frame is self._front_data.frame else self._front_data
-        for addr in config_addrs:
-            other.frame.static_reg_map[addr].values = list(frame.static_reg_map[addr].values)
+        # All reads succeeded — commit atomically to both buffers.
+        for addr, values in staged.items():
+            self._set_config_register(addr, values)
+
+    def _set_config_register(self, address: int, value: int | list[int]) -> None:
+        """Write a config value into BOTH buffers' static maps.
+
+        The buffers are swapped every acquisition tick, so updating only the
+        connect-time front buffer would let the stale value swap back into
+        published data on the next tick. Keeping both maps in sync prevents that.
+        Assigning a fresh list object (not mutating in place) is deliberate: the
+        downstream EM540 slave detects static changes by the identity of the
+        values list, so replacing it lets a reconnect-time config change
+        propagate downstream even after the slave's one-shot initial sync.
+        """
+        values = [value] if isinstance(value, int) else list(value)
+        for data in (self._front_data, self._back_data):
+            data.frame.static_reg_map[address].values = list(values)
 
     async def _read_config_register_back(self, address: int, requested: int) -> int:
         """Read a single config register back after a write, returning its value.
@@ -1251,16 +1285,6 @@ class Em540Master:
         except (ModbusIOException, ModbusException):
             logger.debug("EM540 read-back of register %s errored; assuming written value.", hex(address))
             return requested
-
-    def _set_config_register(self, frame, address: int, value: int) -> None:
-        """Write a single-register config value into BOTH buffers' static maps.
-
-        The buffers are swapped every acquisition tick, so updating only the
-        connect-time front buffer would let the stale value swap back into
-        published data on the next tick. Keeping both maps in sync prevents that.
-        """
-        for data in (self._front_data, self._back_data):
-            data.frame.static_reg_map[address].values = [value]
 
     async def _write_register(self, address: int, value: int) -> bool:
         """Write a single holding register. Returns True on confirmed success.

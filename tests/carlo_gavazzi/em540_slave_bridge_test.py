@@ -282,6 +282,34 @@ class TestEm540Slave(unittest.TestCase):
         actual = slave._registers[offset : offset + len(reg.values)]
         self.assertEqual(actual, reg.values)
 
+    def test_new_data_resyncs_config_register_changed_after_initial_sync(self):
+        """A config register (e.g. measurement mode 0x1103) changed by the master
+        on reconnect must propagate downstream even after the one-shot initial
+        static sync has completed."""
+        frame = Em540Frame()
+        frame.static_reg_map[0x1103].values = [2]  # non-zero so initial sync fires
+        slave, _ = self._build_slave(frame)
+
+        meter_data = MeterData()
+        meter_data.frame = frame
+        meter_data._timestamp = 123.0
+
+        # First cycle performs the initial static sync.
+        asyncio.run(slave.new_data(meter_data))
+        self.assertTrue(slave._static_synced)
+
+        offset = 0x1103 + REG_OFFSET - slave._reg_start_address
+        self.assertEqual(slave._registers[offset], 2)
+
+        # Master changes the config register on reconnect (new list object, as
+        # Em540Master._set_config_register does).
+        frame.static_reg_map[0x1103].values = [0]
+
+        asyncio.run(slave.new_data(meter_data))
+
+        # Downstream register array reflects the new value, not the stale one.
+        self.assertEqual(slave._registers[offset], 0)
+
     def test_new_data_preserves_overlapped_static_device_type_register(self):
         frame = Em540Frame()
         frame.static_reg_map[0x000B].values = [1744]
