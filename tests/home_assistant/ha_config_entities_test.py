@@ -83,12 +83,79 @@ def test_master_timeout_entity_uses_milliseconds_with_internal_seconds_conversio
 
 
 # ---------------------------------------------------------------------------
+# Runtime command validation (bounds / finiteness)
+# ---------------------------------------------------------------------------
+
+
+def _send_command(entities: HAConfigEntities, entity, payload: str):
+    """Simulate an inbound MQTT command for the given entity."""
+    message = MagicMock()
+    message.topic = entities.command_topic_for(entity)
+    message.payload = payload.encode()
+    entities._on_command(None, None, message)
+
+
+def _smoothing_entity(entities: HAConfigEntities):
+    return next(e for e in entities._entities if e.field_path == "ts65a_slave.smoothing_window_seconds")
+
+
+def test_command_applies_valid_value():
+    state = AppState()
+    entities = _make_entities(state)
+    _send_command(entities, _smoothing_entity(entities), "3.5")
+    assert state.ts65a_slave.smoothing_window_seconds == 3.5
+
+
+def test_command_rejects_out_of_range_values():
+    for payload in ("-1", "15.1", "100"):
+        state = AppState()
+        entities = _make_entities(state)
+        original = state.ts65a_slave.smoothing_window_seconds
+        _send_command(entities, _smoothing_entity(entities), payload)
+        # Out-of-range payloads are ignored; the live config is unchanged.
+        assert state.ts65a_slave.smoothing_window_seconds == original
+
+
+def test_command_rejects_non_finite_values():
+    # nan/inf would break RunningAverage eviction (deques grow unbounded) and
+    # then fail ConfigManager validation on restart — must be rejected at the door.
+    for payload in ("nan", "inf", "-inf"):
+        state = AppState()
+        entities = _make_entities(state)
+        original = state.ts65a_slave.smoothing_window_seconds
+        _send_command(entities, _smoothing_entity(entities), payload)
+        assert state.ts65a_slave.smoothing_window_seconds == original
+
+
+def test_command_out_of_range_is_not_persisted():
+    state = AppState()
+    entities = _make_entities(state)
+    _send_command(entities, _smoothing_entity(entities), "999")
+    # A rejected value must not schedule a persist that would write bad config.
+    entities._config_manager.schedule_persist.assert_not_called()
+
+
+def test_command_rejects_oversized_integer_without_raising():
+    # An int payload too large to convert to a C double must be rejected by the
+    # bounds check, not raise OverflowError out of the MQTT callback. Use the
+    # retries entity (parse_value=int).
+    state = AppState()
+    entities = _make_entities(state)
+    entity = next(e for e in entities._entities if e.field_path == "em540_master.retries")
+    original = state.em540_master.retries
+    # Should not raise.
+    _send_command(entities, entity, str(10**400))
+    assert state.em540_master.retries == original
+    entities._config_manager.schedule_persist.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
 # Property 7 — MQTT discovery payload validity
 # ---------------------------------------------------------------------------
 
 # Strategy: generate valid values for each PERSISTED_FIELD and build an AppState.
 _grid_limit = st.floats(min_value=-50000, max_value=0, allow_nan=False, allow_infinity=False)
-_smoothing = st.integers(min_value=1, max_value=600)
+_smoothing = st.floats(min_value=0, max_value=15, allow_nan=False, allow_infinity=False)
 _mqtt_interval = st.floats(min_value=0.1, max_value=60, allow_nan=False, allow_infinity=False)
 _master_interval = st.floats(min_value=0.0, max_value=10, allow_nan=False, allow_infinity=False)
 _master_retries = st.integers(min_value=0, max_value=9)
@@ -102,7 +169,7 @@ def app_states(draw):
     """Generate an AppState with random valid values for all persisted fields."""
     state = AppState()
     state.ts65a_slave.grid_feed_in_hard_limit = draw(_grid_limit)
-    state.ts65a_slave.smoothing_num_points = draw(_smoothing)
+    state.ts65a_slave.smoothing_window_seconds = draw(_smoothing)
     state.mqtt.update_interval = draw(_mqtt_interval)
     state.em540_master.update_interval = draw(_master_interval)
     state.em540_master.retries = draw(_master_retries)

@@ -314,7 +314,7 @@ class Ts65aValidator:
         meter_data.frame = self.upstream_frame
         meter_data.update_from_frame()
         ts65a_model = Ts65aMeterData(
-            20,  # smoothing_num_points
+            2.5,  # smoothing_window_seconds
             -5000,  # grid_feed_in_hard_limit
             logging.getLogger("integration-ts65a"),  # logger
             Ts65aSlaveStats(),  # stats

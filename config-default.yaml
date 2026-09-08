@@ -82,8 +82,10 @@ ts65a_slave:
   serial_idle_timeout: 5.0
   # Grid feed-in hard limit in Watts (negative value). This is used to track when we are over this limit
   grid_feed_in_hard_limit: -5000
-  # Number of points to use for smoothing the power values when checking against the hard limit
-  smoothing_num_points: 20
+  # Duration in seconds over which downstream readings are time-averaged (smoothed).
+  # Frame-rate independent. 0 disables smoothing (serve latest value). Max 15 seconds.
+  # 2.0s matches the previous default of 20 samples at the 10Hz (0.1s) master cadence.
+  smoothing_window_seconds: 2.0
   # Log level info for this component
   log_level: INFO
   # Optional Modbus/RTU serial adapter (disabled by default)

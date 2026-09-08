@@ -1,50 +1,97 @@
 import collections
+import math
+import time
 
 from app.fronius.ts65a_slave_stats import Ts65aSlaveStats
 
 
 class RunningAverage:
-    __slots__ = ("max_points", "values")
+    """Time-windowed moving average.
 
-    def __init__(self, max_points):
-        self.max_points = max_points
-        self.values = collections.deque(maxlen=max_points)
+    Samples are retained for ``window_seconds`` and averaged. This is
+    independent of the upstream frame rate: the window is a duration, not a
+    fixed number of samples, so a faster or slower upstream read cadence does
+    not change how much history is smoothed.
 
-    def add(self, value):
-        self.values.append(value)
+    A ``window_seconds`` of 0 disables smoothing entirely — only the most recent
+    sample is kept, so ``mean`` returns the latest instantaneous value.
+
+    Each sample carries the timestamp supplied by the caller (the upstream frame
+    time). Eviction is evaluated against the newest sample's timestamp rather
+    than wall-clock ``now``, so the average is driven purely by data timestamps
+    and is deterministic/testable without patching the clock.
+    """
+
+    __slots__ = ("window_seconds", "values")
+
+    def __init__(self, window_seconds):
+        self.window_seconds = window_seconds
+        # deque of (timestamp, value)
+        self.values = collections.deque()
+
+    def add(self, value, timestamp):
+        # Guard against a non-monotonic timestamp. The upstream frame time is
+        # wall-clock based, so an NTP step or manual clock change can move it
+        # backwards. A future-dated sample left at the head would block eviction
+        # of every later sample, growing the deque without bound and stretching
+        # the smoothing window until wall time catches up. If the clock regresses
+        # relative to the newest stored sample, drop the stale history and start
+        # the window fresh from this sample.
+        if self.values and timestamp < self.values[-1][0]:
+            self.values.clear()
+        self.values.append((timestamp, value))
+        self._evict(timestamp)
+
+    def _evict(self, now):
+        vals = self.values
+        # window 0 disables smoothing: keep only the newest sample. Handled
+        # explicitly (not via the cutoff below) so equal timestamps still
+        # collapse to the latest value.
+        if self.window_seconds <= 0:
+            while len(vals) > 1:
+                vals.popleft()
+            return
+        # Drop samples at or older than the cutoff (window edge) relative to the
+        # newest sample. Uses <= so a sample exactly on the cutoff edge is also
+        # dropped, keeping the retained span strictly within the window.
+        cutoff = now - self.window_seconds
+        while len(vals) > 1 and vals[0][0] <= cutoff:
+            vals.popleft()
 
     @property
     def mean(self):
         n = len(self.values)
         if n == 0:
             return 0.0
-        return sum(self.values) / n
+        return sum(v for _, v in self.values) / n
 
     def reset(self):
         self.values.clear()
 
-    def set_max_points(self, max_points):
-        if max_points == self.max_points:
+    def set_window(self, window_seconds):
+        if window_seconds == self.window_seconds:
             return
-        self.max_points = max_points
-        self.values = collections.deque(self.values, maxlen=max_points)
+        self.window_seconds = window_seconds
+        # Re-apply the new window immediately using the newest timestamp so a
+        # shrink takes effect at once rather than waiting for new samples.
+        if self.values:
+            self._evict(self.values[-1][0])
 
 
-# def get_sign(number: float):
-#    if number >= 0:
-#        return 1
-#    else:
-#        return -1
+def _derive_power_factor(power, reactive_power):
+    """Derive power factor from (smoothed) real and reactive power.
 
-
-def _calculate_power_factor(pf, power, reactive_power):
-    # Not sure if this is correct, seems to be a convention that power factor indicates direction of power flow
-    return pf if power > 0 else -pf
-
-    # This is another definition of power factor that takes into account the sign of power and reactive power
-    # power_sign = get_sign(power)
-    # reactive_power_sign = get_sign(reactive_power)
-    # return pf * power_sign / reactive_power_sign
+    PF = P / S where S = sqrt(P^2 + Q^2). Deriving PF from the same P and Q used
+    for the apparent-power calculation keeps the served frame internally
+    consistent (PF, P, Q and S always satisfy the power triangle). The sign of
+    the result follows the sign of real power naturally, so no separate sign
+    handling is needed. Returns 1.0 when there is no apparent power (idle) to
+    avoid division by zero.
+    """
+    apparent = math.hypot(power, reactive_power)
+    if apparent == 0.0:
+        return 1.0
+    return power / apparent
 
 
 class Ts65aMeterData:
@@ -54,40 +101,36 @@ class Ts65aMeterData:
     particularly with equipment that have pulsating power requirements (PID driven heat elments, some A/Cs like Actron)
     """
 
-    def __init__(self, max_points, grid_feed_in_hard_limit, logger, stats: Ts65aSlaveStats):
+    def __init__(self, smoothing_window_seconds, grid_feed_in_hard_limit, logger, stats: Ts65aSlaveStats):
         self.stats = stats
         self.stats.grid_feed_in_hard_limit = grid_feed_in_hard_limit
         self.logger = logger
 
-        self._current_an = RunningAverage(max_points)
-        self._current_a = RunningAverage(max_points)
-        self._current_b = RunningAverage(max_points)
-        self._current_c = RunningAverage(max_points)
-        self._voltage_ln = RunningAverage(max_points)
-        self._voltage_ln_a = RunningAverage(max_points)
-        self._voltage_ln_b = RunningAverage(max_points)
-        self._voltage_ln_c = RunningAverage(max_points)
-        self._voltage_ll = RunningAverage(max_points)
-        self._voltage_ll_a = RunningAverage(max_points)
-        self._voltage_ll_b = RunningAverage(max_points)
-        self._voltage_ll_c = RunningAverage(max_points)
-        self._frequency = RunningAverage(max_points)
-        self._power = RunningAverage(max_points)
-        self._power_a = RunningAverage(max_points)
-        self._power_b = RunningAverage(max_points)
-        self._power_c = RunningAverage(max_points)
-        self._apparent_power = RunningAverage(max_points)
-        self._apparent_power_a = RunningAverage(max_points)
-        self._apparent_power_b = RunningAverage(max_points)
-        self._apparent_power_c = RunningAverage(max_points)
-        self._reactive_power = RunningAverage(max_points)
-        self._reactive_power_a = RunningAverage(max_points)
-        self._reactive_power_b = RunningAverage(max_points)
-        self._reactive_power_c = RunningAverage(max_points)
-        self._power_factor = RunningAverage(max_points)
-        self._power_factor_a = RunningAverage(max_points)
-        self._power_factor_b = RunningAverage(max_points)
-        self._power_factor_c = RunningAverage(max_points)
+        self._current_an = RunningAverage(smoothing_window_seconds)
+        self._current_a = RunningAverage(smoothing_window_seconds)
+        self._current_b = RunningAverage(smoothing_window_seconds)
+        self._current_c = RunningAverage(smoothing_window_seconds)
+        self._voltage_ln = RunningAverage(smoothing_window_seconds)
+        self._voltage_ln_a = RunningAverage(smoothing_window_seconds)
+        self._voltage_ln_b = RunningAverage(smoothing_window_seconds)
+        self._voltage_ln_c = RunningAverage(smoothing_window_seconds)
+        self._voltage_ll = RunningAverage(smoothing_window_seconds)
+        self._voltage_ll_a = RunningAverage(smoothing_window_seconds)
+        self._voltage_ll_b = RunningAverage(smoothing_window_seconds)
+        self._voltage_ll_c = RunningAverage(smoothing_window_seconds)
+        self._frequency = RunningAverage(smoothing_window_seconds)
+        self._power = RunningAverage(smoothing_window_seconds)
+        self._power_a = RunningAverage(smoothing_window_seconds)
+        self._power_b = RunningAverage(smoothing_window_seconds)
+        self._power_c = RunningAverage(smoothing_window_seconds)
+        self._reactive_power = RunningAverage(smoothing_window_seconds)
+        self._reactive_power_a = RunningAverage(smoothing_window_seconds)
+        self._reactive_power_b = RunningAverage(smoothing_window_seconds)
+        self._reactive_power_c = RunningAverage(smoothing_window_seconds)
+        # NOTE: apparent power (S) and power factor (PF) are intentionally NOT
+        # smoothed with their own running averages. They are derived from the
+        # smoothed real/reactive power (see the apparent_power / power_factor
+        # properties) so the served power triangle stays internally consistent.
 
         # we don't do running average for kWh, just keep adding the latest value
         self._wh_neg_total = 0
@@ -175,21 +218,32 @@ class Ts65aMeterData:
     def power_c(self):
         return self._power_c.mean
 
+    # Apparent power and power factor are DERIVED from the smoothed real (P) and
+    # reactive (Q) power rather than smoothed independently. Averaging S and PF
+    # in their own windows de-correlates them from P and Q (the mean of a
+    # magnitude is not the magnitude of the means), which produced a physically
+    # impossible power triangle (S far larger than sqrt(P^2 + Q^2), and an
+    # implausibly low PF). Deriving them here guarantees, on every served frame:
+    #   S  = sqrt(mean(P)^2 + mean(Q)^2)
+    #   PF = mean(P) / S            (sign follows real-power direction naturally)
+    # Note this is the *fundamental* apparent power; on real hardware S may differ
+    # slightly from the meter's measured S under high harmonic distortion, but it
+    # is internally coherent, which is what downstream SunSpec consumers expect.
     @property
     def apparent_power(self):
-        return self._apparent_power.mean
+        return math.hypot(self._power.mean, self._reactive_power.mean)
 
     @property
     def apparent_power_a(self):
-        return self._apparent_power_a.mean
+        return math.hypot(self._power_a.mean, self._reactive_power_a.mean)
 
     @property
     def apparent_power_b(self):
-        return self._apparent_power_b.mean
+        return math.hypot(self._power_b.mean, self._reactive_power_b.mean)
 
     @property
     def apparent_power_c(self):
-        return self._apparent_power_c.mean
+        return math.hypot(self._power_c.mean, self._reactive_power_c.mean)
 
     @property
     def reactive_power(self):
@@ -209,19 +263,19 @@ class Ts65aMeterData:
 
     @property
     def power_factor(self):
-        return _calculate_power_factor(self._power_factor.mean, self._power.mean, self._reactive_power.mean)
+        return _derive_power_factor(self._power.mean, self._reactive_power.mean)
 
     @property
     def power_factor_a(self):
-        return _calculate_power_factor(self._power_factor_a.mean, self._power_a.mean, self._reactive_power_a.mean)
+        return _derive_power_factor(self._power_a.mean, self._reactive_power_a.mean)
 
     @property
     def power_factor_b(self):
-        return _calculate_power_factor(self._power_factor_b.mean, self._power_b.mean, self._reactive_power_b.mean)
+        return _derive_power_factor(self._power_b.mean, self._reactive_power_b.mean)
 
     @property
     def power_factor_c(self):
-        return _calculate_power_factor(self._power_factor_c.mean, self._power_c.mean, self._reactive_power_c.mean)
+        return _derive_power_factor(self._power_c.mean, self._reactive_power_c.mean)
 
     @property
     def wh_neg_total(self):
@@ -293,38 +347,39 @@ class Ts65aMeterData:
             self.logger.debug(f"Power over the feed in limit reached: {self.power}W")
             self._reset_means()
 
-        # Update all running averages with new data
-        self._current_an.add(data.system.An)
-        self._current_a.add(data.phases[0].current)
-        self._current_b.add(data.phases[1].current)
-        self._current_c.add(data.phases[2].current)
-        self._voltage_ln.add(data.system.line_neutral_voltage)
-        self._voltage_ln_a.add(data.phases[0].line_neutral_voltage)
-        self._voltage_ln_b.add(data.phases[1].line_neutral_voltage)
-        self._voltage_ln_c.add(data.phases[2].line_neutral_voltage)
-        self._voltage_ll.add(data.system.line_line_voltage)
-        self._voltage_ll_a.add(data.phases[0].line_line_voltage)
-        self._voltage_ll_b.add(data.phases[1].line_line_voltage)
-        self._voltage_ll_c.add(data.phases[2].line_line_voltage)
-        self._frequency.add(data.system.frequency)
-        self._power.add(data.system.power)
-        self._power_a.add(data.phases[0].power)
-        self._power_b.add(data.phases[1].power)
-        self._power_c.add(data.phases[2].power)
-        self._apparent_power.add(data.system.apparent_power)
-        self._apparent_power_a.add(data.phases[0].apparent_power)
-        self._apparent_power_b.add(data.phases[1].apparent_power)
-        self._apparent_power_c.add(data.phases[2].apparent_power)
-        self._reactive_power.add(data.system.reactive_power)
-        self._reactive_power_a.add(data.phases[0].reactive_power)
-        self._reactive_power_b.add(data.phases[1].reactive_power)
-        self._reactive_power_c.add(data.phases[2].reactive_power)
+        # Timestamp for this sample drives the time-windowed averages. Use the
+        # upstream frame time when available (MeterData.timestamp); fall back to
+        # monotonic time so the window still advances if a caller supplies data
+        # without a timestamp.
+        ts = getattr(data, "timestamp", None)
+        if ts is None:
+            ts = time.monotonic()
 
-        # Power factor can be negative, so we need to handle that correctly
-        self._power_factor.add(abs(data.system.power_factor))
-        self._power_factor_a.add(abs(data.phases[0].power_factor))
-        self._power_factor_b.add(abs(data.phases[1].power_factor))
-        self._power_factor_c.add(abs(data.phases[2].power_factor))
+        # Update all running averages with new data
+        self._current_an.add(data.system.An, ts)
+        self._current_a.add(data.phases[0].current, ts)
+        self._current_b.add(data.phases[1].current, ts)
+        self._current_c.add(data.phases[2].current, ts)
+        self._voltage_ln.add(data.system.line_neutral_voltage, ts)
+        self._voltage_ln_a.add(data.phases[0].line_neutral_voltage, ts)
+        self._voltage_ln_b.add(data.phases[1].line_neutral_voltage, ts)
+        self._voltage_ln_c.add(data.phases[2].line_neutral_voltage, ts)
+        self._voltage_ll.add(data.system.line_line_voltage, ts)
+        self._voltage_ll_a.add(data.phases[0].line_line_voltage, ts)
+        self._voltage_ll_b.add(data.phases[1].line_line_voltage, ts)
+        self._voltage_ll_c.add(data.phases[2].line_line_voltage, ts)
+        self._frequency.add(data.system.frequency, ts)
+        self._power.add(data.system.power, ts)
+        self._power_a.add(data.phases[0].power, ts)
+        self._power_b.add(data.phases[1].power, ts)
+        self._power_c.add(data.phases[2].power, ts)
+        self._reactive_power.add(data.system.reactive_power, ts)
+        self._reactive_power_a.add(data.phases[0].reactive_power, ts)
+        self._reactive_power_b.add(data.phases[1].reactive_power, ts)
+        self._reactive_power_c.add(data.phases[2].reactive_power, ts)
+        # Apparent power and power factor are derived from the smoothed P/Q above
+        # (see the apparent_power / power_factor properties); the meter's own S
+        # and PF registers are intentionally not smoothed independently.
 
         # And now all fixed values
         # export / import energy in Wh
@@ -349,7 +404,7 @@ class Ts65aMeterData:
         self._vah_plus_b = 0
         self._vah_plus_c = 0
 
-    def reconfigure(self, max_points, grid_feed_in_hard_limit):
+    def reconfigure(self, smoothing_window_seconds, grid_feed_in_hard_limit):
         self.stats.grid_feed_in_hard_limit = grid_feed_in_hard_limit
 
         for attr_name in (
@@ -370,20 +425,12 @@ class Ts65aMeterData:
             "_power_a",
             "_power_b",
             "_power_c",
-            "_apparent_power",
-            "_apparent_power_a",
-            "_apparent_power_b",
-            "_apparent_power_c",
             "_reactive_power",
             "_reactive_power_a",
             "_reactive_power_b",
             "_reactive_power_c",
-            "_power_factor",
-            "_power_factor_a",
-            "_power_factor_b",
-            "_power_factor_c",
         ):
-            getattr(self, attr_name).set_max_points(max_points)
+            getattr(self, attr_name).set_window(smoothing_window_seconds)
 
     def _reset_means(self):
         self.logger.debug("Resetting running averages due to power over feed in limit")
@@ -406,15 +453,7 @@ class Ts65aMeterData:
         self._power_a.reset()
         self._power_b.reset()
         self._power_c.reset()
-        self._apparent_power.reset()
-        self._apparent_power_a.reset()
-        self._apparent_power_b.reset()
-        self._apparent_power_c.reset()
         self._reactive_power.reset()
         self._reactive_power_a.reset()
         self._reactive_power_b.reset()
         self._reactive_power_c.reset()
-        self._power_factor.reset()
-        self._power_factor_a.reset()
-        self._power_factor_b.reset()
-        self._power_factor_c.reset()

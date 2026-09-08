@@ -59,7 +59,7 @@ def generate_config(
             "slave_id": 1,
             "update_timeout": 2.0,
             "grid_feed_in_hard_limit": -5000,
-            "smoothing_num_points": 20,
+            "smoothing_window_seconds": 2.5,
             "log_level": "WARNING",
             "serial": {
                 "enabled": ts65a_serial_port is not None,

@@ -84,7 +84,7 @@ def _make_state():
             update_timeout=5.0,
             serial_idle_timeout=5.0,
             grid_feed_in_hard_limit=-10000.0,
-            smoothing_num_points=10,
+            smoothing_window_seconds=1.0,
             log_level="CRITICAL",
         ),
         mqtt=SimpleNamespace(
