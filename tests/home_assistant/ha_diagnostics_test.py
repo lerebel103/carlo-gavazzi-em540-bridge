@@ -199,6 +199,7 @@ def test_only_selected_diagnostics_are_enabled_by_default():
         "em540_serial_disconnect_count",
         "em540_stale_data_age",
         "em540_dropped_stale_requests",
+        "em540_wrong_connection",
         "ts65a_tcp_client_count",
         "ts65a_tcp_client_disconnect_count",
         "ts65a_serial_client_active",
@@ -288,3 +289,44 @@ def test_daily_extrema_source_absent_does_not_error():
         _, payload = diagnostics.mqtt_data()
 
     assert json.loads(payload) is not None
+
+
+def test_wrong_connection_sensor_published_from_meter_config_source():
+    diagnostics = HADiagnostics(topic_prefix="test")
+    source = SimpleNamespace(meter_config={"measurement_mode": 2, "measuring_system": 0, "wrong_connection": 1})
+    diagnostics.set_meter_config_source(source)
+
+    with patch.dict("sys.modules", {"uptime": SimpleNamespace(uptime=lambda: 1)}):
+        _, payload = diagnostics.mqtt_data()
+
+    assert json.loads(payload)["em540_wrong_connection"] == 1
+
+
+def test_wrong_connection_defaults_to_zero_before_first_connect():
+    diagnostics = HADiagnostics(topic_prefix="test")
+    source = SimpleNamespace(
+        meter_config={"measurement_mode": None, "measuring_system": None, "wrong_connection": None}
+    )
+    diagnostics.set_meter_config_source(source)
+
+    with patch.dict("sys.modules", {"uptime": SimpleNamespace(uptime=lambda: 1)}):
+        _, payload = diagnostics.mqtt_data()
+
+    # None (no connect yet) publishes as 0 (no problem), never unknown.
+    assert json.loads(payload)["em540_wrong_connection"] == 0
+
+
+def test_wrong_connection_source_absent_does_not_error():
+    diagnostics = HADiagnostics(topic_prefix="test")
+    with patch.dict("sys.modules", {"uptime": SimpleNamespace(uptime=lambda: 1)}):
+        _, payload = diagnostics.mqtt_data()
+    assert json.loads(payload) is not None
+
+
+def test_wrong_connection_sensor_advertised_and_enabled_by_default():
+    diagnostics = HADiagnostics(topic_prefix="test")
+    payloads = {topic: json.loads(payload) for topic, payload in diagnostics.advertise_data()}
+    cfg = payloads["homeassistant/sensor/em540_bridge_test_em540_wrong_connection/config"]
+    assert cfg["name"] == "EM540 Wiring Check Error"
+    assert cfg["enabled_by_default"] is True
+    assert cfg["entity_category"] == "diagnostic"

@@ -375,6 +375,25 @@ class Em540Slave(MeterDataListener):
         for addr in self._overlapped_static_addrs:
             writes.append((addr + REG_OFFSET, frame.static_reg_map[addr].values))
 
+    def _resync_changed_static_registers(self, frame: Em540Frame, writes: list[tuple[int, list[int]]]) -> None:
+        """Re-apply any static register whose value changed after the initial sync.
+
+        The initial sync (`_sync_static_registers_if_changed`) runs once. But the
+        master can update static config registers on a reconnect (e.g. a
+        corrective measurement-mode/measuring-system write, or a changed
+        wiring-check status), replacing the register's values-list object. This
+        catches those post-sync changes via the same identity check and pushes
+        them downstream so served clients don't keep a stale config value.
+        Cheap: a handful of id() comparisons per cycle.
+        """
+        if not self._static_synced:
+            return
+        for addr in self._static_addrs:
+            current_id = id(frame.static_reg_map[addr].values)
+            if self._last_static_value_ids.get(addr) != current_id:
+                writes.append((addr + REG_OFFSET, frame.static_reg_map[addr].values))
+                self._last_static_value_ids[addr] = current_id
+
     async def new_data(self, data: MeterData) -> None:
         """Handle new data from the master.
 
@@ -402,6 +421,9 @@ class Em540Slave(MeterDataListener):
         # Re-apply them after dynamic writes so downstream clients always see static metadata.
         if self._static_synced and not static_synced_this_cycle:
             self._refresh_overlapped_static_registers(frame, writes)
+            # Propagate any post-initial-sync static change (e.g. a config register
+            # updated by the master on reconnect) to downstream clients.
+            self._resync_changed_static_registers(frame, writes)
 
         # Single cross-thread flush for all collected writes
         write_ok = await self._flush_writes(writes)

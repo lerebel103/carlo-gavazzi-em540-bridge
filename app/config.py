@@ -54,6 +54,14 @@ class Em540MasterConfig:
     # the watchdog entirely. Kept comfortably above the reconnect backoff ceiling
     # (5s) so ordinary reconnects never trip it.
     health_max_stale_s: float = 30.0
+    # On connect, force the meter's measurement mode to C / Bidirectional
+    # (register 0x1103 -> 2). Safe, non-destructive. Ignored (logged) on
+    # read-only MID (PFx) meters where the mode is fixed by the part number.
+    ensure_bidirectional_mode: bool = False
+    # On connect, force the meter's measuring system to 3Pn / 3-phase with
+    # neutral (register 0x1002 -> 0). WARNING: changing the measuring system
+    # may reset the meter's kWh counters, so this is disabled by default.
+    ensure_3phase_measuring_system: bool = False
     log_level: str = "INFO"
 
 
@@ -322,6 +330,16 @@ class ConfigManager:
             raise ConfigError(
                 f"ts65a_slave.smoothing_window_seconds must satisfy 0 <= value <= 15, got {smoothing_window}"
             )
+
+        # 7. meter-config enforcement flags must be booleans (a YAML typo like
+        # "true" quoted as a string would otherwise silently behave truthily).
+        bool_fields = [
+            ("em540_master.ensure_bidirectional_mode", state.em540_master.ensure_bidirectional_mode),
+            ("em540_master.ensure_3phase_measuring_system", state.em540_master.ensure_3phase_measuring_system),
+        ]
+        for name, value in bool_fields:
+            if not isinstance(value, bool):
+                raise ConfigError(f"{name} must be a boolean (true/false), got {value!r}")
 
     def _populate_config(self, target, section_data: dict, path: str) -> None:
         for key, value in section_data.items():

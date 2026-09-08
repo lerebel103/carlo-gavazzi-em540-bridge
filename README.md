@@ -17,8 +17,11 @@ Fronius TS-65-A emulation maps EM540 data to the corresponding registers transpa
 smoothed over a configurable time window so the emulated values represent a rolling average rather than instantaneous
 readings (see `config-default.yaml`).
 
-> **Note:** The bridge is strictly a read-only proxy. Static identification/config registers are read during connection
-> setup, and acquisition cycles read the primary dynamic block plus the full energy block each tick.
+> **Note:** The bridge is read-only by default. Static identification/config registers are read during connection
+> setup, and acquisition cycles read the primary dynamic block plus the full energy block each tick. The only writes
+> the bridge can ever make to the meter are the two **optional, disabled-by-default** meter-configuration enforcement
+> settings described under [Meter Configuration Enforcement](#meter-configuration-enforcement-victron-setups). With
+> both left at their defaults, the bridge never writes to the meter.
 
 ## Features
 
@@ -51,6 +54,51 @@ See [config-default.yaml](config-default.yaml) for the full sample layout.
 - These can run concurrently with each slave's TCP endpoint.
 
 When running with Docker, map each enabled serial adapter device into the container (for example `/dev/ttyUSB1` for EM540 slave serial and `/dev/ttyUSB2` for TS65A slave serial).
+
+### Meter Configuration Enforcement (Victron setups)
+
+On each (re)connect the bridge reads the meter's key configuration registers and logs them in a
+human-readable form alongside their raw value, for example:
+
+```
+EM540 measurement mode: C (Bidirectional) [2]
+EM540 measuring system: 3Pn (3-phase + neutral) [0]
+EM540 wiring check: Correct [0]
+```
+
+This mirrors what a Victron GX device does when it talks to a Carlo Gavazzi meter: it expects the
+meter to be in a specific state (bidirectional measurement so grid export reads as negative power,
+and a three-phase measuring system) and will otherwise not account for energy correctly. When the
+bridge sits between the meter and a Victron (or Fronius) system, these settings let it keep the
+meter in that desired state automatically, so a factory reset, a manual front-panel change, or a
+meter swap can't silently leave the meter mis-configured for your system.
+
+Two **opt-in** flags under `em540_master` control whether the bridge corrects the meter (both
+default to `false`, i.e. read-and-log only, no writes):
+
+| Setting                          | Register | Applies                         | Default | Notes |
+|----------------------------------|----------|---------------------------------|---------|-------|
+| `ensure_bidirectional_mode`      | `0x1103` | Measurement mode → C / Bidirectional (`2`) | `false` | Safe, non-destructive. Matches Victron's expected mode so export reads as negative power. |
+| `ensure_3phase_measuring_system` | `0x1002` | Measuring system → 3Pn / 3-phase + neutral (`0`) | `false` | **May reset the meter's kWh counters** when changed, so it is off by default. Only enable if your meter is genuinely wired 3-phase + neutral. |
+
+Behaviour and safety:
+
+- Registers are **always read and logged** on connect regardless of the flags; the flags only
+  decide whether a corrective write is attempted.
+- Writes are **read-first / write-only-on-mismatch**: the bridge writes only when the current value
+  differs from the desired one, then reads the register back and caches/serves the meter's *actual*
+  post-write value.
+- Writes are **best-effort and never fatal**. On MID (PFx) meter models these registers are
+  read-only and fixed by the part number; a rejected write is logged and the connection continues
+  normally.
+- These flags are configuration-file only and are intentionally **not** exposed as Home Assistant
+  entities.
+- The meter's own **wiring-check status** (register `0x1105`) is published as the enabled-by-default
+  Home Assistant diagnostic sensor **EM540 Wiring Check Error** (`0` = correct, `1` = connection
+  error), so a mis-wired meter is visible at a glance.
+
+> On reconnect the config registers are re-read (a few extra Modbus reads, on reconnect only) so a
+> change made on the device while the bridge was disconnected is observed and, if enabled, re-applied.
 
 ## Requirements
 
@@ -179,6 +227,7 @@ state classes are `measurement`.
 | EM540 Circuit Breaker Open Count  |      |              | 0         | no                 |
 | EM540 Stale Data Age              | ms   | duration     | 1         | yes                |
 | EM540 Dropped Stale Requests      |      |              | 0         | yes                |
+| EM540 Wiring Check Error          |      |              | 0         | yes                |
 | TS65A TCP Clients                 |      |              | 0         | yes                |
 | TS65A TCP Disconnects             |      |              | 0         | yes                |
 | TS65A Serial Active               |      |              | 0         | yes                |

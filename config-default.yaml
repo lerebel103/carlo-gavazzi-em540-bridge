@@ -34,6 +34,19 @@ em540_master:
   # between 0 and ~25s are clamped up at runtime so the Docker 'unhealthy'
   # transition always precedes self-exit (see docker-compose.yaml healthcheck).
   health_max_stale_s: 30.0
+  # Meter configuration enforcement on connect. The measurement mode, measuring
+  # system, and wiring-check status are ALWAYS read and logged (human-readable +
+  # raw value) on every connect. These flags only control whether a corrective
+  # write is attempted. Not exposed to Home Assistant.
+  #
+  # Force measurement mode to C / Bidirectional (register 0x1103 -> 2). Safe and
+  # non-destructive. No-op on read-only MID (PFx) meters, where the mode is fixed
+  # by the part number (a rejected write is logged, not fatal).
+  ensure_bidirectional_mode: false
+  # Force measuring system to 3Pn / 3-phase with neutral (register 0x1002 -> 0).
+  # WARNING: changing the measuring system may reset the meter's kWh counters, so
+  # this is disabled by default.
+  ensure_3phase_measuring_system: false
   # Log level for the master component
   log_level: INFO
 

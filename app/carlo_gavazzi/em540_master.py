@@ -16,6 +16,16 @@ from app.carlo_gavazzi.em540_data import (
     _DYNAMIC_PRIMARY_BLOCK_ADDR,
     _ENERGY_BLOCK_ADDR,
     ENERGY_BLOCK_TOTAL_SIZE,
+    MEASUREMENT_MODE_BIDIRECTIONAL,
+    MEASUREMENT_MODE_LABELS,
+    MEASURING_SYSTEM_3PN,
+    MEASURING_SYSTEM_LABELS,
+    REG_MEASUREMENT_MODE,
+    REG_MEASURING_SYSTEM,
+    REG_WRONG_CONNECTION_BLOCK,
+    WRONG_CONNECTION_LABELS,
+    WRONG_CONNECTION_STATUS_OFFSET,
+    describe_register_value,
 )
 from app.carlo_gavazzi.meter_data import MeterData
 
@@ -312,6 +322,14 @@ class Em540Master:
         self.slave_id: int = config.slave_id
         self._dyn_reg_read_counter: int = 0
         self._static_data_valid: bool = False
+        # Latest decoded meter-config snapshot, refreshed on every connect after
+        # the static read. `wrong_connection` is surfaced to diagnostics/HA; the
+        # other two are logged only. None until the first successful connect.
+        self._meter_config: dict[str, int | None] = {
+            "measurement_mode": None,
+            "measuring_system": None,
+            "wrong_connection": None,
+        }
         self._listeners: list[MeterDataListener] = []
         self._listener_threads: dict[MeterDataListener, Thread] = {}
         self._listener_last_seq: dict[MeterDataListener, int] = {}
@@ -484,8 +502,21 @@ class Em540Master:
                     return
                 else:
                     self._static_data_valid = True
+                    fresh_static_read = True
                     # Keep both buffers aligned so skipped reads in dynamic maps keep prior values.
                     self._copy_meter_data(self._front_data, self._back_data)
+            else:
+                fresh_static_read = False
+
+            # Read/log meter config and optionally correct it. On the first
+            # connect the static read above just populated these registers, so no
+            # extra read is needed. On a reconnect the static read is skipped, so
+            # _apply_meter_config re-reads the (few) config registers itself so a
+            # changed mode/measuring-system/wiring status is observed. Deliberately
+            # non-fatal: a failed/rejected config write must not prevent the
+            # bridge from serving otherwise-valid meter data.
+            await self._apply_meter_config(refresh_from_device=not fresh_static_read)
+
             # Connection fully ready (TCP connected and static data available).
             self._consecutive_connect_failures = 0
         else:
@@ -1094,3 +1125,217 @@ class Em540Master:
             return False
 
         return True
+
+    @property
+    def meter_config(self) -> dict[str, int | None]:
+        """Latest decoded meter-config snapshot (see `_apply_meter_config`).
+
+        Read by the diagnostics/MQTT layer to surface the wiring-check status.
+        A plain dict of ints (or None before the first connect); values are only
+        written from the connect path, so a shallow read here is safe.
+        """
+        return dict(self._meter_config)
+
+    async def _apply_meter_config(self, refresh_from_device: bool) -> None:
+        """Log the meter's config registers and optionally correct them.
+
+        The three registers (measurement mode 0x1103, measuring system 0x1002,
+        wrong-connection status 0x1105) are part of the static read plan.
+
+        On the first connect the caller has just performed the full static read,
+        so ``refresh_from_device`` is False and no extra Modbus traffic occurs
+        here. On a reconnect the static read is skipped, so ``refresh_from_device``
+        is True and we re-read just these registers (three extra reads, only on
+        reconnect) to observe any change — a wiring-status change, or a mode
+        changed on the device — before logging and enforcing. The re-read is
+        best-effort and atomic: on any failure the cached values are kept intact.
+
+        We decode and log all three, cache them, and — when the corresponding
+        config flag is enabled — write the Victron default if the current value
+        differs, then read the register back to confirm. All register mutations
+        are committed to BOTH buffers together (never the published front buffer
+        in place, and never a partial set), so listener workers can only ever
+        observe a fully-consistent snapshot.
+
+        Writes are best-effort: a rejected write (e.g. a read-only register on a
+        MID/PFx meter) or a transport error is logged and swallowed so it never
+        fails the connection.
+        """
+        # On a reconnect the values in the static map are from a previous connect
+        # until we re-read them. If that re-read fails we must NOT issue corrective
+        # writes off stale data — a write decision (especially the potentially
+        # counter-resetting measuring-system write) must be based on a value we
+        # confirmed this connect. We still log/publish the cached values.
+        config_current = True
+        if refresh_from_device:
+            config_current = await self._refresh_meter_config_registers()
+
+        static = self._front_data.frame.static_reg_map
+        measurement_mode = static[REG_MEASUREMENT_MODE].values[0]
+        measuring_system = static[REG_MEASURING_SYSTEM].values[0]
+        wrong_connection = static[REG_WRONG_CONNECTION_BLOCK].values[WRONG_CONNECTION_STATUS_OFFSET]
+
+        logger.info(
+            "EM540 measurement mode: %s",
+            describe_register_value(measurement_mode, MEASUREMENT_MODE_LABELS),
+        )
+        logger.info(
+            "EM540 measuring system: %s",
+            describe_register_value(measuring_system, MEASURING_SYSTEM_LABELS),
+        )
+        # A miswired meter is worth surfacing at WARNING; a correct one at INFO.
+        wrong_connection_desc = describe_register_value(wrong_connection, WRONG_CONNECTION_LABELS)
+        if wrong_connection == 0:
+            logger.info("EM540 wiring check: %s", wrong_connection_desc)
+        else:
+            logger.warning("EM540 wiring check reports a problem: %s", wrong_connection_desc)
+
+        self._meter_config = {
+            "measurement_mode": measurement_mode,
+            "measuring_system": measuring_system,
+            "wrong_connection": wrong_connection,
+        }
+
+        # Skip corrective writes if a reconnect refresh failed: the values above
+        # are stale and enforcing against them could issue an unnecessary or
+        # destructive write. Cached values are still logged/published above.
+        if not config_current:
+            logger.debug("EM540 config refresh failed on reconnect; skipping corrective writes this cycle.")
+            return
+
+        # Optional corrective writes, gated by config. After a successful write we
+        # read the register back and cache/propagate the meter's ACTUAL value
+        # (not the requested one) — the meter may ignore or normalise a write.
+        if self._config.ensure_bidirectional_mode and measurement_mode != MEASUREMENT_MODE_BIDIRECTIONAL:
+            logger.info(
+                "EM540 measurement mode is %s; applying desired %s",
+                describe_register_value(measurement_mode, MEASUREMENT_MODE_LABELS),
+                describe_register_value(MEASUREMENT_MODE_BIDIRECTIONAL, MEASUREMENT_MODE_LABELS),
+            )
+            if await self._write_register(REG_MEASUREMENT_MODE, MEASUREMENT_MODE_BIDIRECTIONAL):
+                actual = await self._read_config_register_back(REG_MEASUREMENT_MODE)
+                if actual is None:
+                    logger.info("EM540 measurement mode write could not be verified; keeping last known value.")
+                else:
+                    self._set_config_register(REG_MEASUREMENT_MODE, actual)
+                    self._meter_config["measurement_mode"] = actual
+                    logger.info(
+                        "EM540 measurement mode after write: %s",
+                        describe_register_value(actual, MEASUREMENT_MODE_LABELS),
+                    )
+
+        if self._config.ensure_3phase_measuring_system and measuring_system != MEASURING_SYSTEM_3PN:
+            logger.warning(
+                "EM540 measuring system is %s; applying desired %s. "
+                "Changing the measuring system may reset the meter's kWh counters.",
+                describe_register_value(measuring_system, MEASURING_SYSTEM_LABELS),
+                describe_register_value(MEASURING_SYSTEM_3PN, MEASURING_SYSTEM_LABELS),
+            )
+            if await self._write_register(REG_MEASURING_SYSTEM, MEASURING_SYSTEM_3PN):
+                actual = await self._read_config_register_back(REG_MEASURING_SYSTEM)
+                if actual is None:
+                    logger.info("EM540 measuring system write could not be verified; keeping last known value.")
+                else:
+                    self._set_config_register(REG_MEASURING_SYSTEM, actual)
+                    self._meter_config["measuring_system"] = actual
+                    logger.info(
+                        "EM540 measuring system after write: %s",
+                        describe_register_value(actual, MEASURING_SYSTEM_LABELS),
+                    )
+
+    async def _refresh_meter_config_registers(self) -> bool:
+        """Re-read the config registers from the device (reconnect only, best-effort).
+
+        Reads into isolated local storage first and only commits to the buffers
+        once ALL reads succeed. This guarantees:
+          * the published front buffer is never mutated in place mid-refresh, so
+            listener workers cannot observe a partially-updated snapshot;
+          * a failure part-way through leaves the cached values fully intact
+            (no mixed old/new state).
+
+        Returns True when the config registers now reflect a fresh device read,
+        False when the refresh failed and the cached values were kept. The caller
+        uses this to avoid making corrective write decisions off stale data. Never
+        raises: a failed refresh is non-fatal.
+        """
+        config_addrs = (REG_MEASUREMENT_MODE, REG_MEASURING_SYSTEM, REG_WRONG_CONNECTION_BLOCK)
+        staged: dict[int, list[int]] = {}
+        try:
+            for addr in config_addrs:
+                expected = len(self._front_data.frame.static_reg_map[addr].values)
+                result = await self._client.read_holding_registers(addr, count=expected, device_id=self.slave_id)
+                if result.isError() or len(result.registers) != expected:
+                    logger.debug("Failed to refresh EM540 config register %s; keeping cached values.", hex(addr))
+                    return False
+                staged[addr] = list(result.registers)
+        except (ModbusIOException, ModbusException) as ex:
+            logger.debug("Error refreshing EM540 config registers (%s); keeping cached values.", ex)
+            return False
+
+        # All reads succeeded — commit atomically to both buffers.
+        for addr, values in staged.items():
+            self._set_config_register(addr, values)
+        return True
+
+    def _set_config_register(self, address: int, value: int | list[int]) -> None:
+        """Write a config value into BOTH buffers' static maps.
+
+        The buffers are swapped every acquisition tick, so updating only the
+        connect-time front buffer would let the stale value swap back into
+        published data on the next tick. Keeping both maps in sync prevents that.
+        Assigning a fresh list object (not mutating in place) is deliberate: the
+        downstream EM540 slave detects static changes by the identity of the
+        values list, so replacing it lets a reconnect-time config change
+        propagate downstream even after the slave's one-shot initial sync.
+        """
+        values = [value] if isinstance(value, int) else list(value)
+        for data in (self._front_data, self._back_data):
+            data.frame.static_reg_map[address].values = list(values)
+
+    async def _read_config_register_back(self, address: int) -> int | None:
+        """Read a single config register back after a write.
+
+        Returns the observed value, or ``None`` if the read-back fails. A
+        successful write ACK does not prove the meter retained the value (some
+        models normalise or ignore writes), so callers treat ``None`` as
+        "unverified" and keep the last known value rather than publishing the
+        optimistically-requested one.
+        """
+        try:
+            result = await self._client.read_holding_registers(address, count=1, device_id=self.slave_id)
+            if result.isError() or len(result.registers) != 1:
+                logger.debug("EM540 read-back of register %s failed; keeping last known value.", hex(address))
+                return None
+            return result.registers[0]
+        except (ModbusIOException, ModbusException):
+            logger.debug("EM540 read-back of register %s errored; keeping last known value.", hex(address))
+            return None
+
+    async def _write_register(self, address: int, value: int) -> bool:
+        """Write a single holding register. Returns True on confirmed success.
+
+        Best-effort by design: a Modbus exception response (e.g. the register is
+        read-only on a MID/PFx meter, or the value is out of range) and transport
+        errors are caught and logged, returning False. Callers treat False as
+        "left as-is" and never fail the connection over it.
+        """
+        self._refresh_client_runtime_config()
+        try:
+            result = await self._client.write_register(address, value, device_id=self.slave_id)
+            if result.isError():
+                logger.warning(
+                    "EM540 rejected write of %s to register %s (register may be read-only on this "
+                    "meter model, e.g. MID/PFx); leaving as-is: %s",
+                    value,
+                    hex(address),
+                    result,
+                )
+                return False
+            logger.info("EM540 wrote %s to register %s", value, hex(address))
+            return True
+        except ModbusIOException as ex:
+            logger.warning("Modbus IO error writing register %s to EM540: %s", hex(address), ex)
+            return False
+        except ModbusException as ex:
+            logger.warning("Modbus error writing register %s to EM540: %s", hex(address), ex)
+            return False
