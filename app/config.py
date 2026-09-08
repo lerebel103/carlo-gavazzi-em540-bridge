@@ -313,7 +313,12 @@ class ConfigManager:
         smoothing_window = state.ts65a_slave.smoothing_window_seconds
         if isinstance(smoothing_window, bool) or not isinstance(smoothing_window, (int, float)):
             raise ConfigError(f"ts65a_slave.smoothing_window_seconds must be a number, got {smoothing_window!r}")
-        if not math.isfinite(smoothing_window) or not (0 <= smoothing_window <= 15):
+        # Only floats can be non-finite; math.isfinite() on an arbitrarily large
+        # int would raise OverflowError and escape this ConfigError path. The
+        # range check below safely rejects oversized ints.
+        if isinstance(smoothing_window, float) and not math.isfinite(smoothing_window):
+            raise ConfigError(f"ts65a_slave.smoothing_window_seconds must be finite, got {smoothing_window}")
+        if not (0 <= smoothing_window <= 15):
             raise ConfigError(
                 f"ts65a_slave.smoothing_window_seconds must satisfy 0 <= value <= 15, got {smoothing_window}"
             )

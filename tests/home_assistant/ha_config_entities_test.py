@@ -135,6 +135,20 @@ def test_command_out_of_range_is_not_persisted():
     entities._config_manager.schedule_persist.assert_not_called()
 
 
+def test_command_rejects_oversized_integer_without_raising():
+    # An int payload too large to convert to a C double must be rejected by the
+    # bounds check, not raise OverflowError out of the MQTT callback. Use the
+    # retries entity (parse_value=int).
+    state = AppState()
+    entities = _make_entities(state)
+    entity = next(e for e in entities._entities if e.field_path == "em540_master.retries")
+    original = state.em540_master.retries
+    # Should not raise.
+    _send_command(entities, entity, str(10**400))
+    assert state.em540_master.retries == original
+    entities._config_manager.schedule_persist.assert_not_called()
+
+
 # ---------------------------------------------------------------------------
 # Property 7 — MQTT discovery payload validity
 # ---------------------------------------------------------------------------

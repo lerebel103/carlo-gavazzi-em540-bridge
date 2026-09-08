@@ -557,8 +557,10 @@ def test_valid_grid_feed_in_hard_limit_accepted(tmp_path, value):
 # -- smoothing_window_seconds validation --
 
 
-@pytest.mark.parametrize("value", [-0.1, -1, 15.1, 100, "x"])
+@pytest.mark.parametrize("value", [-0.1, -1, 15.1, 100, "x", 10**400])
 def test_invalid_smoothing_window_seconds_raises(tmp_path, value):
+    # 10**400 is an int too large to convert to a C double: validation must
+    # raise ConfigError, not let math.isfinite() raise OverflowError.
     path = _make_config(tmp_path, {"ts65a_slave.smoothing_window_seconds": value})
     with pytest.raises(ConfigError, match="smoothing_window_seconds"):
         ConfigManager(path).load()

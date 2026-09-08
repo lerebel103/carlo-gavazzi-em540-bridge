@@ -267,10 +267,16 @@ class HAConfigEntities:
         """
         if not isinstance(value, (int, float)) or isinstance(value, bool):
             return True
-        if not math.isfinite(value):
+        # Only floats can be non-finite; math.isfinite() on an arbitrarily large
+        # int raises OverflowError, which would escape _on_command and disrupt the
+        # MQTT callback thread. Ints are inherently finite and the range check
+        # below safely rejects oversized values.
+        if isinstance(value, float) and not math.isfinite(value):
             return False
         ui_value = entity.format_value(value) if entity.format_value is not None else value
-        if not isinstance(ui_value, (int, float)) or not math.isfinite(ui_value):
+        if not isinstance(ui_value, (int, float)) or isinstance(ui_value, bool):
+            return False
+        if isinstance(ui_value, float) and not math.isfinite(ui_value):
             return False
         if entity.min_value is not None and ui_value < entity.min_value:
             return False
