@@ -42,8 +42,9 @@ class RunningAverage:
             while len(vals) > 1:
                 vals.popleft()
             return
-        # Drop samples strictly older than the window relative to the newest
-        # sample. Uses <= so a sample exactly at the cutoff edge is also dropped.
+        # Drop samples at or older than the cutoff (window edge) relative to the
+        # newest sample. Uses <= so a sample exactly on the cutoff edge is also
+        # dropped, keeping the retained span strictly within the window.
         cutoff = now - self.window_seconds
         while len(vals) > 1 and vals[0][0] <= cutoff:
             vals.popleft()
@@ -113,10 +114,6 @@ class Ts65aMeterData:
         self._power_a = RunningAverage(smoothing_window_seconds)
         self._power_b = RunningAverage(smoothing_window_seconds)
         self._power_c = RunningAverage(smoothing_window_seconds)
-        self._apparent_power = RunningAverage(smoothing_window_seconds)
-        self._apparent_power_a = RunningAverage(smoothing_window_seconds)
-        self._apparent_power_b = RunningAverage(smoothing_window_seconds)
-        self._apparent_power_c = RunningAverage(smoothing_window_seconds)
         self._reactive_power = RunningAverage(smoothing_window_seconds)
         self._reactive_power_a = RunningAverage(smoothing_window_seconds)
         self._reactive_power_b = RunningAverage(smoothing_window_seconds)
