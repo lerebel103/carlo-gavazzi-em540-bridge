@@ -58,7 +58,13 @@ class TestEm540Master(unittest.TestCase):
     def setUp(self, mock_tcp_cls):
         """Patch the TCP client class so the constructor doesn't create a real connection."""
         self.mock_client = MagicMock()
-        self.mock_client.read_holding_registers = AsyncMock()
+        # Default: return a well-formed, request-sized successful response so the
+        # connect-time config refresh (which reads a few registers on every
+        # connect) has a valid awaitable result. Tests that need specific read
+        # behaviour override this.
+        self.mock_client.read_holding_registers = AsyncMock(
+            side_effect=lambda address, count=1, device_id=None: _make_successful_result(count)
+        )
         self.mock_client.connect = AsyncMock()
         self.mock_client.close = MagicMock()
         mock_tcp_cls.return_value = self.mock_client
@@ -388,15 +394,21 @@ class TestEm540Master(unittest.TestCase):
         self.master._static_data_valid = False
 
         type(self.mock_client).connected = PropertyMock(return_value=True)
-        bad_result = MagicMock()
-        bad_result.isError.return_value = True
 
-        good_results = []
-        for reg_addr in self.master._static_read_plan:
-            static_reg = self.master.data.frame.static_reg_map[reg_addr]
-            good_results.append(_make_successful_result(len(static_reg.values)))
+        # First read (first connect) fails; every subsequent read succeeds with a
+        # response sized to the request. Using a function keeps the test robust to
+        # the extra config-register refresh reads performed after the static read.
+        state = {"first": True}
 
-        self.mock_client.read_holding_registers = AsyncMock(side_effect=[bad_result, *good_results])
+        async def _read(address, count=1, device_id=None):
+            if state["first"]:
+                state["first"] = False
+                result = MagicMock()
+                result.isError.return_value = True
+                return result
+            return _make_successful_result(count)
+
+        self.mock_client.read_holding_registers = AsyncMock(side_effect=_read)
 
         asyncio.run(self.master.connect())
         self.assertFalse(self.master._static_data_valid)
@@ -701,6 +713,18 @@ class TestEm540MasterMeterConfig(unittest.TestCase):
         mock_tcp_cls.return_value = mock_client
         master = Em540Master(_make_config(**config_overrides))
         master._client = mock_client
+
+        # The refresh-on-connect and post-write read-back both call
+        # read_holding_registers. Echo back the current static-map values for the
+        # requested address so reads reflect whatever the test seeded / a write set.
+        async def _echo_read(address, count=1, device_id=None):
+            values = master._front_data.frame.static_reg_map[address].values
+            result = MagicMock()
+            result.isError.return_value = False
+            result.registers = list(values[:count])
+            return result
+
+        mock_client.read_holding_registers = AsyncMock(side_effect=_echo_read)
         return master, mock_client
 
     @staticmethod
@@ -711,11 +735,13 @@ class TestEm540MasterMeterConfig(unittest.TestCase):
             REG_WRONG_CONNECTION_BLOCK,
         )
 
-        static = master._front_data.frame.static_reg_map
-        static[REG_MEASUREMENT_MODE].values = [mode]
-        static[REG_MEASURING_SYSTEM].values = [system]
-        # Block is [enable, status]; status is the second word (0x1105).
-        static[REG_WRONG_CONNECTION_BLOCK].values = [1, wrong]
+        # Seed BOTH buffers so refresh mirroring and read-back stay consistent.
+        for data in (master._front_data, master._back_data):
+            static = data.frame.static_reg_map
+            static[REG_MEASUREMENT_MODE].values = [mode]
+            static[REG_MEASURING_SYSTEM].values = [system]
+            # Block is [enable, status]; status is the second word (0x1105).
+            static[REG_WRONG_CONNECTION_BLOCK].values = [1, wrong]
 
     def _ok_write(self):
         result = MagicMock()
@@ -726,6 +752,20 @@ class TestEm540MasterMeterConfig(unittest.TestCase):
         result = MagicMock()
         result.isError.return_value = True
         return result
+
+    @staticmethod
+    def _accepting_write(master):
+        """A write mock that applies the value to both buffers' static maps,
+        simulating a meter that accepts the write (so read-back observes it)."""
+
+        async def _write(address, value, device_id=None):
+            for data in (master._front_data, master._back_data):
+                data.frame.static_reg_map[address].values = [value]
+            result = MagicMock()
+            result.isError.return_value = False
+            return result
+
+        return AsyncMock(side_effect=_write)
 
     # --- read + cache + log -------------------------------------------------
     def test_reads_and_caches_all_three_registers(self):
@@ -748,6 +788,39 @@ class TestEm540MasterMeterConfig(unittest.TestCase):
 
         self.assertEqual(master.meter_config["wrong_connection"], 1)
 
+    def test_reconnect_refreshes_stale_config_from_meter(self):
+        """On reconnect the static read is skipped, so _apply_meter_config must
+        re-read the config registers rather than trust the stale cache."""
+        from app.carlo_gavazzi.em540_data import REG_WRONG_CONNECTION_BLOCK
+
+        master, client = self._build()
+        # Cached (stale) snapshot says wiring is fine.
+        self._seed_registers(master, mode=2, system=0, wrong=0)
+        asyncio.run(master._apply_meter_config(master._front_data.frame))
+        self.assertEqual(master.meter_config["wrong_connection"], 0)
+
+        # Meter now reports a wiring error; the refresh read must observe it even
+        # though _static_data_valid stayed True across the reconnect.
+        for data in (master._front_data, master._back_data):
+            data.frame.static_reg_map[REG_WRONG_CONNECTION_BLOCK].values = [1, 1]
+
+        asyncio.run(master._apply_meter_config(master._front_data.frame))
+        self.assertEqual(master.meter_config["wrong_connection"], 1)
+
+    def test_config_refresh_failure_falls_back_to_cache(self):
+        """A failed refresh read is non-fatal: cached values are logged/used."""
+        master, client = self._build()
+        self._seed_registers(master, mode=2, system=0, wrong=0)
+
+        error = MagicMock()
+        error.isError.return_value = True
+        client.read_holding_registers = AsyncMock(return_value=error)
+
+        # Must not raise; cache retains the seeded values.
+        asyncio.run(master._apply_meter_config(master._front_data.frame))
+        self.assertEqual(master.meter_config["measurement_mode"], 2)
+        self.assertEqual(master.meter_config["wrong_connection"], 0)
+
     # --- flags off: never write --------------------------------------------
     def test_no_write_when_flags_disabled_even_if_values_differ(self):
         master, client = self._build(ensure_bidirectional_mode=False, ensure_3phase_measuring_system=False)
@@ -769,8 +842,8 @@ class TestEm540MasterMeterConfig(unittest.TestCase):
     # --- flag on, value wrong: write + cache/refresh -----------------------
     def test_writes_mode_when_flag_on_and_value_wrong(self):
         master, client = self._build(ensure_bidirectional_mode=True)
-        client.write_register.return_value = self._ok_write()
         self._seed_registers(master, mode=0, system=0, wrong=0)
+        client.write_register = self._accepting_write(master)
 
         asyncio.run(master._apply_meter_config(master._front_data.frame))
 
@@ -778,12 +851,14 @@ class TestEm540MasterMeterConfig(unittest.TestCase):
 
         client.write_register.assert_awaited_once_with(REG_MEASUREMENT_MODE, 2, device_id=1)
         self.assertEqual(master.meter_config["measurement_mode"], 2)
+        # Read-back value propagated to BOTH buffers so a tick swap can't revert it.
         self.assertEqual(master._front_data.frame.static_reg_map[REG_MEASUREMENT_MODE].values, [2])
+        self.assertEqual(master._back_data.frame.static_reg_map[REG_MEASUREMENT_MODE].values, [2])
 
     def test_writes_measuring_system_when_flag_on_and_value_wrong(self):
         master, client = self._build(ensure_3phase_measuring_system=True)
-        client.write_register.return_value = self._ok_write()
         self._seed_registers(master, mode=2, system=2, wrong=0)
+        client.write_register = self._accepting_write(master)
 
         asyncio.run(master._apply_meter_config(master._front_data.frame))
 
@@ -791,6 +866,31 @@ class TestEm540MasterMeterConfig(unittest.TestCase):
 
         client.write_register.assert_awaited_once_with(REG_MEASURING_SYSTEM, 0, device_id=1)
         self.assertEqual(master.meter_config["measuring_system"], 0)
+        self.assertEqual(master._back_data.frame.static_reg_map[REG_MEASURING_SYSTEM].values, [0])
+
+    def test_write_accepted_but_meter_normalizes_value_caches_actual(self):
+        """If the meter ignores/normalizes a write, the read-back value (not the
+        requested one) is cached and published."""
+        master, client = self._build(ensure_bidirectional_mode=True)
+        self._seed_registers(master, mode=0, system=0, wrong=0)
+
+        from app.carlo_gavazzi.em540_data import REG_MEASUREMENT_MODE
+
+        # Write "succeeds" at the transport level but the meter keeps its own
+        # value (e.g. read-only MID model that ACKs but does not change).
+        async def _write_ignored(address, value, device_id=None):
+            result = MagicMock()
+            result.isError.return_value = False
+            return result
+
+        client.write_register = AsyncMock(side_effect=_write_ignored)
+
+        asyncio.run(master._apply_meter_config(master._front_data.frame))
+
+        # Read-back sees the unchanged meter value (0), so the cache reflects
+        # reality, not the optimistic requested 2.
+        self.assertEqual(master.meter_config["measurement_mode"], 0)
+        self.assertEqual(master._front_data.frame.static_reg_map[REG_MEASUREMENT_MODE].values, [0])
 
     # --- MID read-only meter: rejected write is non-fatal, cache unchanged --
     def test_rejected_write_is_non_fatal_and_leaves_cache_unchanged(self):
