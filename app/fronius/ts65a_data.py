@@ -30,6 +30,15 @@ class RunningAverage:
         self.values = collections.deque()
 
     def add(self, value, timestamp):
+        # Guard against a non-monotonic timestamp. The upstream frame time is
+        # wall-clock based, so an NTP step or manual clock change can move it
+        # backwards. A future-dated sample left at the head would block eviction
+        # of every later sample, growing the deque without bound and stretching
+        # the smoothing window until wall time catches up. If the clock regresses
+        # relative to the newest stored sample, drop the stale history and start
+        # the window fresh from this sample.
+        if self.values and timestamp < self.values[-1][0]:
+            self.values.clear()
         self.values.append((timestamp, value))
         self._evict(timestamp)
 

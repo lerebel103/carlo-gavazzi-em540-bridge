@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 from dataclasses import dataclass
 from typing import Any, Callable
 
@@ -250,6 +251,33 @@ class HAConfigEntities:
 
     # -- command handling ----------------------------------------------------
 
+    @staticmethod
+    def _value_within_bounds(entity: ConfigEntity, value: Any) -> bool:
+        """Return True if a parsed command value is acceptable for this entity.
+
+        Numeric values must be finite and within the entity's [min_value,
+        max_value] range (when those bounds are defined). Non-numeric entity
+        types (e.g. switches) are accepted as-is.
+
+        ``value`` is the parsed *internal* value; ``min_value``/``max_value`` are
+        expressed in the entity's UI unit. For entities that convert units (e.g.
+        ms in the UI, seconds internally) the value is converted back to UI units
+        via ``format_value`` before the range comparison so bounds are checked in
+        the same unit they are defined in.
+        """
+        if not isinstance(value, (int, float)) or isinstance(value, bool):
+            return True
+        if not math.isfinite(value):
+            return False
+        ui_value = entity.format_value(value) if entity.format_value is not None else value
+        if not isinstance(ui_value, (int, float)) or not math.isfinite(ui_value):
+            return False
+        if entity.min_value is not None and ui_value < entity.min_value:
+            return False
+        if entity.max_value is not None and ui_value > entity.max_value:
+            return False
+        return True
+
     def _on_command(self, client: Any, userdata: Any, message: Any) -> None:
         """Handle incoming MQTT command to update a config value."""
         entity = self._topic_to_entity.get(message.topic)
@@ -261,6 +289,17 @@ class HAConfigEntities:
             value = entity.parse_value(raw_value)
         except (ValueError, TypeError):
             logger.warning("Invalid value for %s: %s", entity.name, message.payload)
+            return
+
+        # Runtime bounds/finiteness validation. min_value/max_value are only
+        # discovery metadata for the HA UI; a direct MQTT payload can still carry
+        # nan/inf or an out-of-range value that would bypass ConfigManager's
+        # validation, corrupt live behaviour (e.g. a NaN window breaks eviction
+        # so averaging deques grow without bound), and then fail validation on
+        # the next restart from the persisted file. Reject it here before it ever
+        # reaches the live config.
+        if not self._value_within_bounds(entity, value):
+            logger.warning("Rejected out-of-range value for %s: %s", entity.name, message.payload)
             return
 
         # Update the AppState field

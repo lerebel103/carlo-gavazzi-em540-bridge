@@ -96,7 +96,8 @@ class Ts65aSlaveConfig:
     # Duration (seconds) over which downstream TS65A readings are time-averaged.
     # Frame-rate independent: the window is a duration, not a sample count.
     # 0 disables smoothing (serve the latest instantaneous value). Max 15s.
-    smoothing_window_seconds: float = 2.5
+    # 2.0s matches the previous default of 20 samples at the 10Hz (0.1s) cadence.
+    smoothing_window_seconds: float = 2.0
     log_level: str = "INFO"
     serial: SlaveSerialConfig = field(default_factory=SlaveSerialConfig)
 

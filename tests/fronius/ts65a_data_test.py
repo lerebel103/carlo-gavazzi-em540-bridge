@@ -56,6 +56,19 @@ class TestRunningAverage(unittest.TestCase):
         self.assertEqual(avg.mean, 0.0)
         self.assertEqual(len(avg.values), 0)
 
+    def test_backwards_timestamp_resets_window(self):
+        # A regressing timestamp (e.g. an NTP step) must not leave a future-dated
+        # sample at the head blocking eviction. The window restarts from the new
+        # sample, bounding memory and the smoothed span.
+        avg = RunningAverage(10.0)
+        avg.add(10, 100.0)
+        avg.add(20, 101.0)
+        self.assertEqual(len(avg.values), 2)
+        # Clock jumps backwards well before the stored samples.
+        avg.add(30, 5.0)
+        self.assertEqual(len(avg.values), 1)
+        self.assertEqual(avg.mean, 30.0)
+
 
 class MockPhase:
     def __init__(

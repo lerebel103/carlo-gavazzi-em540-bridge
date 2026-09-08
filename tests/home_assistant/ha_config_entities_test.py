@@ -83,6 +83,59 @@ def test_master_timeout_entity_uses_milliseconds_with_internal_seconds_conversio
 
 
 # ---------------------------------------------------------------------------
+# Runtime command validation (bounds / finiteness)
+# ---------------------------------------------------------------------------
+
+
+def _send_command(entities: HAConfigEntities, entity, payload: str):
+    """Simulate an inbound MQTT command for the given entity."""
+    message = MagicMock()
+    message.topic = entities.command_topic_for(entity)
+    message.payload = payload.encode()
+    entities._on_command(None, None, message)
+
+
+def _smoothing_entity(entities: HAConfigEntities):
+    return next(e for e in entities._entities if e.field_path == "ts65a_slave.smoothing_window_seconds")
+
+
+def test_command_applies_valid_value():
+    state = AppState()
+    entities = _make_entities(state)
+    _send_command(entities, _smoothing_entity(entities), "3.5")
+    assert state.ts65a_slave.smoothing_window_seconds == 3.5
+
+
+def test_command_rejects_out_of_range_values():
+    for payload in ("-1", "15.1", "100"):
+        state = AppState()
+        entities = _make_entities(state)
+        original = state.ts65a_slave.smoothing_window_seconds
+        _send_command(entities, _smoothing_entity(entities), payload)
+        # Out-of-range payloads are ignored; the live config is unchanged.
+        assert state.ts65a_slave.smoothing_window_seconds == original
+
+
+def test_command_rejects_non_finite_values():
+    # nan/inf would break RunningAverage eviction (deques grow unbounded) and
+    # then fail ConfigManager validation on restart — must be rejected at the door.
+    for payload in ("nan", "inf", "-inf"):
+        state = AppState()
+        entities = _make_entities(state)
+        original = state.ts65a_slave.smoothing_window_seconds
+        _send_command(entities, _smoothing_entity(entities), payload)
+        assert state.ts65a_slave.smoothing_window_seconds == original
+
+
+def test_command_out_of_range_is_not_persisted():
+    state = AppState()
+    entities = _make_entities(state)
+    _send_command(entities, _smoothing_entity(entities), "999")
+    # A rejected value must not schedule a persist that would write bad config.
+    entities._config_manager.schedule_persist.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
 # Property 7 — MQTT discovery payload validity
 # ---------------------------------------------------------------------------
 
