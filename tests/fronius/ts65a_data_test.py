@@ -1,3 +1,4 @@
+import math
 import unittest
 from unittest.mock import MagicMock
 
@@ -109,9 +110,12 @@ class TestTs65aMeterData(unittest.TestCase):
         self.assertEqual(self.meter.wh_plus_l3, 5000)
         self.assertEqual(self.meter.voltage_ll, 30.0)
         self.assertEqual(self.meter.power_a, 4.0)
-        self.assertEqual(self.meter.apparent_power, 110.0)
         self.assertEqual(self.meter.reactive_power, 120.0)
-        self.assertEqual(self.meter.power_factor, 0.95)
+        # Apparent power and power factor are DERIVED from smoothed P/Q, not the
+        # meter's raw S (110) / PF (0.95). S = hypot(100, 120); PF = P / S.
+        expected_s = math.hypot(100.0, 120.0)
+        self.assertAlmostEqual(self.meter.apparent_power, expected_s, places=6)
+        self.assertAlmostEqual(self.meter.power_factor, 100.0 / expected_s, places=6)
 
     def test_reset_means_called_on_limit(self):
         self.stats.check_power_over_feed_in_limit.return_value = False
@@ -208,6 +212,56 @@ class TestTs65aMeterData(unittest.TestCase):
         self.assertEqual(self.meter.stats.grid_feed_in_hard_limit, -2500)
         self.assertEqual(self.meter._power.max_points, 1)
         self.assertEqual(len(self.meter._power.values), 1)
+
+    def test_power_triangle_consistent_under_rotating_load(self):
+        """S and PF must satisfy the power triangle on the smoothed output.
+
+        Regression test for the independent-averaging bug: when the real/reactive
+        split rotates across the averaging window, smoothing S and PF in their own
+        windows made S >> sqrt(P^2 + Q^2) and PF implausibly low. Deriving S and PF
+        from the smoothed P/Q must keep S == sqrt(P^2 + Q^2) and PF == P / S for the
+        system and every phase, regardless of how the load moves within the window.
+        """
+        # A window (max_points=3) where each frame has the SAME apparent magnitude
+        # but a rotating P/Q split — the worst case for independent averaging.
+        frames = [
+            (100.0, 0.0),  # purely real
+            (0.0, 100.0),  # purely reactive
+            (70.71, 70.71),  # 45 degrees
+        ]
+        for p, q in frames:
+            self.data.system.power = p
+            self.data.system.reactive_power = q
+            for ph in self.data.phases:
+                ph.power = p
+                ph.reactive_power = q
+            self.meter.update(self.data)
+
+        def assert_triangle(p_val, q_val, s_val, pf_val):
+            expected_s = math.hypot(p_val, q_val)
+            self.assertAlmostEqual(s_val, expected_s, places=6)
+            self.assertGreaterEqual(s_val + 1e-9, abs(p_val))  # S >= |P|
+            expected_pf = p_val / expected_s if expected_s else 1.0
+            self.assertAlmostEqual(pf_val, expected_pf, places=6)
+
+        assert_triangle(self.meter.power, self.meter.reactive_power, self.meter.apparent_power, self.meter.power_factor)
+        assert_triangle(
+            self.meter.power_a, self.meter.reactive_power_a, self.meter.apparent_power_a, self.meter.power_factor_a
+        )
+        assert_triangle(
+            self.meter.power_b, self.meter.reactive_power_b, self.meter.apparent_power_b, self.meter.power_factor_b
+        )
+        assert_triangle(
+            self.meter.power_c, self.meter.reactive_power_c, self.meter.apparent_power_c, self.meter.power_factor_c
+        )
+
+    def test_power_factor_idle_returns_unity(self):
+        """PF is defined as 1.0 when there is no power (avoids divide-by-zero)."""
+        self.data.system.power = 0.0
+        self.data.system.reactive_power = 0.0
+        self.meter.update(self.data)
+        self.assertEqual(self.meter.power_factor, 1.0)
+        self.assertEqual(self.meter.apparent_power, 0.0)
 
 
 if __name__ == "__main__":

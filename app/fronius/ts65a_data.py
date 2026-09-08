@@ -1,4 +1,5 @@
 import collections
+import math
 
 from app.fronius.ts65a_slave_stats import Ts65aSlaveStats
 
@@ -30,21 +31,20 @@ class RunningAverage:
         self.values = collections.deque(self.values, maxlen=max_points)
 
 
-# def get_sign(number: float):
-#    if number >= 0:
-#        return 1
-#    else:
-#        return -1
+def _derive_power_factor(power, reactive_power):
+    """Derive power factor from (smoothed) real and reactive power.
 
-
-def _calculate_power_factor(pf, power, reactive_power):
-    # Not sure if this is correct, seems to be a convention that power factor indicates direction of power flow
-    return pf if power > 0 else -pf
-
-    # This is another definition of power factor that takes into account the sign of power and reactive power
-    # power_sign = get_sign(power)
-    # reactive_power_sign = get_sign(reactive_power)
-    # return pf * power_sign / reactive_power_sign
+    PF = P / S where S = sqrt(P^2 + Q^2). Deriving PF from the same P and Q used
+    for the apparent-power calculation keeps the served frame internally
+    consistent (PF, P, Q and S always satisfy the power triangle). The sign of
+    the result follows the sign of real power naturally, so no separate sign
+    handling is needed. Returns 1.0 when there is no apparent power (idle) to
+    avoid division by zero.
+    """
+    apparent = math.hypot(power, reactive_power)
+    if apparent == 0.0:
+        return 1.0
+    return power / apparent
 
 
 class Ts65aMeterData:
@@ -84,10 +84,10 @@ class Ts65aMeterData:
         self._reactive_power_a = RunningAverage(max_points)
         self._reactive_power_b = RunningAverage(max_points)
         self._reactive_power_c = RunningAverage(max_points)
-        self._power_factor = RunningAverage(max_points)
-        self._power_factor_a = RunningAverage(max_points)
-        self._power_factor_b = RunningAverage(max_points)
-        self._power_factor_c = RunningAverage(max_points)
+        # NOTE: apparent power (S) and power factor (PF) are intentionally NOT
+        # smoothed with their own running averages. They are derived from the
+        # smoothed real/reactive power (see the apparent_power / power_factor
+        # properties) so the served power triangle stays internally consistent.
 
         # we don't do running average for kWh, just keep adding the latest value
         self._wh_neg_total = 0
@@ -175,21 +175,32 @@ class Ts65aMeterData:
     def power_c(self):
         return self._power_c.mean
 
+    # Apparent power and power factor are DERIVED from the smoothed real (P) and
+    # reactive (Q) power rather than smoothed independently. Averaging S and PF
+    # in their own windows de-correlates them from P and Q (the mean of a
+    # magnitude is not the magnitude of the means), which produced a physically
+    # impossible power triangle (S far larger than sqrt(P^2 + Q^2), and an
+    # implausibly low PF). Deriving them here guarantees, on every served frame:
+    #   S  = sqrt(mean(P)^2 + mean(Q)^2)
+    #   PF = mean(P) / S            (sign follows real-power direction naturally)
+    # Note this is the *fundamental* apparent power; on real hardware S may differ
+    # slightly from the meter's measured S under high harmonic distortion, but it
+    # is internally coherent, which is what downstream SunSpec consumers expect.
     @property
     def apparent_power(self):
-        return self._apparent_power.mean
+        return math.hypot(self._power.mean, self._reactive_power.mean)
 
     @property
     def apparent_power_a(self):
-        return self._apparent_power_a.mean
+        return math.hypot(self._power_a.mean, self._reactive_power_a.mean)
 
     @property
     def apparent_power_b(self):
-        return self._apparent_power_b.mean
+        return math.hypot(self._power_b.mean, self._reactive_power_b.mean)
 
     @property
     def apparent_power_c(self):
-        return self._apparent_power_c.mean
+        return math.hypot(self._power_c.mean, self._reactive_power_c.mean)
 
     @property
     def reactive_power(self):
@@ -209,19 +220,19 @@ class Ts65aMeterData:
 
     @property
     def power_factor(self):
-        return _calculate_power_factor(self._power_factor.mean, self._power.mean, self._reactive_power.mean)
+        return _derive_power_factor(self._power.mean, self._reactive_power.mean)
 
     @property
     def power_factor_a(self):
-        return _calculate_power_factor(self._power_factor_a.mean, self._power_a.mean, self._reactive_power_a.mean)
+        return _derive_power_factor(self._power_a.mean, self._reactive_power_a.mean)
 
     @property
     def power_factor_b(self):
-        return _calculate_power_factor(self._power_factor_b.mean, self._power_b.mean, self._reactive_power_b.mean)
+        return _derive_power_factor(self._power_b.mean, self._reactive_power_b.mean)
 
     @property
     def power_factor_c(self):
-        return _calculate_power_factor(self._power_factor_c.mean, self._power_c.mean, self._reactive_power_c.mean)
+        return _derive_power_factor(self._power_c.mean, self._reactive_power_c.mean)
 
     @property
     def wh_neg_total(self):
@@ -311,20 +322,13 @@ class Ts65aMeterData:
         self._power_a.add(data.phases[0].power)
         self._power_b.add(data.phases[1].power)
         self._power_c.add(data.phases[2].power)
-        self._apparent_power.add(data.system.apparent_power)
-        self._apparent_power_a.add(data.phases[0].apparent_power)
-        self._apparent_power_b.add(data.phases[1].apparent_power)
-        self._apparent_power_c.add(data.phases[2].apparent_power)
         self._reactive_power.add(data.system.reactive_power)
         self._reactive_power_a.add(data.phases[0].reactive_power)
         self._reactive_power_b.add(data.phases[1].reactive_power)
         self._reactive_power_c.add(data.phases[2].reactive_power)
-
-        # Power factor can be negative, so we need to handle that correctly
-        self._power_factor.add(abs(data.system.power_factor))
-        self._power_factor_a.add(abs(data.phases[0].power_factor))
-        self._power_factor_b.add(abs(data.phases[1].power_factor))
-        self._power_factor_c.add(abs(data.phases[2].power_factor))
+        # Apparent power and power factor are derived from the smoothed P/Q above
+        # (see the apparent_power / power_factor properties); the meter's own S
+        # and PF registers are intentionally not smoothed independently.
 
         # And now all fixed values
         # export / import energy in Wh
@@ -370,18 +374,10 @@ class Ts65aMeterData:
             "_power_a",
             "_power_b",
             "_power_c",
-            "_apparent_power",
-            "_apparent_power_a",
-            "_apparent_power_b",
-            "_apparent_power_c",
             "_reactive_power",
             "_reactive_power_a",
             "_reactive_power_b",
             "_reactive_power_c",
-            "_power_factor",
-            "_power_factor_a",
-            "_power_factor_b",
-            "_power_factor_c",
         ):
             getattr(self, attr_name).set_max_points(max_points)
 
@@ -406,15 +402,7 @@ class Ts65aMeterData:
         self._power_a.reset()
         self._power_b.reset()
         self._power_c.reset()
-        self._apparent_power.reset()
-        self._apparent_power_a.reset()
-        self._apparent_power_b.reset()
-        self._apparent_power_c.reset()
         self._reactive_power.reset()
         self._reactive_power_a.reset()
         self._reactive_power_b.reset()
         self._reactive_power_c.reset()
-        self._power_factor.reset()
-        self._power_factor_a.reset()
-        self._power_factor_b.reset()
-        self._power_factor_c.reset()
