@@ -130,6 +130,7 @@ async def process_loop(state):
         em540_master.add_listener(mqtt_bridge)
         em540_master.add_stats_listener(mqtt_bridge.on_em540_master_stats)
         mqtt_bridge.set_daily_extrema_source(em540_master.daily_extrema)
+        mqtt_bridge.set_meter_config_source(em540_master)
         em540_slave.add_stats_listener(mqtt_bridge.on_em540_slave_stats)
         ts65a_slave.add_stats_listener(mqtt_bridge.on_ts65a_slave_stats)
         try:

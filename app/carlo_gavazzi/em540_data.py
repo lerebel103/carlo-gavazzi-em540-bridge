@@ -28,6 +28,47 @@ ZERO_FILL = -1
 _DYNAMIC_PRIMARY_BLOCK_ADDR = 0x0000
 _ENERGY_BLOCK_ADDR = 0x0500
 
+# --- Meter configuration registers (holding registers, read + optionally set
+# on connect). See reference doc sections 4.6.2 (measuring system), 4.6.7
+# (measure mode) and 4.6.8 (wrong connection). ------------------------------
+REG_MEASURING_SYSTEM = 0x1002
+REG_MEASUREMENT_MODE = 0x1103
+# 0x1104 is a 2-register block: word 0 = "wrong selection enable", word 1 =
+# "wrong selection status" (physical register 0x1105). This block is already
+# part of the static read plan, so the status is read for free.
+REG_WRONG_CONNECTION_BLOCK = 0x1104
+WRONG_CONNECTION_STATUS_OFFSET = 1
+
+# Desired values matching a normal (non-piggy) Victron EM540 grid-meter setup.
+MEASUREMENT_MODE_BIDIRECTIONAL = 2  # C mode
+MEASURING_SYSTEM_3PN = 0  # 3-phase with neutral
+
+# Human-readable decode tables (authoritative values from the reference doc).
+MEASUREMENT_MODE_LABELS = {
+    0: "A (Absolute)",
+    1: "B (per-phase accumulation)",
+    2: "C (Bidirectional)",
+}
+MEASURING_SYSTEM_LABELS = {
+    0: "3Pn (3-phase + neutral)",
+    1: "3P (3-phase, no neutral)",
+    2: "2P (2-phase)",
+}
+WRONG_CONNECTION_LABELS = {
+    0: "Correct",
+    1: "Connection error",
+}
+
+
+def describe_register_value(value: int, labels: dict[int, str]) -> str:
+    """Render ``value`` as ``"<label> [<int>]"``, or ``"Unknown [<int>]"``.
+
+    Keeps the raw integer visible in every log line so an unexpected value is
+    never hidden behind a missing label.
+    """
+    label = labels.get(value, "Unknown")
+    return f"{label} [{value}]"
+
 
 def _convert_from_registers_little(registers: list[int], data_type: ModbusTcpClient.DATATYPE) -> int | float | str:
     if len(registers) > 1:

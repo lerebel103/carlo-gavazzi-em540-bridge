@@ -1437,3 +1437,39 @@ def test_malformed_health_max_stale_raises(tmp_path, value):
     path = _make_config(tmp_path, {"em540_master.health_max_stale_s": value})
     with pytest.raises(ConfigError, match="health_max_stale_s"):
         ConfigManager(path).load()
+
+
+# ---------------------------------------------------------------------------
+# Meter-config enforcement flags
+# ---------------------------------------------------------------------------
+
+
+def test_meter_config_flags_default_false(tmp_path):
+    # Absent from YAML -> safe defaults (read-and-log only, no writes).
+    path = _make_config(tmp_path)
+    state = ConfigManager(path).load()
+    assert state.em540_master.ensure_bidirectional_mode is False
+    assert state.em540_master.ensure_3phase_measuring_system is False
+
+
+@pytest.mark.parametrize(
+    "field",
+    ["em540_master.ensure_bidirectional_mode", "em540_master.ensure_3phase_measuring_system"],
+)
+@pytest.mark.parametrize("value", [True, False])
+def test_meter_config_flags_accept_booleans(tmp_path, field, value):
+    path = _make_config(tmp_path, {field: value})
+    state = ConfigManager(path).load()
+    attr = field.split(".")[1]
+    assert getattr(state.em540_master, attr) is value
+
+
+@pytest.mark.parametrize(
+    "field",
+    ["em540_master.ensure_bidirectional_mode", "em540_master.ensure_3phase_measuring_system"],
+)
+@pytest.mark.parametrize("value", ["true", 1, "yes", None])
+def test_meter_config_flags_reject_non_boolean(tmp_path, field, value):
+    path = _make_config(tmp_path, {field: value})
+    with pytest.raises(ConfigError, match=field):
+        ConfigManager(path).load()

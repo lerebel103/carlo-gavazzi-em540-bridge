@@ -73,6 +73,12 @@ Notes:
 
 ## Register Layout Invariants (validated against production)
 
+The authoritative register specification for the EM540/EM530 is the Carlo Gavazzi Modbus
+communication protocol document:
+<https://www.gavazziautomation.com/fileadmin/images/PIM/OTHERSTUFF/COMPRO/EM500_CPP_Mod_V1.3_13022024.pdf>.
+Consult it (not third-party sources) when reasoning about register addresses, scaling, or the
+meaning of configuration values such as measurement mode and measuring system.
+
 These are deliberate, verified behaviours. Do NOT "fix" them based on a static read of the
 code — the parsing path is validated against a real EM540/EM530 device and works correctly.
 Changing the production parsing/overlay to satisfy a theoretical concern here will break a

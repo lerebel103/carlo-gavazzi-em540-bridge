@@ -182,6 +182,10 @@ class HADiagnostics:
         # safe_name / unique_id stay stable and existing HA entities are not
         # orphaned. Only their display_name changes to "Daily ...".
         self._daily_extrema_source = None
+        # Source for the meter wiring-check sensor. Exposes meter_config -> dict
+        # with a "wrong_connection" key (0 = correct, 1 = connection error, None
+        # before the first successful connect).
+        self._meter_config_source = None
         self._daily_extrema_sensors: dict[str, Sensor] = self._build_daily_extrema_sensors()
         self.min_power_w = self._daily_extrema_sensors["power_min"]
         self.max_power_w = self._daily_extrema_sensors["power_max"]
@@ -420,6 +424,20 @@ class HADiagnostics:
             entity_category="diagnostic",
             enabled_by_default=True,
         )
+        # Meter wiring-check status read from the upstream meter on connect
+        # (register 0x1105): 0 = correct, 1 = connection error. Enabled by
+        # default so a miswired meter is visible in Home Assistant.
+        self.em540_wrong_connection = Sensor(
+            "EM540 Wrong Connection",
+            None,
+            None,
+            "measurement",
+            self.state_topic,
+            precision=0,
+            entity_category="diagnostic",
+            enabled_by_default=True,
+            display_name="EM540 Wiring Check Error",
+        )
 
         configure_sensor_topic_metadata(
             sensors=self._all_sensors(),
@@ -512,6 +530,7 @@ class HADiagnostics:
             self.em540_circuit_breaker_open_count,
             self.em540_stale_data_age_ms,
             self.em540_dropped_stale_request_count,
+            self.em540_wrong_connection,
             self.ts65a_tcp_client_count,
             self.ts65a_tcp_client_disconnect_count,
             self.ts65a_serial_client_active,
@@ -530,6 +549,23 @@ class HADiagnostics:
         # pulled from the DailyExtrema snapshot in mqtt_data(). Nothing to do
         # here; kept for the listener/callback contract.
         pass
+
+    def set_meter_config_source(self, source) -> None:
+        """Register the master's meter-config source for the wiring-check sensor.
+
+        ``source`` must expose a ``meter_config`` property returning a dict with
+        a ``"wrong_connection"`` key (0/1, or None before the first connect).
+        """
+        self._meter_config_source = source
+
+    def _apply_meter_config(self) -> None:
+        source = getattr(self, "_meter_config_source", None)
+        if source is None:
+            return
+        wrong_connection = source.meter_config.get("wrong_connection")
+        # Before the first successful connect the value is None; publish 0
+        # (not-error) so the sensor reads as "no problem" rather than unknown.
+        self.em540_wrong_connection.update_value(0 if wrong_connection is None else wrong_connection)
 
     def set_daily_extrema_source(self, source) -> None:
         """Register the master's DailyExtrema tracker to pull snapshots from.
@@ -582,6 +618,9 @@ class HADiagnostics:
 
         # Pull the latest daily extrema snapshot from the master tracker.
         self._apply_daily_extrema()
+
+        # Pull the latest meter wiring-check status from the master.
+        self._apply_meter_config()
 
         # Get the system uptime in seconds
         system_uptime_seconds = uptime.uptime()

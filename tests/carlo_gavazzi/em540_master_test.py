@@ -25,6 +25,8 @@ def _make_config(**overrides):
         parity="N",
         stopbits=1,
         serial_port="/dev/null",
+        ensure_bidirectional_mode=False,
+        ensure_3phase_measuring_system=False,
     )
     defaults.update(overrides)
     return SimpleNamespace(**defaults)
@@ -686,6 +688,154 @@ class TestListenerWorker(unittest.TestCase):
             any(missed_total >= 1 and max_gap >= 2 for missed_total, max_gap in stats_updates),
             f"Expected missed update stats, got snapshots={stats_updates}",
         )
+
+
+class TestEm540MasterMeterConfig(unittest.TestCase):
+    """Meter-config read/log/write on connect (measurement mode, measuring system,
+    wiring check) and the best-effort corrective write path."""
+
+    @patch("app.carlo_gavazzi.em540_master.AsyncModbusTcpClient")
+    def _build(self, mock_tcp_cls, **config_overrides):
+        mock_client = MagicMock()
+        mock_client.write_register = AsyncMock()
+        mock_tcp_cls.return_value = mock_client
+        master = Em540Master(_make_config(**config_overrides))
+        master._client = mock_client
+        return master, mock_client
+
+    @staticmethod
+    def _seed_registers(master, *, mode, system, wrong):
+        from app.carlo_gavazzi.em540_data import (
+            REG_MEASUREMENT_MODE,
+            REG_MEASURING_SYSTEM,
+            REG_WRONG_CONNECTION_BLOCK,
+        )
+
+        static = master._front_data.frame.static_reg_map
+        static[REG_MEASUREMENT_MODE].values = [mode]
+        static[REG_MEASURING_SYSTEM].values = [system]
+        # Block is [enable, status]; status is the second word (0x1105).
+        static[REG_WRONG_CONNECTION_BLOCK].values = [1, wrong]
+
+    def _ok_write(self):
+        result = MagicMock()
+        result.isError.return_value = False
+        return result
+
+    def _err_write(self):
+        result = MagicMock()
+        result.isError.return_value = True
+        return result
+
+    # --- read + cache + log -------------------------------------------------
+    def test_reads_and_caches_all_three_registers(self):
+        master, client = self._build()
+        self._seed_registers(master, mode=2, system=0, wrong=0)
+
+        asyncio.run(master._apply_meter_config(master._front_data.frame))
+
+        self.assertEqual(
+            master.meter_config,
+            {"measurement_mode": 2, "measuring_system": 0, "wrong_connection": 0},
+        )
+        client.write_register.assert_not_awaited()
+
+    def test_wrong_connection_status_surfaced(self):
+        master, _ = self._build()
+        self._seed_registers(master, mode=2, system=0, wrong=1)
+
+        asyncio.run(master._apply_meter_config(master._front_data.frame))
+
+        self.assertEqual(master.meter_config["wrong_connection"], 1)
+
+    # --- flags off: never write --------------------------------------------
+    def test_no_write_when_flags_disabled_even_if_values_differ(self):
+        master, client = self._build(ensure_bidirectional_mode=False, ensure_3phase_measuring_system=False)
+        self._seed_registers(master, mode=0, system=2, wrong=0)
+
+        asyncio.run(master._apply_meter_config(master._front_data.frame))
+
+        client.write_register.assert_not_awaited()
+
+    # --- flag on, value already correct: no write --------------------------
+    def test_no_write_when_mode_already_correct(self):
+        master, client = self._build(ensure_bidirectional_mode=True)
+        self._seed_registers(master, mode=2, system=0, wrong=0)
+
+        asyncio.run(master._apply_meter_config(master._front_data.frame))
+
+        client.write_register.assert_not_awaited()
+
+    # --- flag on, value wrong: write + cache/refresh -----------------------
+    def test_writes_mode_when_flag_on_and_value_wrong(self):
+        master, client = self._build(ensure_bidirectional_mode=True)
+        client.write_register.return_value = self._ok_write()
+        self._seed_registers(master, mode=0, system=0, wrong=0)
+
+        asyncio.run(master._apply_meter_config(master._front_data.frame))
+
+        from app.carlo_gavazzi.em540_data import REG_MEASUREMENT_MODE
+
+        client.write_register.assert_awaited_once_with(REG_MEASUREMENT_MODE, 2, device_id=1)
+        self.assertEqual(master.meter_config["measurement_mode"], 2)
+        self.assertEqual(master._front_data.frame.static_reg_map[REG_MEASUREMENT_MODE].values, [2])
+
+    def test_writes_measuring_system_when_flag_on_and_value_wrong(self):
+        master, client = self._build(ensure_3phase_measuring_system=True)
+        client.write_register.return_value = self._ok_write()
+        self._seed_registers(master, mode=2, system=2, wrong=0)
+
+        asyncio.run(master._apply_meter_config(master._front_data.frame))
+
+        from app.carlo_gavazzi.em540_data import REG_MEASURING_SYSTEM
+
+        client.write_register.assert_awaited_once_with(REG_MEASURING_SYSTEM, 0, device_id=1)
+        self.assertEqual(master.meter_config["measuring_system"], 0)
+
+    # --- MID read-only meter: rejected write is non-fatal, cache unchanged --
+    def test_rejected_write_is_non_fatal_and_leaves_cache_unchanged(self):
+        master, client = self._build(ensure_bidirectional_mode=True)
+        client.write_register.return_value = self._err_write()
+        self._seed_registers(master, mode=1, system=0, wrong=0)
+
+        # Should not raise; cached value stays at the meter's actual value.
+        asyncio.run(master._apply_meter_config(master._front_data.frame))
+
+        self.assertEqual(master.meter_config["measurement_mode"], 1)
+
+    def test_write_modbus_exception_is_swallowed(self):
+        master, client = self._build(ensure_bidirectional_mode=True)
+        client.write_register = AsyncMock(side_effect=ModbusException("boom"))
+        self._seed_registers(master, mode=0, system=0, wrong=0)
+
+        asyncio.run(master._apply_meter_config(master._front_data.frame))
+
+        self.assertEqual(master.meter_config["measurement_mode"], 0)
+
+    def test_write_io_exception_is_swallowed(self):
+        master, client = self._build(ensure_3phase_measuring_system=True)
+        client.write_register = AsyncMock(side_effect=ModbusIOException("no response"))
+        self._seed_registers(master, mode=2, system=2, wrong=0)
+
+        asyncio.run(master._apply_meter_config(master._front_data.frame))
+
+        self.assertEqual(master.meter_config["measuring_system"], 2)
+
+    def test_write_register_returns_false_on_error_response(self):
+        master, client = self._build()
+        client.write_register.return_value = self._err_write()
+
+        ok = asyncio.run(master._write_register(0x1103, 2))
+
+        self.assertFalse(ok)
+
+    def test_write_register_returns_true_on_success(self):
+        master, client = self._build()
+        client.write_register.return_value = self._ok_write()
+
+        ok = asyncio.run(master._write_register(0x1103, 2))
+
+        self.assertTrue(ok)
 
 
 if __name__ == "__main__":
