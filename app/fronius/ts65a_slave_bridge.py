@@ -200,7 +200,7 @@ class Ts65aSlaveBridge(MeterDataListener):
         logger.setLevel(config.log_level)
 
         self.meter_data = Ts65aMeterData(
-            config.smoothing_num_points,
+            config.smoothing_window_seconds,
             config.grid_feed_in_hard_limit,
             logger,
             self._stats,
@@ -424,7 +424,7 @@ class Ts65aSlaveBridge(MeterDataListener):
 
         # Run the data through our smoothing and grid feed-in limiter
         self.meter_data.reconfigure(
-            self._config.smoothing_num_points,
+            self._config.smoothing_window_seconds,
             self._config.grid_feed_in_hard_limit,
         )
         self.meter_data.update(data)

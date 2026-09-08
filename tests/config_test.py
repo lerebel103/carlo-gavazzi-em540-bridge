@@ -221,7 +221,7 @@ def _make_config(tmp_path, overrides: dict | None = None):
             "slave_id": 1,
             "log_level": "INFO",
             "grid_feed_in_hard_limit": -5000,
-            "smoothing_num_points": 20,
+            "smoothing_window_seconds": 2.5,
             "serial": {
                 "enabled": False,
                 "port": "/dev/ttyUSB2",
@@ -554,21 +554,21 @@ def test_valid_grid_feed_in_hard_limit_accepted(tmp_path, value):
     assert state.ts65a_slave.grid_feed_in_hard_limit == value
 
 
-# -- smoothing_num_points validation --
+# -- smoothing_window_seconds validation --
 
 
-@pytest.mark.parametrize("value", [0, -1, 601, 1000])
-def test_invalid_smoothing_num_points_raises(tmp_path, value):
-    path = _make_config(tmp_path, {"ts65a_slave.smoothing_num_points": value})
-    with pytest.raises(ConfigError, match="smoothing_num_points"):
+@pytest.mark.parametrize("value", [-0.1, -1, 15.1, 100, "x"])
+def test_invalid_smoothing_window_seconds_raises(tmp_path, value):
+    path = _make_config(tmp_path, {"ts65a_slave.smoothing_window_seconds": value})
+    with pytest.raises(ConfigError, match="smoothing_window_seconds"):
         ConfigManager(path).load()
 
 
-@pytest.mark.parametrize("value", [1, 20, 300, 600])
-def test_valid_smoothing_num_points_accepted(tmp_path, value):
-    path = _make_config(tmp_path, {"ts65a_slave.smoothing_num_points": value})
+@pytest.mark.parametrize("value", [0, 0.0, 2.5, 10, 15, 15.0])
+def test_valid_smoothing_window_seconds_accepted(tmp_path, value):
+    path = _make_config(tmp_path, {"ts65a_slave.smoothing_window_seconds": value})
     state = ConfigManager(path).load()
-    assert state.ts65a_slave.smoothing_num_points == value
+    assert state.ts65a_slave.smoothing_window_seconds == value
 
 
 # ---------------------------------------------------------------------------
@@ -615,7 +615,7 @@ def test_write_updates_persisted_fields(tmp_path):
         "ts65a_slave": {
             "port": 5003,
             "grid_feed_in_hard_limit": -5000,
-            "smoothing_num_points": 20,
+            "smoothing_window_seconds": 2.5,
             "update_timeout": 0.5,
         },
         "mqtt": {"host": "broker.local", "port": 1883, "update_interval": 0.5},
@@ -653,7 +653,7 @@ def test_write_preserves_non_persisted_fields(tmp_path):
         "ts65a_slave": {
             "port": 5003,
             "grid_feed_in_hard_limit": -5000,
-            "smoothing_num_points": 20,
+            "smoothing_window_seconds": 2.5,
             "update_timeout": 0.5,
         },
         "mqtt": {"host": "broker.local", "port": 1883, "update_interval": 0.5},
@@ -691,7 +691,7 @@ def test_write_clears_dirty_after_flush(tmp_path):
         "ts65a_slave": {
             "port": 5003,
             "grid_feed_in_hard_limit": -5000,
-            "smoothing_num_points": 20,
+            "smoothing_window_seconds": 2.5,
             "update_timeout": 0.5,
         },
         "mqtt": {"host": "broker.local", "port": 1883, "update_interval": 0.5},
@@ -724,7 +724,7 @@ def test_flush_loop_writes_after_debounce(tmp_path):
         "ts65a_slave": {
             "port": 5003,
             "grid_feed_in_hard_limit": -5000,
-            "smoothing_num_points": 20,
+            "smoothing_window_seconds": 2.5,
             "update_timeout": 0.5,
         },
         "mqtt": {"host": "broker.local", "port": 1883, "update_interval": 0.5},
@@ -736,7 +736,7 @@ def test_flush_loop_writes_after_debounce(tmp_path):
     state = cm.load()
 
     # Modify a persisted field and schedule persist
-    state.ts65a_slave.smoothing_num_points = 100
+    state.ts65a_slave.smoothing_window_seconds = 5.0
     cm.schedule_persist()
 
     # Patch the debounce: set _last_dirty far in the past so flush fires quickly
@@ -751,7 +751,7 @@ def test_flush_loop_writes_after_debounce(tmp_path):
 
     assert cm._dirty is False
     reloaded = yaml.safe_load(p.read_text())
-    assert reloaded["ts65a_slave"]["smoothing_num_points"] == 100
+    assert reloaded["ts65a_slave"]["smoothing_window_seconds"] == 5.0
 
 
 def test_start_and_stop_flush_loop(valid_yaml):
@@ -783,7 +783,7 @@ def test_write_failure_keeps_dirty_flag(tmp_path, monkeypatch):
         "ts65a_slave": {
             "port": 5003,
             "grid_feed_in_hard_limit": -5000,
-            "smoothing_num_points": 20,
+            "smoothing_window_seconds": 2.5,
             "update_timeout": 0.5,
         },
         "mqtt": {"host": "broker.local", "port": 1883, "update_interval": 0.5},
@@ -825,7 +825,7 @@ _FIELD_STRATEGIES: dict[str, st.SearchStrategy] = {
         allow_nan=False,
         allow_infinity=False,
     ),
-    "ts65a_slave.smoothing_num_points": st.integers(min_value=1, max_value=600),
+    "ts65a_slave.smoothing_window_seconds": st.floats(min_value=0, max_value=15, allow_nan=False, allow_infinity=False),
     "mqtt.update_interval": st.floats(
         min_value=0.01,
         max_value=1e4,
@@ -894,7 +894,7 @@ def test_property_config_persistence_round_trip(field_and_value):
         "ts65a_slave": {
             "port": 5003,
             "grid_feed_in_hard_limit": -5000,
-            "smoothing_num_points": 20,
+            "smoothing_window_seconds": 2.5,
             "update_timeout": 0.5,
         },
         "mqtt": {"host": "broker.local", "port": 1883, "update_interval": 0.5},
@@ -1081,9 +1081,10 @@ _invalid_grid_limit = st.floats(
     exclude_min=True,
 )
 
-# -- Invalid smoothing_num_points: integers outside [1, 600]
+# -- Invalid smoothing_window_seconds: numbers outside [0, 15]
 _invalid_smoothing = st.one_of(
-    st.integers(max_value=0),
+    st.floats(max_value=-0.0001, allow_nan=False, allow_infinity=False),
+    st.floats(min_value=15.0001, allow_nan=False, allow_infinity=False),
     st.integers(min_value=601),
 )
 
@@ -1115,7 +1116,7 @@ _invalid_field_and_value = st.one_of(
         ]
     ).flatmap(lambda f: _invalid_log_level.map(lambda v: (f, v))),
     _invalid_grid_limit.map(lambda v: ("ts65a_slave.grid_feed_in_hard_limit", v)),
-    _invalid_smoothing.map(lambda v: ("ts65a_slave.smoothing_num_points", v)),
+    _invalid_smoothing.map(lambda v: ("ts65a_slave.smoothing_window_seconds", v)),
 )
 
 
@@ -1126,7 +1127,7 @@ def test_property_config_validation_rejects_out_of_range_values(field_and_value)
 
     Property 4 — Config validation rejects out-of-range values:
     For any config field with a defined constraint (mode, port, slave_id,
-    log_level, grid_feed_in_hard_limit, smoothing_num_points), a YAML file
+    log_level, grid_feed_in_hard_limit, smoothing_window_seconds), a YAML file
     containing a value outside the valid range for that field SHALL cause
     ConfigManager.load() to raise a validation error.
     """
@@ -1182,7 +1183,7 @@ def test_property_debounce_guarantee(num_calls):
         "ts65a_slave": {
             "port": 5003,
             "grid_feed_in_hard_limit": -5000,
-            "smoothing_num_points": 20,
+            "smoothing_window_seconds": 2.5,
             "update_timeout": 0.5,
         },
         "mqtt": {"host": "broker.local", "port": 1883, "update_interval": 0.5},
@@ -1375,7 +1376,7 @@ def test_property_non_persisted_fields_preserved_on_write(non_persisted_values):
         "em540_slave": {"update_timeout": 0.5},
         "ts65a_slave": {
             "grid_feed_in_hard_limit": -5000,
-            "smoothing_num_points": 20,
+            "smoothing_window_seconds": 2.5,
             "update_timeout": 0.5,
         },
         "mqtt": {"update_interval": 0.5},

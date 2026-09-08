@@ -16,7 +16,7 @@ class TestTs65aSlaveBridge(unittest.TestCase):
             update_timeout=5.0,
             serial_idle_timeout=5.0,
             log_level="WARNING",
-            smoothing_num_points=3,
+            smoothing_window_seconds=2.5,
             grid_feed_in_hard_limit=-1000,
             serial=SimpleNamespace(
                 enabled=False,

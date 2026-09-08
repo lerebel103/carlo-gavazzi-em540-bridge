@@ -93,7 +93,10 @@ class Ts65aSlaveConfig:
     # is considered disconnected (serial has no transport disconnect event).
     serial_idle_timeout: float = 5.0
     grid_feed_in_hard_limit: float = -5000.0
-    smoothing_num_points: int = 20
+    # Duration (seconds) over which downstream TS65A readings are time-averaged.
+    # Frame-rate independent: the window is a duration, not a sample count.
+    # 0 disables smoothing (serve the latest instantaneous value). Max 15s.
+    smoothing_window_seconds: float = 2.5
     log_level: str = "INFO"
     serial: SlaveSerialConfig = field(default_factory=SlaveSerialConfig)
 
@@ -131,7 +134,7 @@ class AppState:
 
 PERSISTED_FIELDS: set[str] = {
     "ts65a_slave.grid_feed_in_hard_limit",
-    "ts65a_slave.smoothing_num_points",
+    "ts65a_slave.smoothing_window_seconds",
     "mqtt.update_interval",
     "em540_master.update_interval",
     "em540_master.retries",
@@ -305,12 +308,13 @@ class ConfigManager:
                 f"ts65a_slave.grid_feed_in_hard_limit must be <= 0, got {state.ts65a_slave.grid_feed_in_hard_limit}"
             )
 
-        # 6. smoothing_num_points  (1 <= value <= 600)
-        if not (1 <= state.ts65a_slave.smoothing_num_points <= 600):
+        # 6. smoothing_window_seconds  (0 <= value <= 15, finite number; 0 disables smoothing)
+        smoothing_window = state.ts65a_slave.smoothing_window_seconds
+        if isinstance(smoothing_window, bool) or not isinstance(smoothing_window, (int, float)):
+            raise ConfigError(f"ts65a_slave.smoothing_window_seconds must be a number, got {smoothing_window!r}")
+        if not math.isfinite(smoothing_window) or not (0 <= smoothing_window <= 15):
             raise ConfigError(
-                f"ts65a_slave.smoothing_num_points must satisfy "
-                f"1 <= value <= 600, "
-                f"got {state.ts65a_slave.smoothing_num_points}"
+                f"ts65a_slave.smoothing_window_seconds must satisfy 0 <= value <= 15, got {smoothing_window}"
             )
 
     def _populate_config(self, target, section_data: dict, path: str) -> None:

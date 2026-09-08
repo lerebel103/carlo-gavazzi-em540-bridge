@@ -88,7 +88,7 @@ def test_master_timeout_entity_uses_milliseconds_with_internal_seconds_conversio
 
 # Strategy: generate valid values for each PERSISTED_FIELD and build an AppState.
 _grid_limit = st.floats(min_value=-50000, max_value=0, allow_nan=False, allow_infinity=False)
-_smoothing = st.integers(min_value=1, max_value=600)
+_smoothing = st.floats(min_value=0, max_value=15, allow_nan=False, allow_infinity=False)
 _mqtt_interval = st.floats(min_value=0.1, max_value=60, allow_nan=False, allow_infinity=False)
 _master_interval = st.floats(min_value=0.0, max_value=10, allow_nan=False, allow_infinity=False)
 _master_retries = st.integers(min_value=0, max_value=9)
@@ -102,7 +102,7 @@ def app_states(draw):
     """Generate an AppState with random valid values for all persisted fields."""
     state = AppState()
     state.ts65a_slave.grid_feed_in_hard_limit = draw(_grid_limit)
-    state.ts65a_slave.smoothing_num_points = draw(_smoothing)
+    state.ts65a_slave.smoothing_window_seconds = draw(_smoothing)
     state.mqtt.update_interval = draw(_mqtt_interval)
     state.em540_master.update_interval = draw(_master_interval)
     state.em540_master.retries = draw(_master_retries)
