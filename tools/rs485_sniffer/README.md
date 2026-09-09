@@ -67,7 +67,9 @@ group for serial access:
 ```sh
 mkdir -p tools/rs485_sniffer/sniffer-logs
 cd tools/rs485_sniffer
-UID=$(id -u) GID=$(id -g) docker compose -f docker-compose.sniffer.yaml up -d --build
+# UID is a readonly variable in Bash, so pass the values via `env` (not a bare
+# `UID=... GID=... docker compose`, which Bash rejects).
+env UID="$(id -u)" GID="$(id -g)" docker compose -f docker-compose.sniffer.yaml up -d --build
 ```
 
 Adjust the `dialout` group in the compose file if your serial device is owned by
@@ -119,6 +121,9 @@ occurs, the parsed/raw logs distinguish the two competing hypotheses directly:
   Strong evidence the inverter stopped transmitting, but not conclusive (see the
   observer-limitation note above: this adapter's own driver could have dropped
   the bytes). Confirm with a logic analyzer if certainty is required.
-- **Rows present with `crc_ok=0` / `direction=unparsed`** — the inverter *is*
-  transmitting but the bytes on the bus are malformed. This is the case the
-  bridge itself cannot see, and it points at line corruption.
+- **Rows present with `crc_ok=0` / `direction=unparsed`** — bytes/noise reached
+  this adapter but did not form valid frames. This is evidence of corruption on
+  the segment and is the case the bridge itself cannot see. Note it does **not**
+  identify *who* transmitted: a passive tap sees both endpoints, and an unparsed
+  frame has no reliable direction. Attribute traffic to the inverter only when a
+  valid, request-shaped frame (`direction=request`, `crc_ok=1`) supports it.

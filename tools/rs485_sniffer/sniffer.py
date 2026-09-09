@@ -55,6 +55,15 @@ from zoneinfo import ZoneInfo
 
 import serial
 
+# Largest legal Modbus RTU ADU: 1 addr + 253 PDU + 2 CRC.
+_MAX_RTU_ADU: int = 256
+
+# Hard cap on the frame-assembly buffer. A continuous/noisy stream may never
+# reach an idle gap; without this bound the buffer would grow until the process
+# OOMs. When exceeded we force-flush whatever we have so it still reaches the
+# raw CSV. Generously above one max ADU to give the CRC splitter room to work.
+_MAX_BUFFER_BYTES: int = 4096
+
 # --- CRC16 (Modbus) -------------------------------------------------------
 
 _CRC16_TABLE: list[int] = []
@@ -148,6 +157,10 @@ class Config:
 # --- Modbus frame decode (best-effort, for the parsed CSV) ----------------
 
 _READ_FCS = {1, 2, 3, 4}
+# Register reads (16-bit words). For these an 8-byte frame is unambiguously a
+# request; for bit reads (FC1/FC2) an 8-byte frame could be a 3-data-byte
+# response, so direction is left ambiguous there.
+_REGISTER_READ_FCS = {3, 4}
 _WRITE_SINGLE_FCS = {5, 6}
 _WRITE_MULTI_FCS = {15, 16}
 
@@ -189,18 +202,26 @@ def decode_frame(frame: bytes) -> dict:
         return out
 
     if fc in _READ_FCS:
-        # Request form: 8 bytes total (2 CRC). Response form: id,fc,bytecount,data,CRC.
-        if len(frame) == 8:
+        # Response form for all read FCs: id, fc, bytecount, data..., CRC — so
+        # bytecount == len - 5. Check this first (it is unambiguous).
+        if len(frame) >= 5 and frame[2] == len(frame) - 5:
+            out["direction"] = "response"
+            out["bytecount"] = frame[2]
+            out["summary"] = f"read-response fc={fc} bytes={frame[2]}"
+        elif len(frame) == 8 and fc in _REGISTER_READ_FCS:
+            # An 8-byte request (id, fc, addr_hi, addr_lo, cnt_hi, cnt_lo, CRC).
+            # Only unambiguous for register reads (FC3/FC4): an FC1/FC2 (bit)
+            # response carrying 3 data bytes is ALSO 8 bytes, so we do not assert
+            # a direction for those.
             addr = (frame[2] << 8) | frame[3]
             count = (frame[4] << 8) | frame[5]
             out["direction"] = "request"
             out["addr"] = addr
             out["count"] = count
             out["summary"] = f"read fc={fc} addr={addr} count={count}"
-        elif len(frame) >= 5 and frame[2] == len(frame) - 5:
-            out["direction"] = "response"
-            out["bytecount"] = frame[2]
-            out["summary"] = f"read-response fc={fc} bytes={frame[2]}"
+        elif len(frame) == 8:
+            # FC1/FC2, 8 bytes: could be a request or a 3-data-byte response.
+            out["summary"] = f"read fc={fc} (ambiguous 8-byte FC1/FC2 frame)"
         else:
             out["summary"] = f"read fc={fc} (ambiguous len={len(frame)})"
         return out
@@ -346,11 +367,15 @@ class Sniffer:
 
         try:
             while self._running:
-                # Read one byte at a time so the observation timestamp reflects
-                # the byte itself, not the completion of a larger buffered chunk.
-                # At typical Modbus baud rates (~960 B/s at 9600) this is trivially
-                # fast. A short timeout lets us detect the inter-frame idle gap.
-                b = ser.read(1)
+                # Read whatever is currently available (at least one byte, blocking
+                # up to the short timeout). Reading the available batch lets the
+                # CRC-based splitter in _feed separate driver-coalesced frames;
+                # the idle-gap path still delimits cleanly-spaced traffic. `now`
+                # is the observation time for this batch — the best available
+                # timestamp without hardware RX timestamping (see _feed docstring
+                # for the residual batching limitation).
+                waiting = getattr(ser, "in_waiting", 0) or 1
+                b = ser.read(waiting)
                 now = time.monotonic()
                 for frame in self._feed(b, now):
                     self._emit(frame)
@@ -369,25 +394,77 @@ class Sniffer:
         """Frame-assembly state machine. Yields completed frames.
 
         ``data`` is the bytes observed at monotonic time ``now`` (empty on a read
-        timeout). A frame is completed when an idle gap of at least the RTU
-        inter-frame threshold has elapsed since the last received byte. Using
-        per-byte observation timestamps and a ``>= gap`` boundary avoids merging
-        a compliant response that follows the minimum 3.5-character silence into
-        the preceding request.
+        timeout). Frames are delimited by three mechanisms, in order:
+
+        1. **Idle gap** — the primary RTU delimiter: once the bus has been idle
+           for >= the inter-frame threshold since the last byte, the buffer is a
+           complete frame. Using a ``>= gap`` boundary avoids merging a response
+           that follows the minimum 3.5-char silence into the preceding request.
+
+        2. **CRC-based split (fallback)** — USB/UART drivers often batch bytes, so
+           a request and its response can be delivered back-to-back with no
+           observable idle gap between them; the idle rule alone would then
+           coalesce two valid frames and report a false bad CRC. To defend the
+           diagnostic against manufacturing that exact signal, whenever the buffer
+           *starts* with a structurally-complete, CRC-valid frame we split it off
+           immediately rather than waiting for an idle gap. This is best-effort:
+           it recovers cleanly-framed back-to-back traffic but cannot recover
+           genuinely corrupted bytes (which is the signal we want to keep).
+
+        3. **Size cap (safety)** — a continuous or noisy stream may never idle;
+           without a bound the buffer would grow until the process OOMs, which is
+           especially likely while investigating corruption. Once the buffer
+           exceeds a cap we force-flush what we have so it always reaches the CSV.
 
         Extracted from the read loop so the framing logic is unit-testable
         without a real serial port.
+
+        Batching limitation: if the driver batches bytes AND the traffic is not
+        cleanly CRC-framed (real corruption), the idle gap is the only delimiter
+        available and adjacent bursts may still be merged. This residual limit is
+        documented in the README; a logic analyzer is the authoritative fallback.
         """
-        # Flush a pending frame if the bus has been idle for >= gap since the last
-        # byte (evaluated on both byte arrivals and read timeouts).
+        # (1) Idle-gap flush.
         if self._buf and self._last_byte_mono is not None:
             idle = now - self._last_byte_mono
             if force_flush or idle >= self._gap:
                 yield bytes(self._buf)
                 self._buf.clear()
+
         if data:
             self._buf.extend(data)
             self._last_byte_mono = now
+
+            # (2) CRC-based split: peel off any leading CRC-valid frames so
+            # driver-batched back-to-back frames are separated correctly.
+            yield from self._split_leading_crc_frames()
+
+            # (3) Size cap: never let the buffer grow without bound.
+            if len(self._buf) >= _MAX_BUFFER_BYTES:
+                yield bytes(self._buf)
+                self._buf.clear()
+
+    def _split_leading_crc_frames(self):
+        """Yield and remove any CRC-valid frame(s) at the start of the buffer.
+
+        Scans increasing prefix lengths (from the RTU minimum of 4 bytes) for a
+        valid Modbus CRC. When found, that prefix is emitted as a complete frame
+        and removed, then scanning continues on the remainder. Leaves a trailing
+        partial/unrecognised remainder in the buffer for the idle-gap path.
+        """
+        made_progress = True
+        while made_progress and len(self._buf) >= 4:
+            made_progress = False
+            # Cap the scan to the max legal ADU so a garbage stream can't make
+            # this O(n^2) over a huge buffer.
+            limit = min(len(self._buf), _MAX_RTU_ADU)
+            for end in range(4, limit + 1):
+                if crc_ok(bytes(self._buf[:end])):
+                    frame = bytes(self._buf[:end])
+                    del self._buf[:end]
+                    yield frame
+                    made_progress = True
+                    break
 
     def stop(self, *_args) -> None:
         self._running = False
