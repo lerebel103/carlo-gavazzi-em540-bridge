@@ -23,7 +23,8 @@ services:
     # directory is writable. Without this the container's built-in non-root
     # `sniffer` user (a system UID) typically cannot write to a host-created
     # directory, and the process restart-loops on failing to open the CSVs.
-    # Set to your host user's ids:  UID=$(id -u) GID=$(id -g) docker compose ...
+    # Set to your host user's ids. UID is readonly in Bash, so pass via env:
+    #   env UID="$(id -u)" GID="$(id -g)" docker compose -f ... up -d --build
     # The user still needs serial access; add the group owning the serial device
     # (usually `dialout`) via group_add below.
     user: "${UID:-1000}:${GID:-1000}"
