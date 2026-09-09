@@ -120,6 +120,16 @@ class TestPduTraceRingCapture(unittest.TestCase):
         self.assertEqual(len(rec.payload_hex.split(" ")), len(frame))
         self.assertTrue(rec.payload_hex.endswith(f"{frame[-1]:02x}"))
 
+    def test_large_coalesced_buffer_is_retained_in_full(self):
+        # pymodbus invokes the receive trace with its accumulated buffer (up to
+        # ~1024 bytes), which may contain coalesced frames or trailing corruption.
+        # The raw capture must NOT truncate it — that evidence is the whole point.
+        buffer = bytes(range(256)) * 4  # 1024 bytes, deterministic
+        self.ring.record_packet(False, buffer)
+        rec = list(self.ring._ring)[-1]
+        self.assertEqual(len(rec.payload_hex.split(" ")), len(buffer))
+        self.assertTrue(rec.payload_hex.endswith(f"{buffer[-1]:02x}"))
+
     def test_all_pdu_registers_are_retained(self):
         # The TS65A dynamic block is ~90 registers; none must be dropped.
         registers = list(range(90))

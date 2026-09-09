@@ -51,12 +51,10 @@ DEFAULT_RING_SIZE: int = 400
 # Minimum seconds between dumps, so a burst of trigger reads yields one dump.
 DEFAULT_DUMP_COOLDOWN_S: float = 60.0
 
-# Cap on raw-packet hex captured per record (bytes). Must retain a complete
-# legal frame — the whole point is to capture framing/CRC evidence. The largest
-# Modbus RTU ADU is 256 bytes (1 addr + 253 PDU + 2 CRC); a real TS65A response
-# for the ~90-register dynamic block is ~185 bytes. 260 leaves headroom while
-# still guarding against a pathological oversized buffer.
-_MAX_PACKET_BYTES: int = 260
+# Raw packet bytes are captured in FULL — no cap. The pymodbus receive trace is
+# invoked with the accumulated receive buffer (up to ~1024 bytes), not a single
+# ≤256-byte ADU. Truncating would discard coalesced frames or trailing
+# corruption, which is exactly the framing evidence this diagnostic must retain.
 
 # Cap on decoded register values captured per PDU record. The TS65A dynamic
 # block is ~90 registers; keep well above that so no register value is dropped.
@@ -130,7 +128,7 @@ class PduTraceRing:
         wall = time.time()
         seq = self._seq
         self._seq = seq + 1
-        payload = data[:_MAX_PACKET_BYTES].hex(" ") if data else ""
+        payload = data.hex(" ") if data else ""
         self._ring.append(
             TraceRecord(
                 seq=seq,
