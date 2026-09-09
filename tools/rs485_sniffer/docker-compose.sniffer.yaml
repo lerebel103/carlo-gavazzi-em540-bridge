@@ -1,0 +1,57 @@
+# Passive RS485 bus sniffer — TEMPORARY DIAGNOSTIC.
+#
+# Add this service to your stack. It runs independently of the main bridge and
+# only READS from a spare RS485 adapter wired onto the existing bus.
+#
+# Either merge this service block into your main docker-compose.yaml, or run it
+# on its own:
+#     docker compose -f tools/rs485_sniffer/docker-compose.sniffer.yaml up -d --build
+#
+# Adjust SNIFFER_PORT / the devices mapping to your spare adapter, and the baud
+# settings to match the inverter<->bridge bus (the TS65A serial link).
+
+services:
+  rs485-sniffer:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: rs485-sniffer:latest
+    container_name: rs485-sniffer
+    restart: unless-stopped
+    init: true
+    # Run as the host user that owns ./sniffer-logs so the bind-mounted output
+    # directory is writable. Without this the container's built-in non-root
+    # `sniffer` user (a system UID) typically cannot write to a host-created
+    # directory, and the process restart-loops on failing to open the CSVs.
+    # Set to your host user's ids. UID is readonly in Bash, so pass via env:
+    #   env UID="$(id -u)" GID="$(id -g)" docker compose -f ... up -d --build
+    # The user still needs serial access; add the group owning the serial device
+    # (usually `dialout`) via group_add below.
+    user: "${UID:-1000}:${GID:-1000}"
+    group_add:
+      - dialout
+    environment:
+      # Local time for the CSV timestamps.
+      TZ: Australia/Perth
+      # --- Serial settings: match the bus you are tapping ---
+      SNIFFER_PORT: /dev/ttyUSB3
+      SNIFFER_BAUDRATE: "9600"
+      SNIFFER_PARITY: "N"
+      SNIFFER_BYTESIZE: "8"
+      SNIFFER_STOPBITS: "1"
+      # --- Output CSVs (written into the mounted ./sniffer-logs) ---
+      SNIFFER_RAW_CSV: /data/rs485_raw.csv
+      SNIFFER_PARSED_CSV: /data/rs485_parsed.csv
+    devices:
+      # Map your SPARE adapter (the read-only tap), NOT the bridge's own port.
+      - /dev/ttyUSB3:/dev/ttyUSB3
+    volumes:
+      # CSV logs land here on the host for later analysis. Create it first and
+      # ensure it is owned by the UID/GID set in `user:` above:
+      #   mkdir -p sniffer-logs
+      - ./sniffer-logs:/data
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: 3
