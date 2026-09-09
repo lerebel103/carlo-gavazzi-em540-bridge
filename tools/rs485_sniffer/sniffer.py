@@ -245,6 +245,10 @@ class Sniffer:
         self._parsed_w = None
         self._seq = 0
         self._prev_mono: float | None = None
+        # Frame-assembly state (see _feed).
+        self._buf = bytearray()
+        self._last_byte_mono: float | None = None
+        self._gap = cfg.interframe_gap_s()
 
     def _open_outputs(self) -> None:
         for path in (self.cfg.raw_csv, self.cfg.parsed_csv):
@@ -292,13 +296,20 @@ class Sniffer:
         self._raw_w.writerow([seq, wall, f"{mono:.6f}", delta_ms, len(frame), hexs])
 
         d = decode_frame(frame)
+        # "unparsed" whenever the frame is unreliable as decoded: a failed CRC
+        # (corruption) OR a valid-CRC frame we could not structurally classify.
+        # This keeps `direction=unparsed` a dependable filter for suspect traffic.
+        if not d["crc_ok"] or not d["direction"]:
+            direction = "unparsed"
+        else:
+            direction = d["direction"]
         self._parsed_w.writerow(
             [
                 seq,
                 wall,
                 f"{mono:.6f}",
                 delta_ms,
-                d["direction"] or ("unparsed" if not d["crc_ok"] else ""),
+                direction,
                 d["dev_id"],
                 d["fc"],
                 d["addr"],
@@ -315,16 +326,16 @@ class Sniffer:
     def run(self) -> None:
         cfg = self.cfg
         self._open_outputs()
-        gap = cfg.interframe_gap_s()
-        # A short read timeout lets us detect the inter-frame idle gap: when a
-        # read returns nothing and we have buffered bytes older than `gap`, flush.
+        gap = self._gap
+        # A short read timeout (well under the idle gap) lets us detect the
+        # inter-frame idle even when the bus falls silent mid-capture.
         ser = serial.Serial(
             port=cfg.port,
             baudrate=cfg.baudrate,
             parity=cfg.parity,
             bytesize=cfg.bytesize,
             stopbits=cfg.stopbits,
-            timeout=gap / 2.0,
+            timeout=gap / 4.0,
         )
         print(
             f"RS485 sniffer listening on {cfg.port} @ {cfg.baudrate} {cfg.bytesize}{cfg.parity}{cfg.stopbits} "
@@ -333,27 +344,19 @@ class Sniffer:
             file=sys.stderr,
         )
 
-        buf = bytearray()
-        last_byte_mono = time.monotonic()
         try:
             while self._running:
-                chunk = ser.read(256)
+                # Read one byte at a time so the observation timestamp reflects
+                # the byte itself, not the completion of a larger buffered chunk.
+                # At typical Modbus baud rates (~960 B/s at 9600) this is trivially
+                # fast. A short timeout lets us detect the inter-frame idle gap.
+                b = ser.read(1)
                 now = time.monotonic()
-                if chunk:
-                    if buf and (now - last_byte_mono) > gap:
-                        # Idle gap since previous bytes -> previous buffer is a frame.
-                        self._emit(bytes(buf))
-                        buf.clear()
-                    buf.extend(chunk)
-                    last_byte_mono = now
-                else:
-                    # Read timed out (no bytes). Flush a pending frame once idle.
-                    if buf and (now - last_byte_mono) > gap:
-                        self._emit(bytes(buf))
-                        buf.clear()
+                for frame in self._feed(b, now):
+                    self._emit(frame)
         finally:
-            if buf:
-                self._emit(bytes(buf))
+            for frame in self._feed(b"", time.monotonic(), force_flush=True):
+                self._emit(frame)
             try:
                 ser.close()
             except Exception:
@@ -361,6 +364,30 @@ class Sniffer:
             for f in (self._raw_file, self._parsed_file):
                 if f:
                     f.close()
+
+    def _feed(self, data: bytes, now: float, force_flush: bool = False):
+        """Frame-assembly state machine. Yields completed frames.
+
+        ``data`` is the bytes observed at monotonic time ``now`` (empty on a read
+        timeout). A frame is completed when an idle gap of at least the RTU
+        inter-frame threshold has elapsed since the last received byte. Using
+        per-byte observation timestamps and a ``>= gap`` boundary avoids merging
+        a compliant response that follows the minimum 3.5-character silence into
+        the preceding request.
+
+        Extracted from the read loop so the framing logic is unit-testable
+        without a real serial port.
+        """
+        # Flush a pending frame if the bus has been idle for >= gap since the last
+        # byte (evaluated on both byte arrivals and read timeouts).
+        if self._buf and self._last_byte_mono is not None:
+            idle = now - self._last_byte_mono
+            if force_flush or idle >= self._gap:
+                yield bytes(self._buf)
+                self._buf.clear()
+        if data:
+            self._buf.extend(data)
+            self._last_byte_mono = now
 
     def stop(self, *_args) -> None:
         self._running = False
