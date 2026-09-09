@@ -321,27 +321,38 @@ class TestParseCapture(unittest.TestCase):
         self.assertAlmostEqual(d["S_ratio_total"], 1.0, places=3)
         self.assertAlmostEqual(d["va_total"], math.hypot(d["power_total"], d["var_total"]), places=2)
 
-    def test_response_paired_to_request_block(self):
-        # The parser attributes a response to the block of the preceding request
-        # on the same device id. Feed a request then its response.
+    _REQ_ROW = "1,2026-01-01T00:00:00.000+00:00,1.0,10,request,1,3,40071,58,,,1,8,read,01 03 9c 87 00 3a 5b a0"
+
+    def _run_parser(self, lines):
+        import csv as _csv
         import tempfile
 
-        rows = [
-            "seq,wall_local,mono,delta_ms,direction,dev_id,fc,addr,count,bytecount,exception,crc_ok,n_bytes,summary,hex",
-            "1,2026-01-01T00:00:00.000+00:00,1.0,10,request,1,3,40071,58,,,1,8,read,01 03 9c 87 00 3a 5b a0",
-            f"2,2026-01-01T00:00:00.020+00:00,1.02,20,response,1,3,,,116,,1,121,resp,{self._FRAME_HEX}",
-        ]
         with tempfile.TemporaryDirectory() as tmp:
             inp = pathlib.Path(tmp) / "in.csv"
             outp = pathlib.Path(tmp) / "out.csv"
-            inp.write_text("\n".join(rows) + "\n")
+            inp.write_text("\n".join(lines) + "\n")
             parse_capture.main(str(inp), str(outp))
-            import csv as _csv
+            return [r for r in _csv.DictReader(open(outp)) if r["block"] == "40071"]
 
-            decoded = [r for r in _csv.DictReader(open(outp)) if r["block"] == "40071"]
-            self.assertEqual(len(decoded), 1)
-            self.assertTrue(decoded[0]["power_total"])
-            self.assertEqual(decoded[0]["S_ratio_total"], "1.0")
+    def test_response_paired_to_request_block_with_header(self):
+        header = (
+            "seq,wall_local,mono,delta_ms,direction,dev_id,fc,addr,count,bytecount,exception,crc_ok,n_bytes,summary,hex"
+        )
+        resp = f"2,2026-01-01T00:00:00.020+00:00,1.02,20,response,1,3,,,116,,1,121,resp,{self._FRAME_HEX}"
+        decoded = self._run_parser([header, self._REQ_ROW, resp])
+        self.assertEqual(len(decoded), 1)
+        self.assertTrue(decoded[0]["power_total"])
+        self.assertEqual(decoded[0]["S_ratio_total"], "1.0")
+
+    def test_parses_capture_without_header_row(self):
+        # Regression: real sniffer captures often have NO header row (the sniffer
+        # only writes one when it creates a fresh file). The parser must decode
+        # by column position, not treat the first data row as a header.
+        resp = f"2,2026-01-01T00:00:00.020+00:00,1.02,20,response,1,3,,,116,,1,121,resp,{self._FRAME_HEX}"
+        decoded = self._run_parser([self._REQ_ROW, resp])  # no header line
+        self.assertEqual(len(decoded), 1)
+        self.assertTrue(decoded[0]["power_total"])
+        self.assertEqual(decoded[0]["S_ratio_total"], "1.0")
 
 
 if __name__ == "__main__":

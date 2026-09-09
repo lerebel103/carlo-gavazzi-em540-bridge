@@ -143,8 +143,56 @@ def _decode_dynamic(registers: list[int], field_offset: int = 0) -> dict:
     return fields
 
 
+# Column order of the sniffer's PARSED CSV. Parsing is done by POSITION rather
+# than via csv.DictReader so a capture without a header row (the common case —
+# the sniffer only writes a header when it creates a fresh file) still parses
+# correctly. A header line, if present, is detected and skipped.
+_PARSED_COLUMNS = [
+    "seq",
+    "wall_local",
+    "mono",
+    "delta_ms",
+    "direction",
+    "dev_id",
+    "fc",
+    "addr",
+    "count",
+    "bytecount",
+    "exception",
+    "crc_ok",
+    "n_bytes",
+    "summary",
+    "hex",
+]
+
+
+def _read_rows(inp: str) -> list[dict]:
+    """Read the sniffer's parsed CSV by column position (header optional).
+
+    The `hex` field is the last column and may itself contain commas? No — the
+    sniffer writes hex as space-separated bytes, so a simple split on ',' with a
+    maxsplit equal to the number of leading columns is safe and keeps the whole
+    hex string intact.
+    """
+    rows: list[dict] = []
+    n_lead = len(_PARSED_COLUMNS) - 1  # everything before the final `hex` column
+    with open(inp) as fh:
+        for line in fh:
+            line = line.rstrip("\n")
+            if not line:
+                continue
+            parts = line.split(",", n_lead)
+            if len(parts) < len(_PARSED_COLUMNS):
+                continue  # malformed / short line
+            # Skip a header row if present.
+            if parts[0] == "seq" and parts[4] == "direction":
+                continue
+            rows.append(dict(zip(_PARSED_COLUMNS, parts)))
+    return rows
+
+
 def main(inp: str, outp: str) -> None:
-    rows = list(csv.DictReader(open(inp)))
+    rows = _read_rows(inp)
 
     out_cols = (
         ["seq", "wall_local", "mono", "delta_ms", "gap_s", "block", "crc_ok"]
