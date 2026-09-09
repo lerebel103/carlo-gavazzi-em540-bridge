@@ -19,6 +19,16 @@ services:
     container_name: rs485-sniffer
     restart: unless-stopped
     init: true
+    # Run as the host user that owns ./sniffer-logs so the bind-mounted output
+    # directory is writable. Without this the container's built-in non-root
+    # `sniffer` user (a system UID) typically cannot write to a host-created
+    # directory, and the process restart-loops on failing to open the CSVs.
+    # Set to your host user's ids:  UID=$(id -u) GID=$(id -g) docker compose ...
+    # The user still needs serial access; add the group owning the serial device
+    # (usually `dialout`) via group_add below.
+    user: "${UID:-1000}:${GID:-1000}"
+    group_add:
+      - dialout
     environment:
       # Local time for the CSV timestamps.
       TZ: Australia/Perth
@@ -35,7 +45,9 @@ services:
       # Map your SPARE adapter (the read-only tap), NOT the bridge's own port.
       - /dev/ttyUSB3:/dev/ttyUSB3
     volumes:
-      # CSV logs land here on the host for later analysis.
+      # CSV logs land here on the host for later analysis. Create it first and
+      # ensure it is owned by the UID/GID set in `user:` above:
+      #   mkdir -p sniffer-logs
       - ./sniffer-logs:/data
     logging:
       driver: json-file

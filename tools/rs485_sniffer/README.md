@@ -8,7 +8,17 @@ It answers a question the bridge's own logging cannot: **is the inverter still
 transmitting during the ~2-minute silences, and if so, are its frames reaching
 the wire intact?** The bridge only sees bytes that its OS/pyserial layer
 delivers; a frame corrupted or dropped below that layer is invisible to it. A
-second, independent adapter tapping the same bus captures the physical truth.
+second, independent adapter tapping the same bus gives a view of the traffic
+that is independent of the bridge's own serial stack.
+
+> **Observer limitation.** This is still a UART/driver-level observer, not a
+> bit-level capture. The sniffer's own USB-serial adapter and kernel driver can
+> themselves drop or mangle bytes on framing/overrun/parity errors before this
+> program ever sees them. So a **row-free interval is not proof that the bus was
+> silent** — it only means *this adapter* received nothing decodable. Treat a
+> silent window as strong-but-not-conclusive evidence. When you need bit-level
+> certainty about whether the inverter was driving the bus, use a logic analyzer
+> or oscilloscope on the A/B pair.
 
 > This is a throwaway diagnostic. It is not part of the main bridge, ships as its
 > own container, and should be removed once the root cause is found.
@@ -44,6 +54,24 @@ docker compose -f tools/rs485_sniffer/docker-compose.sniffer.yaml up -d --build
 ```
 
 CSV logs are written to `tools/rs485_sniffer/sniffer-logs/` on the host.
+
+### Output-directory permissions
+
+The container runs as a non-root user, and the CSVs are written to the
+bind-mounted `sniffer-logs/`. On Linux a bind mount keeps the **host**
+directory's ownership, so if that directory is not writable by the container's
+user the process fails to open the CSVs and restart-loops. To avoid this, the
+compose file runs the container as your host UID/GID and adds the `dialout`
+group for serial access:
+
+```sh
+mkdir -p tools/rs485_sniffer/sniffer-logs
+cd tools/rs485_sniffer
+UID=$(id -u) GID=$(id -g) docker compose -f docker-compose.sniffer.yaml up -d --build
+```
+
+Adjust the `dialout` group in the compose file if your serial device is owned by
+a different group (`ls -l /dev/ttyUSB*` to check).
 
 ## Configuration (environment variables)
 
@@ -87,8 +115,10 @@ During a healthy period you should see the master's periodic reads and the
 bridge's responses alternating with sub-second `delta_ms`. When the dropout
 occurs, the parsed/raw logs distinguish the two competing hypotheses directly:
 
-- **Inverter stopped transmitting** — a single large `delta_ms` gap with *no*
-  rows at all during the silence (bus genuinely idle).
-- **Inverter transmitting but frames corrupted on the wire** — rows *do* appear
-  during the window, but with `crc_ok=0` / `direction=unparsed`, i.e. the bytes
-  are on the bus but malformed. This is the case the bridge itself cannot see.
+- **No rows during the silence** — the bus *appears* idle from this adapter.
+  Strong evidence the inverter stopped transmitting, but not conclusive (see the
+  observer-limitation note above: this adapter's own driver could have dropped
+  the bytes). Confirm with a logic analyzer if certainty is required.
+- **Rows present with `crc_ok=0` / `direction=unparsed`** — the inverter *is*
+  transmitting but the bytes on the bus are malformed. This is the case the
+  bridge itself cannot see, and it points at line corruption.
