@@ -1,0 +1,44 @@
+# Passive RS485 bus sniffer — TEMPORARY DIAGNOSTIC.
+#
+# Add this service to your stack. It runs independently of the main bridge and
+# only READS from a spare RS485 adapter wired onto the existing bus.
+#
+# Either merge this service block into your main docker-compose.yaml, or run it
+# on its own:
+#     docker compose -f tools/rs485_sniffer/docker-compose.sniffer.yaml up -d --build
+#
+# Adjust SNIFFER_PORT / the devices mapping to your spare adapter, and the baud
+# settings to match the inverter<->bridge bus (the TS65A serial link).
+
+services:
+  rs485-sniffer:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: rs485-sniffer:latest
+    container_name: rs485-sniffer
+    restart: unless-stopped
+    init: true
+    environment:
+      # Local time for the CSV timestamps.
+      TZ: Australia/Perth
+      # --- Serial settings: match the bus you are tapping ---
+      SNIFFER_PORT: /dev/ttyUSB3
+      SNIFFER_BAUDRATE: "9600"
+      SNIFFER_PARITY: "N"
+      SNIFFER_BYTESIZE: "8"
+      SNIFFER_STOPBITS: "1"
+      # --- Output CSVs (written into the mounted ./sniffer-logs) ---
+      SNIFFER_RAW_CSV: /data/rs485_raw.csv
+      SNIFFER_PARSED_CSV: /data/rs485_parsed.csv
+    devices:
+      # Map your SPARE adapter (the read-only tap), NOT the bridge's own port.
+      - /dev/ttyUSB3:/dev/ttyUSB3
+    volumes:
+      # CSV logs land here on the host for later analysis.
+      - ./sniffer-logs:/data
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: 3
