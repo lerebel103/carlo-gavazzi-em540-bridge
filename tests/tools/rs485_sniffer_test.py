@@ -10,17 +10,24 @@ adjacent frames separated by only the minimum inter-frame gap are NOT coalesced.
 """
 
 import importlib.util
+import math
 import pathlib
 import sys
 import unittest
 
-_SNIFFER_PATH = pathlib.Path(__file__).resolve().parents[2] / "tools" / "rs485_sniffer" / "sniffer.py"
-_spec = importlib.util.spec_from_file_location("rs485_sniffer", _SNIFFER_PATH)
+_TOOLS_DIR = pathlib.Path(__file__).resolve().parents[2] / "tools" / "rs485_sniffer"
+
+_spec = importlib.util.spec_from_file_location("rs485_sniffer", _TOOLS_DIR / "sniffer.py")
 sniffer = importlib.util.module_from_spec(_spec)
 # Register in sys.modules before exec so @dataclass introspection (which looks up
 # the class's __module__ in sys.modules) works for a path-loaded module.
 sys.modules["rs485_sniffer"] = sniffer
 _spec.loader.exec_module(sniffer)
+
+_pc_spec = importlib.util.spec_from_file_location("parse_capture", _TOOLS_DIR / "parse_capture.py")
+parse_capture = importlib.util.module_from_spec(_pc_spec)
+sys.modules["parse_capture"] = parse_capture
+_pc_spec.loader.exec_module(parse_capture)
 
 
 def _cfg(baudrate=9600):
@@ -108,6 +115,25 @@ class TestDecode(unittest.TestCase):
         self.assertIn("ambiguous", d["summary"])
 
 
+class TestExpectedFrameLen(unittest.TestCase):
+    def test_fc3_response_length_from_bytecount(self):
+        # id, fc=3, bytecount=116 -> 3 + 116 + 2 = 121.
+        self.assertEqual(sniffer.expected_frame_len(bytes([0x01, 0x03, 0x74])), 121)
+
+    def test_fc3_request_length(self):
+        # An 8-byte request header (bytecount byte 0x00 -> resp_len 5 < 8 -> 8).
+        self.assertEqual(sniffer.expected_frame_len(bytes([0x01, 0x03, 0x00, 0x00])), 8)
+
+    def test_exception_length(self):
+        self.assertEqual(sniffer.expected_frame_len(bytes([0x01, 0x83])), 5)
+
+    def test_unrecognised_returns_none(self):
+        self.assertIsNone(sniffer.expected_frame_len(bytes([0x01, 0x30])))
+
+    def test_too_short_returns_none(self):
+        self.assertIsNone(sniffer.expected_frame_len(b"\x01"))
+
+
 class TestInterframeGap(unittest.TestCase):
     def test_char_and_gap_math_9600(self):
         cfg = _cfg(9600)
@@ -158,23 +184,72 @@ class TestFraming(unittest.TestCase):
         flushed = self._feed_bytes(resp, t2)
         self.assertEqual(flushed, [resp])
 
-    def test_incomplete_frame_flushed_after_idle_gap(self):
-        # A frame that never completes to a valid CRC (partial/corrupt) is still
-        # delimited by the idle-gap path so it reaches the CSV as evidence.
-        partial = bytes.fromhex("0103")
-        got = self._feed_bytes(partial, t=100.0)
-        self.assertEqual(got, [])  # not CRC-complete, no idle yet
+    def test_unrecognised_bytes_flushed_after_idle_gap(self):
+        # Bytes with no recognisable Modbus header shape are delimited by the
+        # idle-gap path so they still reach the CSV as evidence (garbage/noise).
+        # fc=0x30 (48) is not a known function code and has the high bit clear,
+        # so expected_frame_len() returns None -> the shape is unrecognised and
+        # an idle gap is treated as a real boundary.
+        junk = bytes([0x09, 0x30, 0x11])
+        got = self._feed_bytes(junk, t=100.0)
+        self.assertEqual(got, [])  # no idle yet
         flushed = list(self.s._feed(b"", 100.0 + self.s._gap))
-        self.assertEqual(flushed, [partial])
+        self.assertEqual(flushed, [junk])
+
+    def test_incomplete_frame_not_split_by_idle_gap(self):
+        # A large response delivered in packets spaced WIDER than the RTU gap
+        # must NOT be split: the buffer is a recognisable header whose declared
+        # length is unmet, so idle flushes are suppressed until it completes.
+        # id=1 fc=3 bytecount=4 -> total 9 bytes; feed 3 bytes, idle, then rest.
+        head = bytes([0x01, 0x03, 0x04])
+        got = self._feed_bytes(head, t=100.0)
+        self.assertEqual(got, [])
+        # Idle gap elapses but frame is incomplete (expected 9, have 3) -> hold.
+        held = list(self.s._feed(b"", 100.0 + 5 * self.s._gap))
+        self.assertEqual(held, [])
+        self.assertEqual(len(self.s._buf), 3)
+        # Remaining bytes arrive later; frame completes and is emitted by CRC.
+        rest = bytes([0x00, 0x00, 0x00, 0x00, 0xFA, 0x33])
+        out = self._feed_bytes(rest, t=100.0 + 10 * self.s._gap)
+        self.assertEqual(out, [bytes.fromhex("01030400000000fa33")])
+
+    def test_multipacket_response_reassembled(self):
+        # Regression for the real capture: a 121-byte FC3 response (bytecount
+        # 0x74) delivered in 16-byte packets spaced ~16ms apart (well over the
+        # ~3.6ms gap) must reassemble into ONE frame, not fragment into many.
+        frags = [
+            "01 03 74 40 82 f5 b2 3f a7 c2 5d 3f ba 35 1e 3f",
+            "a9 df 4c 43 6d e7 9e 43 6f 03 40 43 6e c2 a4 43",
+            "6c 12 49 43 ce 0d 01 43 ce 5b d6 43 ce 66 66 43",
+            "cd 72 cb 42 48 00 00 42 b5 08 f1 41 ad 00 d0 42",
+            "23 9c da 41 df e9 3f 43 cf d0 48 43 12 e4 83 43",
+            "0c 6e ea 43 01 15 cd c3 ca d3 4d c3 11 4a c5 c3",
+            "06 58 2e c2 fc 07 50 3e 5f 03 16 3e 16 c0 99 3e",
+            "95 20 93 3e 5e 07 5f 1b 5f",
+        ]
+        emitted = []
+        t = 100.0
+        for fr in frags:
+            t += 0.016  # 16ms apart, > gap
+            emitted.extend(self.s._feed(bytes.fromhex(fr.replace(" ", "")), t))
+        self.assertEqual(len(emitted), 1)
+        frame = emitted[0]
+        self.assertEqual(len(frame), 121)
+        d = sniffer.decode_frame(frame)
+        self.assertEqual(d["direction"], "response")
+        self.assertEqual(d["bytecount"], 116)
+        self.assertTrue(d["crc_ok"])
 
     def test_bytes_within_gap_stay_one_frame(self):
         # Two bursts closer than the gap, neither CRC-complete, stay one frame.
+        # Use an unrecognised shape (fc=0x30) so framing is governed purely by
+        # timing: two sub-gap bursts stay one frame, flushed on the next idle.
         t = 100.0
-        self._feed_bytes(b"\x01\x03", t)
-        got = self._feed_bytes(b"\x9c\x00", t + self.s._gap / 2.0)
+        self._feed_bytes(b"\x09\x30", t)
+        got = self._feed_bytes(b"\x11\x22", t + self.s._gap / 2.0)
         self.assertEqual(got, [])  # not flushed; still within one frame
         flushed = list(self.s._feed(b"", t + self.s._gap / 2.0 + self.s._gap))
-        self.assertEqual(flushed, [b"\x01\x03\x9c\x00"])
+        self.assertEqual(flushed, [b"\x09\x30\x11\x22"])
 
     def test_crc_split_separates_driver_batched_frames(self):
         # Driver batches a request and its response back-to-back with NO idle gap
@@ -205,6 +280,68 @@ class TestFraming(unittest.TestCase):
         self.assertEqual(len(got), 1)
         self.assertGreaterEqual(len(got[0]), cap)
         self.assertEqual(len(self.s._buf), 0)
+
+
+class TestParseCapture(unittest.TestCase):
+    """Decode a real reassembled 40071 response into named meter values."""
+
+    # A genuine 121-byte FC3 response captured on the bus (seq 7086-7093
+    # reassembled), bytecount 0x74, CRC valid.
+    _FRAME_HEX = (
+        "01 03 74 40 85 b7 1e 3f b4 11 d0 3f bc b8 84 3f "
+        "a6 12 24 43 6d 87 50 43 6e ed 4f 43 6e 56 f5 43 "
+        "6b 6b af 43 cd b8 e4 43 ce 23 c2 43 cd b0 5b 43 "
+        "cd 62 22 42 48 00 00 42 87 07 50 41 4e 73 67 41 "
+        "ec 03 40 41 c8 e0 4e 43 d6 38 c1 43 22 e1 51 43 "
+        "09 90 06 43 00 d4 ba c3 d3 8b 95 c3 22 5e 46 c3 "
+        "06 5c a6 c2 fc b8 7c 3e 21 5c c3 3d a2 3d 7b 3e "
+        "5b 9b 3e 3e 47 94 9d 9c 35"
+    )
+
+    def _decode(self):
+        frame = bytes.fromhex(self._FRAME_HEX.replace(" ", ""))
+        regs = parse_capture._response_registers(frame)
+        return regs, parse_capture._decode_dynamic(regs, field_offset=0)
+
+    def test_response_registers_extracted(self):
+        regs, _ = self._decode()
+        # bytecount 116 -> 58 registers.
+        self.assertEqual(len(regs), 58)
+
+    def test_meter_values_physically_plausible(self):
+        _, d = self._decode()
+        self.assertAlmostEqual(d["frequency"], 50.0, places=2)
+        for ph in ("a", "b", "c"):
+            self.assertTrue(220 <= d[f"voltage_ln_{ph}"] <= 250, d[f"voltage_ln_{ph}"])
+            self.assertTrue(0 <= d[f"current_{ph}"] <= 65)
+
+    def test_power_triangle_consistent(self):
+        # The whole point of the S/PF derivation fix: S == sqrt(P^2 + Q^2).
+        _, d = self._decode()
+        self.assertAlmostEqual(d["S_ratio_total"], 1.0, places=3)
+        self.assertAlmostEqual(d["va_total"], math.hypot(d["power_total"], d["var_total"]), places=2)
+
+    def test_response_paired_to_request_block(self):
+        # The parser attributes a response to the block of the preceding request
+        # on the same device id. Feed a request then its response.
+        import tempfile
+
+        rows = [
+            "seq,wall_local,mono,delta_ms,direction,dev_id,fc,addr,count,bytecount,exception,crc_ok,n_bytes,summary,hex",
+            "1,2026-01-01T00:00:00.000+00:00,1.0,10,request,1,3,40071,58,,,1,8,read,01 03 9c 87 00 3a 5b a0",
+            f"2,2026-01-01T00:00:00.020+00:00,1.02,20,response,1,3,,,116,,1,121,resp,{self._FRAME_HEX}",
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            inp = pathlib.Path(tmp) / "in.csv"
+            outp = pathlib.Path(tmp) / "out.csv"
+            inp.write_text("\n".join(rows) + "\n")
+            parse_capture.main(str(inp), str(outp))
+            import csv as _csv
+
+            decoded = [r for r in _csv.DictReader(open(outp)) if r["block"] == "40071"]
+            self.assertEqual(len(decoded), 1)
+            self.assertTrue(decoded[0]["power_total"])
+            self.assertEqual(decoded[0]["S_ratio_total"], "1.0")
 
 
 if __name__ == "__main__":

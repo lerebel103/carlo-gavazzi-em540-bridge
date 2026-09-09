@@ -165,6 +165,60 @@ _WRITE_SINGLE_FCS = {5, 6}
 _WRITE_MULTI_FCS = {15, 16}
 
 
+def expected_frame_len(buf: bytes) -> int | None:
+    """Infer the total on-wire length (incl. CRC) of the frame starting at buf.
+
+    Used only to decide whether a partially-received frame should keep waiting
+    for more bytes rather than being split by an idle gap (drivers deliver large
+    responses in several packets). Returns None when the shape is not recognised
+    (so the caller treats an idle gap as a real boundary).
+
+    Disambiguation with as few bytes as possible:
+      * exception (fc & 0x80): 5 bytes (id, fc, code, CRC*2)
+      * read response (FC1-4): 3 + bytecount + 2  — needs byte[2]
+      * read register request (FC3/FC4): 8 bytes
+      * write single (FC5/FC6): 8 bytes
+      * write multiple request (FC15/FC16): 7 + bytecount + 2 — needs byte[6]
+      * write multiple response (FC15/FC16): 8 bytes
+
+    Where a shape is ambiguous from the header alone (a read FC can be either an
+    8-byte request or a 3+N response), we return the LARGER plausible length so a
+    genuine multi-packet response is not prematurely flushed; a shorter complete
+    frame is still recovered by the CRC splitter.
+    """
+    if len(buf) < 2:
+        return None
+    fc = buf[1]
+
+    if fc & 0x80:
+        return 5  # exception response
+
+    if fc in _READ_FCS:
+        # Could be an 8-byte request or a (3 + bytecount + 2) response. If byte[2]
+        # is present and looks like a response byte-count that yields a length of
+        # at least 8, prefer the response length (the large-response case we must
+        # not split). Otherwise assume the 8-byte request.
+        if len(buf) >= 3:
+            resp_len = 3 + buf[2] + 2
+            if resp_len >= 8:
+                return resp_len
+        return 8
+
+    if fc in _WRITE_SINGLE_FCS:
+        return 8
+
+    if fc in _WRITE_MULTI_FCS:
+        # Request: 7 + bytecount + 2 (needs byte[6]); response: 8. Prefer the
+        # larger request length when byte[6] is available.
+        if len(buf) >= 7:
+            req_len = 7 + buf[6] + 2
+            if req_len >= 8:
+                return req_len
+        return 8
+
+    return None
+
+
 def decode_frame(frame: bytes) -> dict:
     """Best-effort decode of a single RTU frame into named fields.
 
@@ -424,12 +478,20 @@ class Sniffer:
         available and adjacent bursts may still be merged. This residual limit is
         documented in the README; a logic analyzer is the authoritative fallback.
         """
-        # (1) Idle-gap flush.
+        # (1) Idle-gap flush — but only if the buffer is not a still-incomplete
+        # frame. USB/UART drivers deliver a large response (e.g. the ~121-byte
+        # 40071 block) in smaller packets spaced further apart than the RTU
+        # inter-frame gap; a naive idle flush would split one response into many
+        # fragments and mis-decode each. If the buffer starts with a recognisable
+        # Modbus header whose declared length is not yet satisfied, we keep
+        # waiting for the remainder instead of flushing (unless forced on
+        # shutdown). ``force_flush`` always flushes.
         if self._buf and self._last_byte_mono is not None:
             idle = now - self._last_byte_mono
             if force_flush or idle >= self._gap:
-                yield bytes(self._buf)
-                self._buf.clear()
+                if force_flush or self._buf_is_flushable():
+                    yield bytes(self._buf)
+                    self._buf.clear()
 
         if data:
             self._buf.extend(data)
@@ -444,6 +506,20 @@ class Sniffer:
                 yield bytes(self._buf)
                 self._buf.clear()
 
+    def _buf_is_flushable(self) -> bool:
+        """True if the buffer should be idle-flushed rather than kept growing.
+
+        Returns False only when the buffer looks like the *start* of a Modbus
+        frame whose declared length has not yet been fully received — i.e. more
+        bytes for this frame are still expected (arriving in later driver
+        packets). In every other case (unknown/garbage shape, or a complete/
+        overrun frame) the idle gap is a valid delimiter and we flush.
+        """
+        expected = expected_frame_len(bytes(self._buf))
+        if expected is None:
+            return True  # unrecognised shape — treat idle as a real boundary
+        return len(self._buf) >= expected  # complete (or more) — safe to flush
+
     def _split_leading_crc_frames(self):
         """Yield and remove any CRC-valid frame(s) at the start of the buffer.
 
@@ -455,8 +531,22 @@ class Sniffer:
         made_progress = True
         while made_progress and len(self._buf) >= 4:
             made_progress = False
-            # Cap the scan to the max legal ADU so a garbage stream can't make
-            # this O(n^2) over a huge buffer.
+
+            # Prefer the structurally-expected length: if the header declares a
+            # length we have fully received and its CRC is valid, emit exactly
+            # that frame. This avoids splitting a large response at a coincidental
+            # shorter CRC match.
+            expected = expected_frame_len(bytes(self._buf))
+            if expected is not None and len(self._buf) >= expected and crc_ok(bytes(self._buf[:expected])):
+                frame = bytes(self._buf[:expected])
+                del self._buf[:expected]
+                yield frame
+                made_progress = True
+                continue
+
+            # Fallback: scan increasing prefixes for any valid CRC (handles
+            # shapes we cannot length-predict, and cleanly-batched back-to-back
+            # frames). Cap the scan to the max legal ADU to bound cost.
             limit = min(len(self._buf), _MAX_RTU_ADU)
             for end in range(4, limit + 1):
                 if crc_ok(bytes(self._buf[:end])):

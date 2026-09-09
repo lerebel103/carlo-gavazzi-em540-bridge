@@ -111,6 +111,36 @@ seq,wall_local,mono,delta_ms,direction,dev_id,fc,addr,count,bytecount,exception,
 - `crc_ok` — `1`/`0`; a run of `0`s is direct evidence of line corruption.
 - `summary` — human-readable decode, e.g. `read fc=3 addr=40071 count=58`.
 
+## Decoding a capture into meter values
+
+`parse_capture.py` converts the sniffer's parsed CSV into a wide, human-readable
+CSV with one column per SunSpec meter field, so a capture can be analysed as
+energy-meter values rather than hex:
+
+```sh
+python3 parse_capture.py sniffer-logs/rs485_parsed.csv decoded.csv
+```
+
+For each read **response** it pairs the response with the preceding request to
+identify the register block, then decodes:
+
+- the 40071 dynamic block into named fields (current/voltage/power/VA/var/PF per
+  phase and total),
+- the 40129 energy block (Wh/VAh),
+- the 40193 events register (raw).
+
+It also emits debug helpers: `gap_s` (seconds since the previous decoded
+response — a large value is the dropout signature), and power-triangle
+consistency columns `S_calc_total` = hypot(P, Q), `S_ratio_total` = S / S_calc
+(≈ 1.0 on healthy data), and per-phase `VxI`.
+
+> Framing note: large responses (e.g. the ~121-byte 40071 block) are delivered
+> by the USB/UART driver in several packets spaced further apart than the RTU
+> inter-frame gap. The sniffer is length-aware — it holds a partially-received
+> frame until its declared Modbus length is satisfied (or CRC-completes) rather
+> than splitting it on the idle gap — so these responses reassemble into a
+> single frame in the logs.
+
 ## Reading a dropout
 
 During a healthy period you should see the master's periodic reads and the
