@@ -299,7 +299,8 @@ class EnergyMeterSensor:
         self.kvah_total = Sensor(
             "Apparent Energy kvah",
             "kVAh",
-            "energy",
+            # HA has no apparent-energy device class; the "energy" class rejects kVAh.
+            None,
             "total_increasing",
             self.state_topic,
             precision=2,

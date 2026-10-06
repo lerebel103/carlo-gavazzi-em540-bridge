@@ -193,7 +193,7 @@ The following measurement sensors are published to Home Assistant and refreshed 
 | Energy Export          | kWh   | energy         | total_increasing | 2         |
 | Reactive Energy Import | kvarh | reactive_energy| total_increasing | 2         |
 | Reactive Energy Export | kvarh | reactive_energy| total_increasing | 2         |
-| Apparent Energy kvah   | kVAh  | energy         | total_increasing | 2         |
+| Apparent Energy kvah   | kVAh  | _(none)_       | total_increasing | 2         |
 | Run Hours              | h     | duration       | total_increasing | 1         |
 
 The following diagnostic sensors are also published (entity category: `diagnostic`). Many are disabled
