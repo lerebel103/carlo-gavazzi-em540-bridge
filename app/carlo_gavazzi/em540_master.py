@@ -27,6 +27,15 @@ from app.carlo_gavazzi.em540_data import (
     WRONG_CONNECTION_STATUS_OFFSET,
     describe_register_value,
 )
+from app.carlo_gavazzi.frame_validation import (
+    MAX_FREQUENCY_HZ,
+    MAX_PHASE_CURRENT_A,
+    MAX_SYSTEM_CURRENT_A,
+    MAX_VOLTAGE_LL_V,
+    MAX_VOLTAGE_LN_V,
+    MIN_FREQUENCY_HZ,
+    validate_primary_frame,
+)
 from app.carlo_gavazzi.meter_data import MeterData
 
 logger = logging.getLogger("Em540Master")
@@ -58,6 +67,17 @@ class Em540MasterStats:
         # primary block read failure, corrupt frame, and energy block chunk read
         # failure. This is the authoritative "RS485 Master Read Failures" metric.
         self.read_failed_total: int = 0
+        # Count of frames that parsed structurally but were rejected by spec-based
+        # frame validation (overflow sentinel or out-of-physical-range). Distinct
+        # from read_failed_total (transport/length/parse failures). A rejected
+        # frame ALSO increments read_failed_total via _notify_listeners_read_failed()
+        # (from the freshness standpoint it is "no fresh good frame this tick");
+        # this counter isolates the parsed-but-invalid subset for diagnostics.
+        self.invalid_frame_total: int = 0
+        # Last rejection reason (short string) for logging/potential future use;
+        # None until the first rejection. Single-writer (master loop), read without
+        # a lock by other threads (atomic reference read under the GIL).
+        self.last_invalid_frame_reason: str | None = None
         self._listeners: list[Callable[["Em540MasterStats"], None]] = []
 
     def snapshot_and_reset_interval_extrema(self) -> dict[str, float | int]:
@@ -304,6 +324,11 @@ class Em540Master:
     # Interval between repeated "still disconnected" log messages (seconds).
     _RECONNECT_LOG_INTERVAL: float = 30.0
 
+    # Interval between repeated "rejected invalid frame" WARNING logs (seconds).
+    # Rejections are logged at WARNING but rate-limited so a storm of bad frames
+    # at 10Hz cannot flood logs or do handler I/O on the tick loop.
+    _INVALID_FRAME_LOG_INTERVAL: float = 5.0
+
     # Interval between periodic diagnostics debug-log lines (seconds), emitted
     # only when DEBUG logging is enabled for this master.
     _DIAGNOSTICS_LOG_INTERVAL: float = 5.0
@@ -338,6 +363,22 @@ class Em540Master:
         self._condition: threading.Condition = threading.Condition()
         self._stats: Em540MasterStats = Em540MasterStats()
         self._daily_extrema: DailyExtrema = DailyExtrema()
+
+        # Cache the frame-validation config once into plain attributes so the hot
+        # path never walks the config object. getattr fallbacks keep a minimal
+        # SimpleNamespace config (used in some tests) constructible with the
+        # datasheet defaults. _validation_enabled gates the whole check.
+        fv = getattr(config, "frame_validation", None)
+        self._validation_enabled: bool = bool(getattr(fv, "enabled", True))
+        self._check_sentinel: bool = bool(getattr(fv, "check_overflow_sentinel", True))
+        self._max_phase_current_a: float = float(getattr(fv, "max_phase_current_a", MAX_PHASE_CURRENT_A))
+        self._max_system_current_a: float = float(getattr(fv, "max_system_current_a", MAX_SYSTEM_CURRENT_A))
+        self._max_voltage_ln_v: float = float(getattr(fv, "max_voltage_ln_v", MAX_VOLTAGE_LN_V))
+        self._max_voltage_ll_v: float = float(getattr(fv, "max_voltage_ll_v", MAX_VOLTAGE_LL_V))
+        self._min_frequency_hz: float = float(getattr(fv, "min_frequency_hz", MIN_FREQUENCY_HZ))
+        self._max_frequency_hz: float = float(getattr(fv, "max_frequency_hz", MAX_FREQUENCY_HZ))
+        # Rate-limit state for the WARNING log (single-writer: master loop).
+        self._last_invalid_frame_log: float = 0.0
         self._static_read_plan: tuple[int, ...] = tuple(self._front_data.frame.static_reg_map.keys())
         logger.setLevel(config.log_level)
         self._client: ModbusBaseClient
@@ -668,6 +709,21 @@ class Em540Master:
             is_ok = False
             await self._notify_listeners_read_failed()
 
+        # Spec-based frame validation gate: runs AFTER parse but BEFORE the
+        # extrema fold / timestamp advance / buffer swap below, so a rejected
+        # frame is never folded into DailyExtrema, never advances the freshness
+        # timestamp, and leaves _front_data (last-good) in place. A rejection
+        # reuses the existing read-failed drop path (which also bumps
+        # read_failed_total); it does NOT force the circuit breaker — persistent
+        # bad frames let the staleness watchdog/breaker open naturally.
+        if is_ok and self._validation_enabled:
+            reason = self._validate_frame(self._back_data)
+            if reason is not None:
+                self._count_invalid_frame(reason)
+                self._maybe_log_invalid_frame(reason)
+                is_ok = False
+                await self._notify_listeners_read_failed()
+
         if is_ok:
             # Fold this frame into daily extrema BEFORE the buffer swap. This is
             # the only point that observes every upstream frame; downstream
@@ -719,6 +775,48 @@ class Em540Master:
         """
         with self._stats.lock:
             self._stats.read_failed_total += 1
+
+    def _validate_frame(self, data: MeterData) -> str | None:
+        """Validate a freshly parsed frame's instantaneous quantities.
+
+        Fetches the live upstream primary block (pre-overlay; the 0x000B Device
+        Type overlay is applied later in the slave bridge on a different map) and
+        delegates to the pure validator. Returns None if the frame is acceptable,
+        or a short reason string (for diagnostics/logging) describing the first
+        failing check. Reads parse output and the raw primary block; does not
+        alter decode. Hot path: lock-free and allocation-free on the accept path.
+        """
+        registers = data.frame.dynamic_reg_map[_DYNAMIC_PRIMARY_BLOCK_ADDR].values
+        return validate_primary_frame(
+            registers,
+            data,
+            max_phase_current_a=self._max_phase_current_a,
+            max_system_current_a=self._max_system_current_a,
+            max_voltage_ln_v=self._max_voltage_ln_v,
+            max_voltage_ll_v=self._max_voltage_ll_v,
+            min_frequency_hz=self._min_frequency_hz,
+            max_frequency_hz=self._max_frequency_hz,
+            check_sentinel=self._check_sentinel,
+        )
+
+    def _count_invalid_frame(self, reason: str) -> None:
+        """Record a parsed-but-rejected frame in diagnostics.
+
+        Mirrors _count_read_failure: increments the dedicated invalid-frame
+        counter and stores the last reason under the stats lock (uncontended on
+        the hot path). This is in addition to the read_failed_total bump that
+        _notify_listeners_read_failed() performs for the same rejected frame.
+        """
+        with self._stats.lock:
+            self._stats.invalid_frame_total += 1
+            self._stats.last_invalid_frame_reason = reason
+
+    def _maybe_log_invalid_frame(self, reason: str) -> None:
+        """Log a frame rejection at WARNING, rate-limited to avoid log floods."""
+        now = time.monotonic()
+        if now - self._last_invalid_frame_log >= self._INVALID_FRAME_LOG_INTERVAL:
+            logger.warning("Rejected invalid upstream frame: %s", reason)
+            self._last_invalid_frame_log = now
 
     async def _notify_listeners_read_failed(self) -> None:
         """Signal listeners that the tick produced no usable data.

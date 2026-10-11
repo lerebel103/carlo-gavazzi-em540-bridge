@@ -29,7 +29,24 @@ def _make_config(**overrides):
         ensure_3phase_measuring_system=False,
     )
     defaults.update(overrides)
-    return SimpleNamespace(**defaults)
+    # Nested frame-validation block mirroring config.FrameValidationConfig. The
+    # existing plumbing tests here drive all-zero mock frames (frequency 0 Hz,
+    # which legitimately fails the >=40 Hz physical bound), so validation is
+    # DISABLED by default in this helper to keep those tests focused on their
+    # read/energy/listener plumbing. The dedicated validation tests below opt in
+    # with frame_validation_enabled=True.
+    fv_overrides = {k: defaults.pop(k) for k in list(defaults) if k.startswith("frame_validation_")}
+    fv = SimpleNamespace(
+        enabled=fv_overrides.get("frame_validation_enabled", False),
+        check_overflow_sentinel=fv_overrides.get("frame_validation_check_overflow_sentinel", True),
+        max_phase_current_a=fv_overrides.get("frame_validation_max_phase_current_a", 130.0),
+        max_system_current_a=fv_overrides.get("frame_validation_max_system_current_a", 390.0),
+        max_voltage_ln_v=fv_overrides.get("frame_validation_max_voltage_ln_v", 360.0),
+        max_voltage_ll_v=fv_overrides.get("frame_validation_max_voltage_ll_v", 625.0),
+        min_frequency_hz=fv_overrides.get("frame_validation_min_frequency_hz", 40.0),
+        max_frequency_hz=fv_overrides.get("frame_validation_max_frequency_hz", 70.0),
+    )
+    return SimpleNamespace(frame_validation=fv, **defaults)
 
 
 def _make_successful_result(num_registers):
@@ -1025,6 +1042,170 @@ class TestEm540MasterMeterConfig(unittest.TestCase):
         ok = asyncio.run(master._write_register(0x1103, 2))
 
         self.assertTrue(ok)
+
+
+class TestFrameValidationIntegration(unittest.TestCase):
+    """Master-loop integration of the spec-based frame-validation gate."""
+
+    @patch("app.carlo_gavazzi.em540_master.AsyncModbusTcpClient")
+    def _build(self, mock_tcp_cls, **fv_overrides):
+        mock_client = MagicMock()
+        mock_client.read_holding_registers = AsyncMock(
+            side_effect=lambda address, count=1, device_id=None: _make_successful_result(count)
+        )
+        mock_client.connect = AsyncMock()
+        mock_client.close = MagicMock()
+        type(mock_client).connected = PropertyMock(return_value=True)
+        mock_tcp_cls.return_value = mock_client
+
+        fv_overrides.setdefault("frame_validation_enabled", True)
+        config = _make_config(**fv_overrides)
+        master = Em540Master(config)
+        master._client = mock_client
+        master._static_data_valid = True
+        master._energy_initial_read_complete = True
+        return master, mock_client
+
+    @staticmethod
+    def _primary_result(regs):
+        result = MagicMock()
+        result.isError.return_value = False
+        result.registers = list(regs)
+        return result
+
+    def _tick_responses(self, master, regs):
+        from app.carlo_gavazzi.em540_data import ENERGY_BLOCK_TOTAL_SIZE
+
+        return [
+            self._primary_result(regs),
+            _make_successful_result(ENERGY_BLOCK_TOTAL_SIZE),
+        ]
+
+    @staticmethod
+    def _realistic():
+        from tests.carlo_gavazzi.frame_validation_test import _realistic_registers
+
+        return _realistic_registers()
+
+    @staticmethod
+    def _set_int32(regs, off, value):
+        from tests.carlo_gavazzi.frame_validation_test import _set_int32
+
+        _set_int32(regs, off, value)
+
+    # 11. Sentinel current frame dropped end-to-end.
+    def test_sentinel_current_frame_dropped(self):
+        master, client = self._build()
+        regs = self._realistic()
+        regs[0x0C] = 0xFFFF
+        regs[0x0D] = 0x7FFF  # A L1 MSW sentinel
+
+        front_before = master._front_data
+        listener = MagicMock(spec=MeterDataListener)
+        listener.read_failed = AsyncMock()
+        listener.new_data = AsyncMock()
+        master.add_listener(listener)
+
+        client.read_holding_registers = AsyncMock(side_effect=self._tick_responses(master, regs))
+        with patch("app.carlo_gavazzi.em540_master.time.monotonic", return_value=999.0):
+            with patch.object(master._condition, "notify"):
+                result = asyncio.run(master.acquire_data())
+
+        self.assertFalse(result)
+        self.assertEqual(master._stats.invalid_frame_total, 1)
+        self.assertEqual(master._stats.last_invalid_frame_reason, "sentinel:a_l1")
+        self.assertGreaterEqual(master._stats.read_failed_total, 1)
+        listener.read_failed.assert_awaited()
+        # Last-good retained (front buffer unchanged), timestamp not advanced.
+        self.assertIs(master._front_data, front_before)
+        self.assertEqual(master.last_frame_monotonic, 0.0)
+        # Daily extrema not folded with the sentinel current (~2.1M A).
+        snap = master.daily_extrema.snapshot()
+        self.assertIsNone(snap["current_l1_max"])
+
+    # 12. Out-of-range frame dropped.
+    def test_out_of_range_current_frame_dropped(self):
+        master, client = self._build()
+        regs = self._realistic()
+        self._set_int32(regs, 0x0C, 150000)  # 150 A on L1
+
+        front_before = master._front_data
+        client.read_holding_registers = AsyncMock(side_effect=self._tick_responses(master, regs))
+        with patch.object(master._condition, "notify"):
+            result = asyncio.run(master.acquire_data())
+
+        self.assertFalse(result)
+        self.assertEqual(master._stats.invalid_frame_total, 1)
+        self.assertEqual(master._stats.last_invalid_frame_reason, "range:a_l1")
+        self.assertIs(master._front_data, front_before)
+        self.assertEqual(master.last_frame_monotonic, 0.0)
+        snap = master.daily_extrema.snapshot()
+        self.assertIsNone(snap["current_l1_max"])
+
+    # 13. Normal frame unaffected.
+    def test_normal_frame_passes_and_publishes(self):
+        master, client = self._build()
+        regs = self._realistic()
+
+        client.read_holding_registers = AsyncMock(side_effect=self._tick_responses(master, regs))
+        with patch("app.carlo_gavazzi.em540_master.time.monotonic", return_value=4242.0):
+            with patch.object(master._condition, "notify"):
+                result = asyncio.run(master.acquire_data())
+
+        self.assertTrue(result)
+        self.assertEqual(master._stats.invalid_frame_total, 0)
+        self.assertEqual(master.last_frame_monotonic, 4242.0)
+        # Extrema folded: L1 current ~10 A observed.
+        snap = master.daily_extrema.snapshot()
+        self.assertAlmostEqual(snap["current_l1_max"], 10.0, places=2)
+
+    # 14. Breaker not forced; watchdog freezes on persistence.
+    def test_persistent_bad_frames_freeze_timestamp_single_bad_ignored(self):
+        master, client = self._build()
+        good = self._realistic()
+        bad = self._realistic()
+        bad[0x0C] = 0xFFFF
+        bad[0x0D] = 0x7FFF
+
+        # One good frame advances the timestamp.
+        client.read_holding_registers = AsyncMock(side_effect=self._tick_responses(master, good))
+        with patch("app.carlo_gavazzi.em540_master.time.monotonic", return_value=100.0):
+            with patch.object(master._condition, "notify"):
+                self.assertTrue(asyncio.run(master.acquire_data()))
+        self.assertEqual(master.last_frame_monotonic, 100.0)
+
+        # Several consecutive bad frames do not advance the timestamp (watchdog
+        # would open naturally) and never touch a breaker-trip path.
+        for _ in range(5):
+            client.read_holding_registers = AsyncMock(side_effect=self._tick_responses(master, bad))
+            with patch("app.carlo_gavazzi.em540_master.time.monotonic", return_value=200.0):
+                with patch.object(master._condition, "notify"):
+                    self.assertFalse(asyncio.run(master.acquire_data()))
+        self.assertEqual(master.last_frame_monotonic, 100.0)
+        self.assertEqual(master._stats.invalid_frame_total, 5)
+
+        # A subsequent good frame recovers in-process.
+        client.read_holding_registers = AsyncMock(side_effect=self._tick_responses(master, good))
+        with patch("app.carlo_gavazzi.em540_master.time.monotonic", return_value=300.0):
+            with patch.object(master._condition, "notify"):
+                self.assertTrue(asyncio.run(master.acquire_data()))
+        self.assertEqual(master.last_frame_monotonic, 300.0)
+
+    # 15. Config toggle disables validation.
+    def test_disabled_validation_publishes_sentinel_frame(self):
+        master, client = self._build(frame_validation_enabled=False)
+        regs = self._realistic()
+        regs[0x0C] = 0xFFFF
+        regs[0x0D] = 0x7FFF  # sentinel that WOULD be rejected if enabled
+
+        client.read_holding_registers = AsyncMock(side_effect=self._tick_responses(master, regs))
+        with patch("app.carlo_gavazzi.em540_master.time.monotonic", return_value=777.0):
+            with patch.object(master._condition, "notify"):
+                result = asyncio.run(master.acquire_data())
+
+        self.assertTrue(result)
+        self.assertEqual(master._stats.invalid_frame_total, 0)
+        self.assertEqual(master.last_frame_monotonic, 777.0)
 
 
 if __name__ == "__main__":

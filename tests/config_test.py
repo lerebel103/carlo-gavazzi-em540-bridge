@@ -1473,3 +1473,77 @@ def test_meter_config_flags_reject_non_boolean(tmp_path, field, value):
     path = _make_config(tmp_path, {field: value})
     with pytest.raises(ConfigError, match=field):
         ConfigManager(path).load()
+
+
+# -- frame validation config --
+
+
+def test_frame_validation_defaults(tmp_path):
+    """Absent frame_validation block -> datasheet defaults."""
+    path = _make_config(tmp_path)
+    fv = ConfigManager(path).load().em540_master.frame_validation
+    assert fv.enabled is True
+    assert fv.check_overflow_sentinel is True
+    assert fv.max_phase_current_a == 130.0
+    assert fv.max_system_current_a == 390.0
+    assert fv.max_voltage_ln_v == 360.0
+    assert fv.max_voltage_ll_v == 625.0
+    assert fv.min_frequency_hz == 40.0
+    assert fv.max_frequency_hz == 70.0
+
+
+def test_frame_validation_override_loads(tmp_path):
+    path = _make_config(
+        tmp_path,
+        {
+            "em540_master.frame_validation.enabled": False,
+            "em540_master.frame_validation.max_phase_current_a": 100.0,
+        },
+    )
+    fv = ConfigManager(path).load().em540_master.frame_validation
+    assert fv.enabled is False
+    assert fv.max_phase_current_a == 100.0
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "em540_master.frame_validation.enabled",
+        "em540_master.frame_validation.check_overflow_sentinel",
+    ],
+)
+@pytest.mark.parametrize("value", ["true", 1, "yes", None])
+def test_frame_validation_toggles_reject_non_boolean(tmp_path, field, value):
+    path = _make_config(tmp_path, {field: value})
+    with pytest.raises(ConfigError, match="frame_validation"):
+        ConfigManager(path).load()
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "em540_master.frame_validation.max_phase_current_a",
+        "em540_master.frame_validation.max_system_current_a",
+        "em540_master.frame_validation.max_voltage_ln_v",
+        "em540_master.frame_validation.max_voltage_ll_v",
+        "em540_master.frame_validation.min_frequency_hz",
+        "em540_master.frame_validation.max_frequency_hz",
+    ],
+)
+@pytest.mark.parametrize("value", [0, -1.0, "nope", True, float("inf"), float("nan")])
+def test_frame_validation_bounds_reject_invalid(tmp_path, field, value):
+    path = _make_config(tmp_path, {field: value})
+    with pytest.raises(ConfigError, match="frame_validation"):
+        ConfigManager(path).load()
+
+
+def test_frame_validation_frequency_order_enforced(tmp_path):
+    path = _make_config(
+        tmp_path,
+        {
+            "em540_master.frame_validation.min_frequency_hz": 70.0,
+            "em540_master.frame_validation.max_frequency_hz": 40.0,
+        },
+    )
+    with pytest.raises(ConfigError, match="min_frequency_hz"):
+        ConfigManager(path).load()

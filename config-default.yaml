@@ -47,6 +47,23 @@ em540_master:
   # WARNING: changing the measuring system may reset the meter's kWh counters, so
   # this is disabled by default.
   ensure_3phase_measuring_system: false
+  # Upstream frame validation. Each parsed frame is checked against the meter's
+  # documented overflow sentinel and physical limits before it is published or
+  # folded into daily min/max. A failing frame is dropped (last-good value is
+  # retained) and counted as an "RS485 Invalid Frames" diagnostic; persistent
+  # failures let the staleness watchdog and downstream breaker open naturally.
+  frame_validation:
+    enabled: true
+    # Reject if an INT32 instantaneous variable's MSW == 0x7FFF
+    # (EM500_CPP_Mod_V1.3 section 3.3 "Maximum electrical values").
+    check_overflow_sentinel: true
+    # Physical bounds (EM540 datasheet). Defaults are datasheet-derived.
+    max_phase_current_a: 130.0    # 2 x Imax(65 A)
+    max_system_current_a: 390.0   # 3 x per-phase bound
+    max_voltage_ln_v: 360.0       # 1.5 x Un(240 V)
+    max_voltage_ll_v: 625.0       # ~1.5 x L-L(415 V)
+    min_frequency_hz: 40.0        # datasheet 45 Hz minus 5 Hz guard
+    max_frequency_hz: 70.0        # datasheet 65 Hz plus 5 Hz guard
   # Log level for the master component
   log_level: INFO
 

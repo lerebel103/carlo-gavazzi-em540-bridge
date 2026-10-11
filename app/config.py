@@ -35,6 +35,25 @@ class ConfigError(Exception):
 
 
 @dataclass
+class FrameValidationConfig:
+    # Master-side spec-based validation of each parsed upstream frame. When a
+    # frame fails, it is dropped (last-good retained) and counted as an invalid
+    # frame; the staleness watchdog/breaker open naturally if failures persist.
+    enabled: bool = True
+    # Overflow-sentinel check (EM500_CPP_Mod_V1.3 §3.3: INT32 MSW == 0x7FFFh).
+    # Always recommended; togglable, defaults on.
+    check_overflow_sentinel: bool = True
+    # Physical-range bounds (EM540 datasheet). Defaults are datasheet-derived;
+    # override only with equally justified values.
+    max_phase_current_a: float = 130.0  # 2 x Imax(65 A)
+    max_system_current_a: float = 390.0  # 3 x per-phase bound
+    max_voltage_ln_v: float = 360.0  # 1.5 x Un(240 V)
+    max_voltage_ll_v: float = 625.0  # ~1.5 x L-L(415 V)
+    min_frequency_hz: float = 40.0  # 45 Hz - 5 Hz guard
+    max_frequency_hz: float = 70.0  # 65 Hz + 5 Hz guard
+
+
+@dataclass
 class Em540MasterConfig:
     mode: str = "serial"
     baudrate: int = 9600
@@ -63,6 +82,7 @@ class Em540MasterConfig:
     # may reset the meter's kWh counters, so this is disabled by default.
     ensure_3phase_measuring_system: bool = False
     log_level: str = "INFO"
+    frame_validation: FrameValidationConfig = field(default_factory=FrameValidationConfig)
 
 
 @dataclass
@@ -340,6 +360,41 @@ class ConfigManager:
         for name, value in bool_fields:
             if not isinstance(value, bool):
                 raise ConfigError(f"{name} must be a boolean (true/false), got {value!r}")
+
+        # 8. frame validation — toggles must be booleans and every numeric bound
+        # must be a finite number > 0 (bool rejected explicitly: it is an int
+        # subclass). Frequencies must additionally satisfy min < max.
+        self._validate_frame_validation(state.em540_master.frame_validation)
+
+    def _validate_frame_validation(self, fv: FrameValidationConfig) -> None:
+        for name, value in (
+            ("em540_master.frame_validation.enabled", fv.enabled),
+            ("em540_master.frame_validation.check_overflow_sentinel", fv.check_overflow_sentinel),
+        ):
+            if not isinstance(value, bool):
+                raise ConfigError(f"{name} must be a boolean (true/false), got {value!r}")
+
+        bound_fields = (
+            ("em540_master.frame_validation.max_phase_current_a", fv.max_phase_current_a),
+            ("em540_master.frame_validation.max_system_current_a", fv.max_system_current_a),
+            ("em540_master.frame_validation.max_voltage_ln_v", fv.max_voltage_ln_v),
+            ("em540_master.frame_validation.max_voltage_ll_v", fv.max_voltage_ll_v),
+            ("em540_master.frame_validation.min_frequency_hz", fv.min_frequency_hz),
+            ("em540_master.frame_validation.max_frequency_hz", fv.max_frequency_hz),
+        )
+        for name, value in bound_fields:
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise ConfigError(f"{name} must be a number, got {value!r}")
+            if isinstance(value, float) and not math.isfinite(value):
+                raise ConfigError(f"{name} must be finite, got {value}")
+            if value <= 0:
+                raise ConfigError(f"{name} must be > 0, got {value}")
+
+        if fv.min_frequency_hz >= fv.max_frequency_hz:
+            raise ConfigError(
+                "em540_master.frame_validation.min_frequency_hz must be < max_frequency_hz, "
+                f"got min={fv.min_frequency_hz} max={fv.max_frequency_hz}"
+            )
 
     def _populate_config(self, target, section_data: dict, path: str) -> None:
         for key, value in section_data.items():
