@@ -1115,7 +1115,13 @@ class TestFrameValidationIntegration(unittest.TestCase):
         self.assertEqual(master._stats.invalid_frame_total, 1)
         self.assertEqual(master._stats.last_invalid_frame_reason, "sentinel:a_l1")
         self.assertGreaterEqual(master._stats.read_failed_total, 1)
-        listener.read_failed.assert_awaited()
+        # Listeners are NOT notified on a rejected frame: read_failed() would
+        # force downstream circuit breakers open / mark HA unavailable
+        # immediately, turning one transient bad frame into an instant outage.
+        # Instead the buffer swap/timestamp advance are withheld so consumers
+        # keep last-good and their own staleness timeouts open the breaker only
+        # if bad frames persist.
+        listener.read_failed.assert_not_awaited()
         # Last-good retained (front buffer unchanged), timestamp not advanced.
         self.assertIs(master._front_data, front_before)
         self.assertEqual(master.last_frame_monotonic, 0.0)

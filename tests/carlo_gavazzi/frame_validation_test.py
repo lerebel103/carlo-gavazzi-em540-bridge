@@ -9,7 +9,10 @@ false Device-Type collision is manufactured.
 
 import unittest
 
-from app.carlo_gavazzi.frame_validation import validate_primary_frame
+from app.carlo_gavazzi.frame_validation import (
+    _PRIMARY_INT32_MSW,
+    validate_primary_frame,
+)
 from app.carlo_gavazzi.meter_data import MeterData
 
 PRIMARY_BLOCK_SIZE = 0x34
@@ -134,19 +137,19 @@ class TestFrameValidationPure(unittest.TestCase):
             regs[off + 1] = 0x7FFF
             self.assertEqual(_validate(regs), f"sentinel:{slug}")
 
-    # 3. Voltage/power/VA/var/system sentinel rejected.
+    # 3. Every INT32 instantaneous variable in the spec mapping is sentinel-checked.
+    # Enumerate the full _PRIMARY_INT32_MSW table (the core spec register map) so
+    # a missing/mistyped offset or slug fails the suite, not just a sampled subset.
     def test_sentinel_covers_all_int32_instants(self):
-        cases = (
-            (0x01, "v_l1n"),
-            (0x13, "w_l1"),
-            (0x19, "va_l1"),
-            (0x1F, "var_l1"),
-            (0x25, "v_ln_sys"),
-        )
-        for msw_idx, slug in cases:
+        self.assertEqual(len(_PRIMARY_INT32_MSW), 23)
+        for msw_idx, slug in _PRIMARY_INT32_MSW:
             regs = _realistic_registers()
             regs[msw_idx] = 0x7FFF
-            self.assertEqual(_validate(regs), f"sentinel:{slug}")
+            self.assertEqual(
+                _validate(regs),
+                f"sentinel:{slug}",
+                msg=f"MSW index {hex(msw_idx)} (slug {slug}) not rejected as sentinel",
+            )
 
     # 4. 0x8000 MSW is NOT a sentinel (large negative power must pass).
     def test_negative_power_msw_0x8000_not_rejected(self):

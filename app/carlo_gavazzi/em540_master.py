@@ -70,9 +70,11 @@ class Em540MasterStats:
         # Count of frames that parsed structurally but were rejected by spec-based
         # frame validation (overflow sentinel or out-of-physical-range). Distinct
         # from read_failed_total (transport/length/parse failures). A rejected
-        # frame ALSO increments read_failed_total via _notify_listeners_read_failed()
-        # (from the freshness standpoint it is "no fresh good frame this tick");
-        # this counter isolates the parsed-but-invalid subset for diagnostics.
+        # frame ALSO increments read_failed_total (via _count_read_failure, from
+        # the freshness standpoint it is "no fresh good frame this tick") but,
+        # unlike a transport failure, does NOT notify listeners (no forced
+        # circuit-breaker trip); this counter isolates the parsed-but-invalid
+        # subset for diagnostics.
         self.invalid_frame_total: int = 0
         # Last rejection reason (short string) for logging/potential future use;
         # None until the first rejection. Single-writer (master loop), read without
@@ -416,7 +418,10 @@ class Em540Master:
         # daemon worker performs the actual logger.debug() call off the loop.
         # Bounded so a stalled/slow log handler cannot accumulate messages for the
         # lifetime of this long-running service; the newest summary wins on Full.
-        self._diag_log_queue: queue.Queue[str] = queue.Queue(maxsize=1)
+        # Items are (log level, preformatted message) so the worker can emit the
+        # periodic DEBUG diagnostics summary and the WARNING frame-rejection
+        # notice through the same off-loop handler I/O path.
+        self._diag_log_queue: queue.Queue[tuple[int, str]] = queue.Queue(maxsize=1)
         # Start the background log worker once, here at construction (off the tick
         # loop). It blocks on the queue until a summary is enqueued, so an idle
         # daemon thread costs essentially nothing. Starting it lazily from the
@@ -712,17 +717,24 @@ class Em540Master:
         # Spec-based frame validation gate: runs AFTER parse but BEFORE the
         # extrema fold / timestamp advance / buffer swap below, so a rejected
         # frame is never folded into DailyExtrema, never advances the freshness
-        # timestamp, and leaves _front_data (last-good) in place. A rejection
-        # reuses the existing read-failed drop path (which also bumps
-        # read_failed_total); it does NOT force the circuit breaker — persistent
-        # bad frames let the staleness watchdog/breaker open naturally.
+        # timestamp, and leaves _front_data (last-good) in place.
+        #
+        # A rejection counts the read failure (keeping read_failed_total
+        # authoritative) but deliberately does NOT notify listeners via
+        # _notify_listeners_read_failed(): the listeners' read_failed() opens
+        # their circuit breakers / marks HA unavailable immediately, which would
+        # turn a single transient bad frame into an instant outage. Instead we
+        # just withhold the buffer swap and the freshness-timestamp advance, so
+        # downstream consumers retain the last-good snapshot and their own
+        # staleness timeouts (and the master freshness watchdog) open the circuit
+        # NATURALLY only if bad frames persist.
         if is_ok and self._validation_enabled:
             reason = self._validate_frame(self._back_data)
             if reason is not None:
                 self._count_invalid_frame(reason)
+                self._count_read_failure()
                 self._maybe_log_invalid_frame(reason)
                 is_ok = False
-                await self._notify_listeners_read_failed()
 
         if is_ok:
             # Fold this frame into daily extrema BEFORE the buffer swap. This is
@@ -804,18 +816,26 @@ class Em540Master:
 
         Mirrors _count_read_failure: increments the dedicated invalid-frame
         counter and stores the last reason under the stats lock (uncontended on
-        the hot path). This is in addition to the read_failed_total bump that
-        _notify_listeners_read_failed() performs for the same rejected frame.
+        the hot path). The caller also calls _count_read_failure() for the same
+        rejected frame (a rejected frame is "no fresh good frame this tick" for
+        freshness purposes), but does NOT notify listeners.
         """
         with self._stats.lock:
             self._stats.invalid_frame_total += 1
             self._stats.last_invalid_frame_reason = reason
 
     def _maybe_log_invalid_frame(self, reason: str) -> None:
-        """Log a frame rejection at WARNING, rate-limited to avoid log floods."""
+        """Log a frame rejection at WARNING, rate-limited to avoid log floods.
+
+        The actual handler I/O is handed to the background log worker (via
+        _enqueue_diagnostics_log at WARNING level) so a slow stderr/file handler
+        never stalls the 10 Hz acquisition loop, even during an invalid-frame
+        storm. Rate limiting bounds how often we enqueue; the worker bounds the
+        latency off-loop.
+        """
         now = time.monotonic()
         if now - self._last_invalid_frame_log >= self._INVALID_FRAME_LOG_INTERVAL:
-            logger.warning("Rejected invalid upstream frame: %s", reason)
+            self._enqueue_diagnostics_log(f"Rejected invalid upstream frame: {reason}", logging.WARNING)
             self._last_invalid_frame_log = now
 
     async def _notify_listeners_read_failed(self) -> None:
@@ -1063,33 +1083,36 @@ class Em540Master:
         self._diag_log_last_time = now
         self._diag_log_last_tick_count = self._dyn_reg_read_counter
 
-    def _enqueue_diagnostics_log(self, message: str) -> None:
-        """Hand a pre-formatted diagnostics line to the background log worker.
+    def _enqueue_diagnostics_log(self, message: str, level: int = logging.DEBUG) -> None:
+        """Hand a pre-formatted log line (with its level) to the background worker.
 
         Non-blocking and allocation-light: the tick loop never performs
         logging-handler I/O nor thread creation (the worker is started at
-        construction). The worker is a daemon so it never blocks shutdown.
+        construction). The worker is a daemon so it never blocks shutdown. Used
+        both for the periodic DEBUG diagnostics summary and the WARNING frame-
+        rejection notice so neither does handler I/O on the 10 Hz loop.
         """
         # Non-blocking, latest-wins: if the worker is behind (slow/stalled log
-        # handler), drop the stale pending summary and enqueue the newest one so
+        # handler), drop the stale pending item and enqueue the newest one so
         # the queue can never grow unbounded and the tick loop never blocks.
+        item = (level, message)
         try:
-            self._diag_log_queue.put_nowait(message)
+            self._diag_log_queue.put_nowait(item)
         except queue.Full:
             try:
                 self._diag_log_queue.get_nowait()
             except queue.Empty:
                 pass
             try:
-                self._diag_log_queue.put_nowait(message)
+                self._diag_log_queue.put_nowait(item)
             except queue.Full:
                 pass
 
     def _diagnostics_log_worker(self) -> None:
         while True:
-            message = self._diag_log_queue.get()
+            level, message = self._diag_log_queue.get()
             try:
-                logger.debug("%s", message)
+                logger.log(level, "%s", message)
             except Exception:
                 # Never let a logging-handler failure kill the worker.
                 pass
