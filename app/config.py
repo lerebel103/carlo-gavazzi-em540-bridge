@@ -385,7 +385,14 @@ class ConfigManager:
         for name, value in bound_fields:
             if isinstance(value, bool) or not isinstance(value, (int, float)):
                 raise ConfigError(f"{name} must be a number, got {value!r}")
-            if isinstance(value, float) and not math.isfinite(value):
+            # Must be representable as a finite float: Em540Master.__init__ coerces
+            # every bound with float(), and an oversized int (e.g. 10**1000) raises
+            # OverflowError there instead of a clean ConfigError. Check it here.
+            try:
+                as_float = float(value)
+            except (OverflowError, ValueError) as exc:
+                raise ConfigError(f"{name} must be a finite number, got {value!r}") from exc
+            if not math.isfinite(as_float):
                 raise ConfigError(f"{name} must be finite, got {value}")
             if value <= 0:
                 raise ConfigError(f"{name} must be > 0, got {value}")

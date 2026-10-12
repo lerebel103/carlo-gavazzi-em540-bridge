@@ -16,9 +16,12 @@ This was the FIRST implementation iteration (no `review.json` present — only
   `last_invalid_frame_reason`; cached validation config in `__init__`; `_validate_frame`,
   `_count_invalid_frame`, `_maybe_log_invalid_frame` (rate-limited WARNING,
   `_INVALID_FRAME_LOG_INTERVAL=5.0`); gate wired into `acquire_data` AFTER `update_from_frame`
-  and BEFORE the extrema fold / `_last_frame_monotonic` advance / buffer swap. Rejection reuses
-  the existing `is_ok=False` + `_notify_listeners_read_failed()` drop path. No breaker-trip code
-  touched; timestamp not advanced on reject.
+  and BEFORE the extrema fold / `_last_frame_monotonic` advance / buffer swap. Rejection sets
+  `is_ok=False` and counts the failure (`_count_invalid_frame` + `_count_read_failure`) but does
+  NOT call `_notify_listeners_read_failed()`: notifying listeners would force downstream circuit
+  breakers open and mark HA unavailable immediately. Instead the buffer swap and timestamp advance
+  are withheld, so consumers keep last-good and their own staleness timeouts / the master freshness
+  watchdog open the breaker naturally only if bad frames persist. No breaker-trip code touched.
 - **`app/config.py`**: `FrameValidationConfig` nested under `Em540MasterConfig` via
   `field(default_factory=...)`; `_validate_frame_validation` enforces bool toggles, finite `>0`
   numeric bounds (bool rejected), and `min_frequency_hz < max_frequency_hz`. Not added to
@@ -42,8 +45,9 @@ This was the FIRST implementation iteration (no `review.json` present — only
   I ~10 A, 50 Hz) so `0x000B` MSW stays 0.
 - `tests/carlo_gavazzi/em540_master_test.py`: `TestFrameValidationIntegration` (cases 11–15) —
   sentinel/out-of-range frames dropped end-to-end (invalid_frame_total++, read_failed_total++,
-  listeners signalled, last-good `_front_data` retained, `_last_frame_monotonic` not advanced,
-  extrema not folded); normal frame publishes/advances/folds; persistent bad frames freeze the
+  listeners NOT signalled — `read_failed.assert_not_awaited()`, last-good `_front_data` retained,
+  `_last_frame_monotonic` not advanced, extrema not folded); normal frame publishes/advances/folds;
+  persistent bad frames freeze the
   timestamp while a single bad frame among good ones does not; config toggle fully bypasses the gate.
   `_make_config` helper gained a nested `frame_validation` SimpleNamespace (validation DISABLED by
   default there so pre-existing all-zero-frame plumbing tests — frequency 0 Hz legitimately fails

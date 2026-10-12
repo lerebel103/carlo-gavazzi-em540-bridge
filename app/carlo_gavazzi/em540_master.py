@@ -1092,17 +1092,30 @@ class Em540Master:
         both for the periodic DEBUG diagnostics summary and the WARNING frame-
         rejection notice so neither does handler I/O on the 10 Hz loop.
         """
-        # Non-blocking, latest-wins: if the worker is behind (slow/stalled log
-        # handler), drop the stale pending item and enqueue the newest one so
-        # the queue can never grow unbounded and the tick loop never blocks.
+        # Non-blocking, newest-wins but severity-aware: if the worker is behind
+        # (slow/stalled log handler) the queue is full. Only evict the pending
+        # item when the incoming item is at least as severe; otherwise keep the
+        # higher-severity pending item and drop the incoming one. This stops a
+        # routine DEBUG diagnostics summary from evicting a pending WARNING
+        # frame-rejection notice (both run on ~5 s intervals). The queue can
+        # never grow unbounded and the tick loop never blocks either way.
         item = (level, message)
         try:
             self._diag_log_queue.put_nowait(item)
         except queue.Full:
+            pending = None
             try:
-                self._diag_log_queue.get_nowait()
+                pending = self._diag_log_queue.get_nowait()
             except queue.Empty:
-                pass
+                pending = None
+            # If we pulled a strictly higher-severity pending item, put it back
+            # and drop the incoming lower-severity one.
+            if pending is not None and pending[0] > level:
+                try:
+                    self._diag_log_queue.put_nowait(pending)
+                except queue.Full:
+                    pass
+                return
             try:
                 self._diag_log_queue.put_nowait(item)
             except queue.Full:

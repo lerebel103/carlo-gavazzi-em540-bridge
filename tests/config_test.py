@@ -1530,7 +1530,10 @@ def test_frame_validation_toggles_reject_non_boolean(tmp_path, field, value):
         "em540_master.frame_validation.max_frequency_hz",
     ],
 )
-@pytest.mark.parametrize("value", [0, -1.0, "nope", True, float("inf"), float("nan")])
+# 10**1000 is a valid positive int but not representable as a finite float, so
+# float() of it raises OverflowError at master init — validation must reject it
+# cleanly as a ConfigError first.
+@pytest.mark.parametrize("value", [0, -1.0, "nope", True, float("inf"), float("nan"), 10**1000])
 def test_frame_validation_bounds_reject_invalid(tmp_path, field, value):
     path = _make_config(tmp_path, {field: value})
     with pytest.raises(ConfigError, match="frame_validation"):
