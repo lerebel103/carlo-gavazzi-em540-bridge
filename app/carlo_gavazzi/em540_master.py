@@ -9,7 +9,7 @@ from threading import Thread
 from typing import Callable
 
 from pymodbus import FramerType, ModbusException
-from pymodbus.client import AsyncModbusSerialClient, AsyncModbusTcpClient, ModbusBaseClient
+from pymodbus.client import AsyncModbusSerialClient, AsyncModbusTcpClient, ModbusBaseClient, ModbusTcpClient
 from pymodbus.exceptions import ModbusIOException
 
 from app.carlo_gavazzi.em540_data import (
@@ -34,9 +34,14 @@ from app.carlo_gavazzi.frame_validation import (
     MAX_VOLTAGE_LL_V,
     MAX_VOLTAGE_LN_V,
     MIN_FREQUENCY_HZ,
+    compute_em530_current_bounds,
     validate_primary_frame,
 )
-from app.carlo_gavazzi.meter_data import MeterData
+from app.carlo_gavazzi.meter_data import MeterData, _convert_from_registers_little
+
+# CT ratio register (EM530-only); UINT32, 2 words, LSW->MSW. See
+# frame_validation.compute_em530_current_bounds for the spec citation.
+_EM530_CT_RATIO_REG: int = 0x1003
 
 logger = logging.getLogger("Em540Master")
 
@@ -375,6 +380,15 @@ class Em540Master:
         self._check_sentinel: bool = bool(getattr(fv, "check_overflow_sentinel", True))
         self._max_phase_current_a: float = float(getattr(fv, "max_phase_current_a", MAX_PHASE_CURRENT_A))
         self._max_system_current_a: float = float(getattr(fv, "max_system_current_a", MAX_SYSTEM_CURRENT_A))
+        # Effective per-tick current bounds actually passed to the validator. For
+        # an EM540 (direct 65 A input) these equal the configured 130/390 A
+        # bounds. For a CT-connected EM530 the decoded primary current scales with
+        # the meter's CT ratio and legitimately exceeds 130 A, so these are
+        # recomputed from register 0x1003 once the static block is read
+        # (_recompute_effective_current_bounds). Cached here as plain floats so the
+        # 10Hz validate path reads two attributes with no CT decode / allocation.
+        self._effective_max_phase_current_a: float = self._max_phase_current_a
+        self._effective_max_system_current_a: float = self._max_system_current_a
         self._max_voltage_ln_v: float = float(getattr(fv, "max_voltage_ln_v", MAX_VOLTAGE_LN_V))
         self._max_voltage_ll_v: float = float(getattr(fv, "max_voltage_ll_v", MAX_VOLTAGE_LL_V))
         self._min_frequency_hz: float = float(getattr(fv, "min_frequency_hz", MIN_FREQUENCY_HZ))
@@ -551,6 +565,14 @@ class Em540Master:
                     fresh_static_read = True
                     # Keep both buffers aligned so skipped reads in dynamic maps keep prior values.
                     self._copy_meter_data(self._front_data, self._back_data)
+                    # SINGLE refresh point for the EM530 CT-ratio-aware current
+                    # bounds. The CT register (0x1003) is static and only read
+                    # here (when not self._static_data_valid); an ordinary
+                    # reconnect keeps _static_data_valid True and does NOT re-read
+                    # it. If a future change forces a static re-read on reconnect,
+                    # it MUST call _recompute_effective_current_bounds() again so
+                    # the cached bounds stay in sync.
+                    self._recompute_effective_current_bounds()
             else:
                 fresh_static_read = False
 
@@ -788,6 +810,46 @@ class Em540Master:
         with self._stats.lock:
             self._stats.read_failed_total += 1
 
+    def _recompute_effective_current_bounds(self) -> None:
+        """Recompute the cached effective per-phase / system current bounds.
+
+        Called once after the static register block is read (see connect()). For
+        an EM540 (not is_em530) the effective bounds stay at the configured
+        130/390 A values. For a CT-connected EM530 the decoded primary current
+        scales with the meter's CT ratio, so the bounds are derived from register
+        0x1003 (CT ratio x 10, UINT32, LSW->MSW) via
+        compute_em530_current_bounds. A missing/empty register yields
+        (inf, inf) which skips the current magnitude bound (the overflow sentinel
+        still applies); see compute_em530_current_bounds for the rationale.
+
+        Not on the hot path: this runs on connect, not per tick. The validator
+        reads only the cached floats set here.
+        """
+        frame = self._front_data.frame
+        if not frame.is_em530:
+            # EM540 / direct-input: use the configured datasheet bounds unchanged.
+            self._effective_max_phase_current_a = self._max_phase_current_a
+            self._effective_max_system_current_a = self._max_system_current_a
+            return
+
+        raw_ct_ratio: int | None = None
+        reg = frame.static_reg_map.get(_EM530_CT_RATIO_REG)
+        if reg is not None and reg.values and any(reg.values):
+            # UINT32, LSW->MSW word order; reuse the shared little-endian decode
+            # helper (do not reinvent decoding). A missing/empty/all-zero read is
+            # treated as "no CT ratio yet" (raw_ct_ratio stays None -> skip bound).
+            raw_ct_ratio = int(_convert_from_registers_little(reg.values, ModbusTcpClient.DATATYPE.UINT32))
+
+        phase_bound, system_bound = compute_em530_current_bounds(raw_ct_ratio)
+        self._effective_max_phase_current_a = phase_bound
+        self._effective_max_system_current_a = system_bound
+        logger.debug(
+            "EM530 CT-aware current bounds: raw_0x1003=%s -> phase<=%s A, An<=%s A",
+            raw_ct_ratio,
+            phase_bound,
+            system_bound,
+        )
+
     def _validate_frame(self, data: MeterData) -> str | None:
         """Validate a freshly parsed frame's instantaneous quantities.
 
@@ -802,8 +864,8 @@ class Em540Master:
         return validate_primary_frame(
             registers,
             data,
-            max_phase_current_a=self._max_phase_current_a,
-            max_system_current_a=self._max_system_current_a,
+            max_phase_current_a=self._effective_max_phase_current_a,
+            max_system_current_a=self._effective_max_system_current_a,
             max_voltage_ln_v=self._max_voltage_ln_v,
             max_voltage_ll_v=self._max_voltage_ll_v,
             min_frequency_hz=self._min_frequency_hz,

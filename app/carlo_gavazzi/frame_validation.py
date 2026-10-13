@@ -95,6 +95,62 @@ MAX_VOLTAGE_LL_V: float = 625.0  # ~1.5 x L-L(415 V)
 MIN_FREQUENCY_HZ: float = 40.0  # datasheet 45 Hz - 5 Hz guard
 MAX_FREQUENCY_HZ: float = 70.0  # datasheet 65 Hz + 5 Hz guard
 
+# --- EM530 CT-ratio-aware current bound ------------------------------------
+# The constants above (MAX_PHASE_CURRENT_A = 130, MAX_SYSTEM_CURRENT_A = 390)
+# are derived from the EM540 DIRECT 65 A input. The EM530 is CT-connected: its
+# decoded A L1/L2/L3 registers (0x0C/0x0E/0x10, INT32, weight Ampere*1000) carry
+# the already-CT-scaled PRIMARY current, which legitimately exceeds 130 A, so the
+# magnitude bound must scale with the meter's own configured CT ratio.
+#
+# Spec (Carlo Gavazzi EM500_CPP_Mod_V1.3, 13 Feb 2024, .agents/tmp/em500_protocol.txt
+# Modicom 304100 / physical 1003h "Current transformer ratio", UINT32, 2 words):
+# the stored value equals the CT ratio multiplied by 10, with a minimum of 10
+# (CT 1.0), a maximum of 20000 (CT 2000.0) and a default of 10. The register is
+# EM530-only (not available on AV2/EM540 models). Content was rephrased for
+# compliance with licensing restrictions.
+CT_RATIO_SCALE: int = 10  # raw register value = CT_ratio * 10
+CT_RATIO_MIN: int = 10  # min valid raw value -> CT 1.0
+CT_RATIO_MAX: int = 20000  # max valid raw value -> CT 2000.0
+# EM530 secondary base (rated) current, Amperes (datasheet). The CT scales this
+# secondary current up to the primary current the registers report.
+EM530_SECONDARY_BASE_A: float = 5.0
+
+
+def compute_em530_current_bounds(raw_ct_ratio: int | None) -> tuple[float, float]:
+    """Return the EM530 ``(max_phase_current_a, max_system_current_a)`` bounds.
+
+    ``raw_ct_ratio`` is the raw value of register ``0x1003`` (CT ratio x 10, see
+    the module constants above). The per-phase bound keeps the SAME 2x headroom
+    factor the EM540 bound uses, applied to the CT-scaled rated current:
+
+        ct_ratio          = clamped_raw / CT_RATIO_SCALE        # e.g. 2000/10 = 200.0
+        max_phase_current = 2 * EM530_SECONDARY_BASE_A * ct_ratio
+
+    which, with EM530_SECONDARY_BASE_A = 5 A and CT_RATIO_SCALE = 10, happens to
+    equal the clamped raw register value numerically (2 * 5 * raw/10 == raw). The
+    computation is written out legibly rather than relying on that coincidence.
+
+    The system/neutral An bound mirrors the EM540 ``390 = 3 x 130`` relationship:
+    ``max_system_current = 3 * max_phase_current``.
+
+    Fallback (per the EM530 design decision): when ``raw_ct_ratio`` is ``None``
+    (register absent / not yet read / empty) there is no trustworthy CT ratio, so
+    returning ``(inf, inf)`` SKIPS the current magnitude bound. Applying the far
+    smaller 130 A EM540 bound would false-reject legitimate EM530 frames and
+    stale the bridge — the exact bug this change fixes. The overflow sentinel
+    (model-independent) still guards against genuine overflow. A present-but-
+    implausible raw value is clamped into ``[CT_RATIO_MIN, CT_RATIO_MAX]`` and
+    used (it yields a finite, usable bound); only genuinely absent data skips.
+    """
+    if raw_ct_ratio is None:
+        return (float("inf"), float("inf"))
+
+    clamped = max(CT_RATIO_MIN, min(CT_RATIO_MAX, raw_ct_ratio))
+    ct_ratio = clamped / CT_RATIO_SCALE
+    max_phase_current_a = 2 * EM530_SECONDARY_BASE_A * ct_ratio
+    max_system_current_a = 3 * max_phase_current_a
+    return (max_phase_current_a, max_system_current_a)
+
 
 def validate_primary_frame(
     registers: list[int],

@@ -1093,6 +1093,36 @@ class TestFrameValidationIntegration(unittest.TestCase):
 
         _set_int32(regs, off, value)
 
+    @staticmethod
+    def _realistic_current(current):
+        """Realistic primary block with a specific per-phase current (Ampere*1000)."""
+        from tests.carlo_gavazzi.frame_validation_test import _realistic_registers
+
+        return _realistic_registers(current=current)
+
+    @staticmethod
+    def _encode_uint32_le(value):
+        """Encode a UINT32 as little-endian word order (LSW first)."""
+        v = value & 0xFFFFFFFF
+        return [v & 0xFFFF, (v >> 16) & 0xFFFF]
+
+    def _make_em530(self, raw_ct_ratio, **fv_overrides):
+        """Build a master whose front frame is an EM530 with a chosen CT ratio.
+
+        ``raw_ct_ratio`` is the raw value of register 0x1003 (CT ratio x 10), or
+        None to leave the register empty (fallback path). After swapping in the
+        EM530 frame the effective current bounds are recomputed, mirroring what
+        connect() does once the static block is read.
+        """
+        from app.carlo_gavazzi.em540_data import Em540Frame
+
+        master, client = self._build(**fv_overrides)
+        master._front_data.frame = Em540Frame(is_em530=True)
+        if raw_ct_ratio is not None:
+            master._front_data.frame.static_reg_map[0x1003].values = self._encode_uint32_le(raw_ct_ratio)
+        master._recompute_effective_current_bounds()
+        return master, client
+
     # 11. Sentinel current frame dropped end-to-end.
     def test_sentinel_current_frame_dropped(self):
         master, client = self._build()
@@ -1212,6 +1242,86 @@ class TestFrameValidationIntegration(unittest.TestCase):
         self.assertTrue(result)
         self.assertEqual(master._stats.invalid_frame_total, 0)
         self.assertEqual(master.last_frame_monotonic, 777.0)
+
+    # 16. EM530 CT ratio 200.0 (raw 2000) -> bound 2000 A: 1500 A publishes.
+    def test_em530_1500a_publishes(self):
+        master, client = self._make_em530(2000)
+        self.assertEqual(master._effective_max_phase_current_a, 2000.0)
+        self.assertEqual(master._effective_max_system_current_a, 6000.0)
+        regs = self._realistic_current(1_500_000)  # 1500 A per phase
+
+        client.read_holding_registers = AsyncMock(side_effect=self._tick_responses(master, regs))
+        with patch("app.carlo_gavazzi.em540_master.time.monotonic", return_value=1500.0):
+            with patch.object(master._condition, "notify"):
+                result = asyncio.run(master.acquire_data())
+
+        self.assertTrue(result)
+        self.assertEqual(master._stats.invalid_frame_total, 0)
+        self.assertEqual(master.last_frame_monotonic, 1500.0)
+        snap = master.daily_extrema.snapshot()
+        self.assertAlmostEqual(snap["current_l1_max"], 1500.0, places=1)
+
+    # 16b. EM530 bound 2000 A: a frame above it is dropped range:a_l1.
+    def test_em530_over_bound_dropped(self):
+        master, client = self._make_em530(2000)
+        regs = self._realistic_current(2_000_001)  # 2000.001 A
+
+        front_before = master._front_data
+        client.read_holding_registers = AsyncMock(side_effect=self._tick_responses(master, regs))
+        with patch.object(master._condition, "notify"):
+            result = asyncio.run(master.acquire_data())
+
+        self.assertFalse(result)
+        self.assertEqual(master._stats.invalid_frame_total, 1)
+        self.assertEqual(master._stats.last_invalid_frame_reason, "range:a_l1")
+        self.assertIs(master._front_data, front_before)
+        self.assertEqual(master.last_frame_monotonic, 0.0)
+
+    # 17. EM530 with MISSING/empty 0x1003: skip fallback publishes 1500 A, but a
+    # current MSW sentinel is still dropped (sentinel always applies).
+    def test_em530_missing_ct_ratio_skip_fallback(self):
+        master, client = self._make_em530(None)
+        self.assertEqual(master._effective_max_phase_current_a, float("inf"))
+        self.assertEqual(master._effective_max_system_current_a, float("inf"))
+
+        regs = self._realistic_current(1_500_000)  # 1500 A — far above 130 A
+        client.read_holding_registers = AsyncMock(side_effect=self._tick_responses(master, regs))
+        with patch("app.carlo_gavazzi.em540_master.time.monotonic", return_value=1700.0):
+            with patch.object(master._condition, "notify"):
+                self.assertTrue(asyncio.run(master.acquire_data()))
+        self.assertEqual(master._stats.invalid_frame_total, 0)
+
+        # Sentinel still rejected under the skip fallback.
+        sentinel = self._realistic_current(1_500_000)
+        sentinel[0x0C] = 0xFFFF
+        sentinel[0x0D] = 0x7FFF  # A L1 MSW sentinel
+        client.read_holding_registers = AsyncMock(side_effect=self._tick_responses(master, sentinel))
+        with patch("app.carlo_gavazzi.em540_master.time.monotonic", return_value=1800.0):
+            with patch.object(master._condition, "notify"):
+                self.assertFalse(asyncio.run(master.acquire_data()))
+        self.assertEqual(master._stats.last_invalid_frame_reason, "sentinel:a_l1")
+
+    # 18. EM530 clamp: raw 5 clamps to CT 1.0 -> bound 100 A; 150 A dropped.
+    def test_em530_clamp_low_yields_finite_bound(self):
+        master, client = self._make_em530(5)  # below min 10 -> clamp to 10 (CT 1.0)
+        self.assertEqual(master._effective_max_phase_current_a, 10.0)
+        self.assertEqual(master._effective_max_system_current_a, 30.0)
+
+        regs = self._realistic_current(150000)  # 150 A > 10 A bound
+        client.read_holding_registers = AsyncMock(side_effect=self._tick_responses(master, regs))
+        with patch.object(master._condition, "notify"):
+            self.assertFalse(asyncio.run(master.acquire_data()))
+        self.assertEqual(master._stats.last_invalid_frame_reason, "range:a_l1")
+
+    # 19. EM540 regression: effective bounds remain 130/390 (is_em530 False).
+    def test_em540_bounds_unchanged(self):
+        master, _client = self._build()
+        self.assertEqual(master._effective_max_phase_current_a, 130.0)
+        self.assertEqual(master._effective_max_system_current_a, 390.0)
+        # Recompute is a no-op for an EM540 frame (is_em530 defaults False).
+        master._recompute_effective_current_bounds()
+        self.assertEqual(master._effective_max_phase_current_a, 130.0)
+        self.assertEqual(master._effective_max_system_current_a, 390.0)
 
 
 if __name__ == "__main__":

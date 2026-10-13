@@ -11,6 +11,7 @@ import unittest
 
 from app.carlo_gavazzi.frame_validation import (
     _PRIMARY_INT32_MSW,
+    compute_em530_current_bounds,
     validate_primary_frame,
 )
 from app.carlo_gavazzi.meter_data import MeterData
@@ -244,6 +245,87 @@ class TestFrameValidationPure(unittest.TestCase):
         regs[OFF_A_L1 + 1] = 0x7FFF
         self.assertEqual(_validate(regs, check_sentinel=True), "sentinel:a_l1")
         self.assertEqual(_validate(regs, check_sentinel=False), "range:a_l1")
+
+
+class TestEm530CurrentBounds(unittest.TestCase):
+    """EM530 CT-ratio-aware current bound: pure helper + validator behaviour."""
+
+    # compute_em530_current_bounds: CT 200.0 (raw 2000) -> phase 2000 A, An 6000 A.
+    def test_ct_bounds_from_raw(self):
+        phase, system = compute_em530_current_bounds(2000)
+        self.assertEqual(phase, 2000.0)
+        self.assertEqual(system, 6000.0)
+        # Documented numeric coincidence: with 2x headroom and 5 A secondary,
+        # phase bound equals the clamped raw register value.
+        self.assertEqual(phase, 2000.0)
+
+    # None (register absent / not yet read / empty) -> skip (inf, inf).
+    def test_ct_bounds_none_skips(self):
+        phase, system = compute_em530_current_bounds(None)
+        self.assertEqual(phase, float("inf"))
+        self.assertEqual(system, float("inf"))
+
+    # Clamp: raw below the valid minimum is clamped to CT 1.0.
+    def test_ct_bounds_clamp_low(self):
+        phase, system = compute_em530_current_bounds(5)  # < min 10 -> clamp to 10 (CT 1.0)
+        self.assertEqual(phase, 10.0)  # 2 * 5 * (10/10)
+        self.assertEqual(system, 30.0)
+
+    # Clamp: raw above the valid maximum is clamped to CT 2000.0.
+    def test_ct_bounds_clamp_high(self):
+        phase, system = compute_em530_current_bounds(30000)  # > max 20000
+        self.assertEqual(phase, 20000.0)
+        self.assertEqual(system, 60000.0)
+
+    # Validator with EM530 bounds: 1500 A passes (would fail the old 130 A bound).
+    def test_validator_em530_1500a_passes(self):
+        regs = _realistic_registers(current=1_500_000)  # 1500.000 A
+        self.assertIsNone(
+            _validate(regs, max_phase_current_a=2000.0, max_system_current_a=6000.0),
+        )
+        # Sanity: same frame fails under the default EM540 130 A bound.
+        self.assertEqual(_validate(regs), "range:a_l1")
+
+    # Validator with EM530 bounds: > 2000 A rejected range:a_l1.
+    def test_validator_em530_over_phase_bound_rejected(self):
+        regs = _realistic_registers(current=2_000_001)  # 2000.001 A
+        self.assertEqual(
+            _validate(regs, max_phase_current_a=2000.0, max_system_current_a=6000.0),
+            "range:a_l1",
+        )
+
+    # EM530 An bound (3x per-phase): 6000 A passes, > 6000 A rejected range:an.
+    def test_validator_em530_an_bound(self):
+        regs = _realistic_registers(current=1_500_000)  # all phases in range (<2000)
+        data = _parse(regs)
+        data.system.An = 6000.0
+        self.assertIsNone(
+            _validate(regs, data=data, max_phase_current_a=2000.0, max_system_current_a=6000.0),
+        )
+        data.system.An = 6500.0
+        self.assertEqual(
+            _validate(regs, data=data, max_phase_current_a=2000.0, max_system_current_a=6000.0),
+            "range:an",
+        )
+
+    # EM540 unchanged (regression): 150 A rejected, 130 A passes with defaults.
+    def test_validator_em540_unchanged(self):
+        self.assertEqual(_validate(_realistic_registers(current=150000)), "range:a_l1")
+        self.assertIsNone(_validate(_realistic_registers(current=130000)))
+
+    # Skip-fallback (inf bounds): 1500 A passes but a current MSW sentinel is
+    # still rejected (the overflow sentinel is model-independent and always runs).
+    def test_validator_skip_fallback_sentinel_still_applies(self):
+        regs = _realistic_registers(current=1_500_000)
+        self.assertIsNone(
+            _validate(regs, max_phase_current_a=float("inf"), max_system_current_a=float("inf")),
+        )
+        regs[OFF_A_L1] = 0xFFFF
+        regs[OFF_A_L1 + 1] = 0x7FFF
+        self.assertEqual(
+            _validate(regs, max_phase_current_a=float("inf"), max_system_current_a=float("inf")),
+            "sentinel:a_l1",
+        )
 
 
 if __name__ == "__main__":
