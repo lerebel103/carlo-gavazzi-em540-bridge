@@ -1,7 +1,13 @@
 import unittest
 from unittest.mock import patch
 
-from app.carlo_gavazzi.meter_data import MeterData, OtherEnergies, PhaseData, SystemData
+from app.carlo_gavazzi.meter_data import (
+    MeterData,
+    OtherEnergies,
+    PhaseData,
+    SystemData,
+    model_name_from_device_type,
+)
 from tests.carlo_gavazzi.em540_data_test import (
     build_dynamic_registers,
     build_energy_registers,
@@ -431,6 +437,52 @@ class TestMeterDataUpdateFromFrame(unittest.TestCase):
         with patch.object(md.frame, "remap_registers", wraps=md.frame.remap_registers) as mock_remap:
             md.update_from_frame()
             mock_remap.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# TestModelNameFromDeviceType – shared device-type -> model mapping
+# ---------------------------------------------------------------------------
+
+
+class TestModelNameFromDeviceType(unittest.TestCase):
+    """The factored device-type mapping shared with the master's model detection."""
+
+    def test_em540_range(self):
+        """Device type ids 1744..1763 map to EM540 (both ends inclusive)."""
+        self.assertEqual(model_name_from_device_type(1744), "EM540")
+        self.assertEqual(model_name_from_device_type(1763), "EM540")
+        self.assertEqual(model_name_from_device_type(1750), "EM540")
+
+    def test_em530_ids(self):
+        """Device type ids 2096 and 1956 map to EM530."""
+        self.assertEqual(model_name_from_device_type(2096), "EM530")
+        self.assertEqual(model_name_from_device_type(1956), "EM530")
+
+    def test_unrecognized_id(self):
+        """An unrecognized device type id maps to the empty string."""
+        self.assertEqual(model_name_from_device_type(9999), "")
+        self.assertEqual(model_name_from_device_type(0), "")
+        self.assertEqual(model_name_from_device_type(1743), "")
+        self.assertEqual(model_name_from_device_type(1764), "")
+
+    def test_model_number_uses_helper(self):
+        """MeterData.model_number returns the same strings as the helper.
+
+        The 0x000B register is seeded directly; other static fields are left at
+        their realistic defaults so no synthetic L-L overflow is introduced.
+        """
+        cases = {1744: "EM540", 1763: "EM540", 2096: "EM530", 1956: "EM530", 9999: ""}
+        for device_type_id, expected in cases.items():
+            md = MeterData()
+            md.frame.static_reg_map[0x000B].values = [device_type_id]
+            self.assertEqual(md.model_number, expected, msg=f"device type {device_type_id}")
+            self.assertEqual(md.model_number, model_name_from_device_type(device_type_id))
+
+    def test_model_number_empty_register(self):
+        """A missing/empty 0x000B register yields '' (unchanged behaviour)."""
+        md = MeterData()
+        md.frame.static_reg_map[0x000B].values = [0]
+        self.assertEqual(md.model_number, "")
 
 
 if __name__ == "__main__":

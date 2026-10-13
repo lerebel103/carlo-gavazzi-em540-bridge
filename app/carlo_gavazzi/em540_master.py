@@ -14,6 +14,7 @@ from pymodbus.exceptions import ModbusIOException
 
 from app.carlo_gavazzi.em540_data import (
     _DYNAMIC_PRIMARY_BLOCK_ADDR,
+    _EM530_STATIC_REGISTER_SPECS,
     _ENERGY_BLOCK_ADDR,
     ENERGY_BLOCK_TOTAL_SIZE,
     MEASUREMENT_MODE_BIDIRECTIONAL,
@@ -25,6 +26,7 @@ from app.carlo_gavazzi.em540_data import (
     REG_WRONG_CONNECTION_BLOCK,
     WRONG_CONNECTION_LABELS,
     WRONG_CONNECTION_STATUS_OFFSET,
+    _build_register_map,
     describe_register_value,
 )
 from app.carlo_gavazzi.frame_validation import (
@@ -37,7 +39,7 @@ from app.carlo_gavazzi.frame_validation import (
     compute_em530_current_bounds,
     validate_primary_frame,
 )
-from app.carlo_gavazzi.meter_data import MeterData, _convert_from_registers_little
+from app.carlo_gavazzi.meter_data import MeterData, _convert_from_registers_little, model_name_from_device_type
 
 # CT ratio register (EM530-only); UINT32, 2 words, LSW->MSW. See
 # frame_validation.compute_em530_current_bounds for the spec citation.
@@ -565,13 +567,23 @@ class Em540Master:
                     fresh_static_read = True
                     # Keep both buffers aligned so skipped reads in dynamic maps keep prior values.
                     self._copy_meter_data(self._front_data, self._back_data)
+                    # Detect the meter model from the just-read Device Type
+                    # register (0x000B), log it, set is_em530 on BOTH frames, and
+                    # — for an EM530 — read the CT-ratio register (0x1003) so the
+                    # bounds recompute below sees live CT data on FIRST connect.
+                    # Runs ONLY here on the static-read path, never on the tick.
+                    await self._detect_and_apply_model()
                     # SINGLE refresh point for the EM530 CT-ratio-aware current
-                    # bounds. The CT register (0x1003) is static and only read
-                    # here (when not self._static_data_valid); an ordinary
-                    # reconnect keeps _static_data_valid True and does NOT re-read
-                    # it. If a future change forces a static re-read on reconnect,
-                    # it MUST call _recompute_effective_current_bounds() again so
-                    # the cached bounds stay in sync.
+                    # bounds. The model (is_em530) and the CT register (0x1003)
+                    # are set immediately above by _detect_and_apply_model(), so
+                    # the recompute sees the correct model/CT ratio. The CT
+                    # register is static and only read here (when not
+                    # self._static_data_valid); an ordinary reconnect keeps
+                    # _static_data_valid True and does NOT re-run detection or
+                    # re-read it. If a future change forces a static re-read on
+                    # reconnect, it MUST re-run _detect_and_apply_model() AND
+                    # _recompute_effective_current_bounds() so the cached model
+                    # and bounds stay in sync.
                     self._recompute_effective_current_bounds()
             else:
                 fresh_static_read = False
@@ -809,6 +821,72 @@ class Em540Master:
         """
         with self._stats.lock:
             self._stats.read_failed_total += 1
+
+    async def _detect_and_apply_model(self) -> None:
+        """Detect the meter model from Device Type (0x000B) and apply it.
+
+        Runs exactly once per process, on the first successful connect (the
+        static-read path), immediately before _recompute_effective_current_bounds().
+        NEVER on the 10Hz tick path. The register DECODE path and the 0x000B
+        Device Type overlay are untouched: this only reads the already-fetched
+        Device Type value and, for an EM530, issues one targeted extra read of
+        the CT-ratio register.
+
+        Steps:
+        1. Read the Device Type id from the just-read static block and resolve
+           the model name (shared mapping with MeterData.model_number).
+        2. Log the model at INFO (raw id shown); WARNING + stated EM540 fallback
+           for an unrecognized/empty id.
+        3. For an EM530: set is_em530 on BOTH frames, add the EM530-only 0x1003
+           register to BOTH static maps, then read 0x1003 from the device and
+           copy it into BOTH buffers. A 0x1003 read failure is non-fatal (logged
+           WARNING; the recompute then takes the (inf, inf) skip so the overflow
+           sentinel still guards the frame).
+        4. For EM540 / unrecognized: leave is_em530 False and the maps untouched,
+           so EM540 behaviour is byte-for-byte identical to before this change.
+        """
+        front_frame = self._front_data.frame
+        device_type_reg = front_frame.static_reg_map.get(0x000B)
+        device_type_id: int | None = (
+            device_type_reg.values[0] if device_type_reg is not None and device_type_reg.values else None
+        )
+
+        model = model_name_from_device_type(device_type_id) if device_type_id is not None else ""
+
+        if model:
+            logger.info("Detected meter model: %s (device type %d)", model, device_type_id)
+        else:
+            logger.warning(
+                "Unrecognized meter device type %r; treating as EM540 "
+                "(direct input, current magnitude bound 130/390 A).",
+                device_type_id,
+            )
+
+        if model != "EM530":
+            # EM540 / unrecognized: nothing to change. is_em530 stays False, no
+            # 0x1003 read, bounds remain the configured 130/390 A.
+            return
+
+        # EM530 detected. Make BOTH frames EM530-shaped before the extra read so
+        # a later per-tick buffer swap can never surface a frame that is EM530 in
+        # flag but missing the 0x1003 register (or vice versa).
+        for frame in (front_frame, self._back_data.frame):
+            frame.is_em530 = True
+            if _EM530_CT_RATIO_REG not in frame.static_reg_map:
+                frame.static_reg_map.update(_build_register_map(_EM530_STATIC_REGISTER_SPECS))
+
+        # One-time targeted read of the CT-ratio register into the front frame,
+        # then mirror the value into both buffers via the established
+        # both-buffers-consistent mutation path. On failure, leave 0x1003
+        # empty/all-zero so _recompute_effective_current_bounds() takes the
+        # (inf, inf) skip; do NOT fail the connection over it.
+        if await self._read_registers(front_frame.static_reg_map, reg_addrs=(_EM530_CT_RATIO_REG,)):
+            self._set_config_register(_EM530_CT_RATIO_REG, front_frame.static_reg_map[_EM530_CT_RATIO_REG].values)
+        else:
+            logger.warning(
+                "EM530 detected but failed to read CT ratio register 0x1003; "
+                "current magnitude bound disabled (overflow sentinel still applies)."
+            )
 
     def _recompute_effective_current_bounds(self) -> None:
         """Recompute the cached effective per-phase / system current bounds.

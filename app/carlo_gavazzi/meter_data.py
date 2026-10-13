@@ -36,6 +36,25 @@ def _fast_int64_from_regs_le(registers: list[int], offset: int) -> int:
     return struct.unpack(">q", struct.pack(">4H", r3, r2, r1, r0))[0]
 
 
+def model_name_from_device_type(device_type_id: int) -> str:
+    """Map a Device Type register (0x000B) id to a model name.
+
+    Authoritative mapping (Carlo Gavazzi EM500_CPP_Mod_V1.3):
+    - 1744-1763: EM540
+    - 2096, 1956: EM530
+    - anything else: "" (unrecognized)
+
+    Factored out so both ``MeterData.model_number`` and the master's live
+    model-detection path share the same device-type ids (no duplicated magic
+    numbers).
+    """
+    if 1744 <= device_type_id <= 1763:
+        return "EM540"
+    if device_type_id in (2096, 1956):
+        return "EM530"
+    return ""
+
+
 class SystemData:
     def __init__(self):
         self.line_neutral_voltage: float = 0.0
@@ -265,13 +284,7 @@ class MeterData:
         if device_type_reg is None or not device_type_reg.values:
             return ""
 
-        device_type_id = device_type_reg.values[0]
-        if 1744 <= device_type_id <= 1763:
-            return "EM540"
-        elif device_type_id in [2096, 1956]:
-            return "EM530"
-        else:
-            return ""
+        return model_name_from_device_type(device_type_reg.values[0])
 
     @property
     def static_data_valid(self) -> bool:

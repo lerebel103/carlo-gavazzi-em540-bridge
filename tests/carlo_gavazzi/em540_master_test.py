@@ -1324,5 +1324,191 @@ class TestFrameValidationIntegration(unittest.TestCase):
         self.assertEqual(master._effective_max_system_current_a, 390.0)
 
 
+def _encode_uint32_le(value):
+    """Encode a UINT32 as little-endian word order (LSW first)."""
+    v = value & 0xFFFFFFFF
+    return [v & 0xFFFF, (v >> 16) & 0xFFFF]
+
+
+class TestModelDetection(unittest.TestCase):
+    """Live model detection on the first-connect static-read path.
+
+    Validates the fix for the dead EM530 CT-aware current bound: wiring up
+    is_em530 from the Device Type register (0x000B) so the EM530 code paths are
+    reached, exactly once per process, on connect and never on the tick.
+    """
+
+    @patch("app.carlo_gavazzi.em540_master.AsyncModbusTcpClient")
+    def _build(self, mock_tcp_cls, *, device_type_id, ct_ratio_raw=None, ct_read_error=False):
+        """Build a master with a connect-driven mock client.
+
+        ``device_type_id`` is returned for register 0x000B (and 0x5012 Device
+        State / any single-register read reuses the generic realistic default).
+        ``ct_ratio_raw`` (if not None) is the raw 0x1003 value returned for an
+        EM530. ``ct_read_error`` forces the 0x1003 read to return an error. The
+        set of addresses actually requested is captured in ``requested_addrs``.
+        """
+        mock_client = MagicMock()
+        mock_client.connect = AsyncMock()
+        mock_client.close = MagicMock()
+        type(mock_client).connected = PropertyMock(return_value=True)
+
+        requested_addrs = []
+
+        async def _read(address, count=1, device_id=None):
+            requested_addrs.append(address)
+            result = MagicMock()
+            if address == 0x1003 and ct_read_error:
+                result.isError.return_value = True
+                result.registers = []
+                return result
+            result.isError.return_value = False
+            if address == 0x000B:
+                # Device Type is a single register (0x000B); overlay invariant
+                # holds because the static read never populates the L3-L1 high
+                # word here.
+                result.registers = [device_type_id] * count
+            elif address == 0x1003:
+                regs = _encode_uint32_le(ct_ratio_raw if ct_ratio_raw is not None else 0)
+                result.registers = regs[:count] if count <= len(regs) else regs + [0] * (count - len(regs))
+            else:
+                result.registers = [0] * count
+            return result
+
+        mock_client.read_holding_registers = AsyncMock(side_effect=_read)
+        mock_tcp_cls.return_value = mock_client
+
+        config = _make_config(frame_validation_enabled=True)
+        master = Em540Master(config)
+        master._client = mock_client
+        # Force the first-connect static-read path (detection runs here).
+        master._static_data_valid = False
+        master._requested_addrs = requested_addrs  # expose for assertions
+        return master, mock_client
+
+    def test_em530_id_2096_end_to_end(self):
+        """EM530 id 2096: is_em530 True on both frames, 0x1003 read, CT bound live."""
+        master, _client = self._build(device_type_id=2096, ct_ratio_raw=2000)
+
+        with self.assertLogs("Em540Master", level="INFO") as cm:
+            asyncio.run(master.connect())
+
+        self.assertTrue(master._front_data.frame.is_em530)
+        self.assertTrue(master._back_data.frame.is_em530)
+        self.assertIn(0x1003, master._front_data.frame.static_reg_map)
+        self.assertIn(0x1003, master._back_data.frame.static_reg_map)
+        self.assertIn(0x1003, master._requested_addrs)
+        # CT ratio raw 2000 -> CT 200.0 -> phase bound 2000 A, system 6000 A.
+        self.assertEqual(master._effective_max_phase_current_a, 2000.0)
+        self.assertEqual(master._effective_max_system_current_a, 6000.0)
+        self.assertTrue(any("Detected meter model: EM530 (device type 2096)" in m for m in cm.output))
+        self.assertFalse(any("Unrecognized" in m for m in cm.output))
+
+    def test_em530_id_1956_end_to_end(self):
+        """EM530 id 1956 maps to EM530 identically to 2096."""
+        master, _client = self._build(device_type_id=1956, ct_ratio_raw=2000)
+
+        with self.assertLogs("Em540Master", level="INFO") as cm:
+            asyncio.run(master.connect())
+
+        self.assertTrue(master._front_data.frame.is_em530)
+        self.assertTrue(master._back_data.frame.is_em530)
+        self.assertEqual(master._effective_max_phase_current_a, 2000.0)
+        self.assertTrue(any("Detected meter model: EM530 (device type 1956)" in m for m in cm.output))
+
+    def test_em540_id_1744(self):
+        """EM540 id: is_em530 False, no 0x1003 read, bounds stay 130/390."""
+        master, _client = self._build(device_type_id=1744)
+
+        with self.assertLogs("Em540Master", level="INFO") as cm:
+            asyncio.run(master.connect())
+
+        self.assertFalse(master._front_data.frame.is_em530)
+        self.assertFalse(master._back_data.frame.is_em530)
+        self.assertNotIn(0x1003, master._front_data.frame.static_reg_map)
+        self.assertNotIn(0x1003, master._back_data.frame.static_reg_map)
+        self.assertNotIn(0x1003, master._requested_addrs)
+        self.assertEqual(master._effective_max_phase_current_a, 130.0)
+        self.assertEqual(master._effective_max_system_current_a, 390.0)
+        self.assertTrue(any("Detected meter model: EM540 (device type 1744)" in m for m in cm.output))
+
+    def test_unrecognized_device_type(self):
+        """Unrecognized id: WARNING with raw id + EM540 fallback, bounds 130/390."""
+        master, _client = self._build(device_type_id=9999)
+
+        with self.assertLogs("Em540Master", level="WARNING") as cm:
+            asyncio.run(master.connect())
+
+        self.assertFalse(master._front_data.frame.is_em530)
+        self.assertNotIn(0x1003, master._requested_addrs)
+        self.assertEqual(master._effective_max_phase_current_a, 130.0)
+        self.assertEqual(master._effective_max_system_current_a, 390.0)
+        self.assertTrue(any("Unrecognized meter device type 9999" in m for m in cm.output))
+
+    def test_empty_device_type(self):
+        """Device type 0 (empty/zero): treated as unrecognized -> EM540 fallback."""
+        master, _client = self._build(device_type_id=0)
+
+        with self.assertLogs("Em540Master", level="WARNING") as cm:
+            asyncio.run(master.connect())
+
+        self.assertFalse(master._front_data.frame.is_em530)
+        self.assertEqual(master._effective_max_phase_current_a, 130.0)
+        self.assertTrue(any("Unrecognized meter device type 0" in m for m in cm.output))
+
+    def test_em530_ct_read_failure_non_fatal(self):
+        """EM530 but 0x1003 read fails: connect succeeds, WARNING, bounds skip (inf)."""
+        master, _client = self._build(device_type_id=2096, ct_read_error=True)
+
+        with self.assertLogs("Em540Master", level="WARNING") as cm:
+            asyncio.run(master.connect())
+
+        # Connection completed: static data valid and failure counter reset.
+        self.assertTrue(master._static_data_valid)
+        self.assertEqual(master._consecutive_connect_failures, 0)
+        self.assertTrue(master._front_data.frame.is_em530)
+        self.assertEqual(master._effective_max_phase_current_a, float("inf"))
+        self.assertEqual(master._effective_max_system_current_a, float("inf"))
+        self.assertTrue(any("failed to read CT ratio register 0x1003" in m for m in cm.output))
+
+    def test_both_buffers_consistent_after_em530_connect(self):
+        """Front and back frames agree on is_em530, 0x1003 membership, and values."""
+        master, _client = self._build(device_type_id=2096, ct_ratio_raw=2000)
+        asyncio.run(master.connect())
+
+        front = master._front_data.frame
+        back = master._back_data.frame
+        self.assertEqual(front.is_em530, back.is_em530)
+        self.assertEqual(0x1003 in front.static_reg_map, 0x1003 in back.static_reg_map)
+        self.assertEqual(
+            front.static_reg_map[0x1003].values,
+            back.static_reg_map[0x1003].values,
+        )
+        self.assertEqual(front.static_reg_map[0x1003].values, _encode_uint32_le(2000))
+
+    def test_reconnect_skips_detection_and_keeps_bounds(self):
+        """A reconnect (static already valid) does not re-run detection."""
+        master, client = self._build(device_type_id=2096, ct_ratio_raw=2000)
+        asyncio.run(master.connect())
+
+        self.assertTrue(master._front_data.frame.is_em530)
+        phase_bound = master._effective_max_phase_current_a
+        system_bound = master._effective_max_system_current_a
+
+        # Second connect: static data already valid -> static read + detection
+        # block skipped. Record addresses requested on the reconnect only.
+        client.read_holding_registers.reset_mock()
+        master._requested_addrs.clear()
+        asyncio.run(master.connect())
+
+        # No Device Type / CT re-read for detection on the reconnect.
+        self.assertNotIn(0x000B, master._requested_addrs)
+        self.assertNotIn(0x1003, master._requested_addrs)
+        # Model + cached bounds persist unchanged.
+        self.assertTrue(master._front_data.frame.is_em530)
+        self.assertEqual(master._effective_max_phase_current_a, phase_bound)
+        self.assertEqual(master._effective_max_system_current_a, system_bound)
+
+
 if __name__ == "__main__":
     unittest.main()
