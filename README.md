@@ -125,7 +125,9 @@ If **any** validated quantity fails, the **whole frame is rejected** (atomic): t
 are retained downstream and in Home Assistant, nothing is folded into the daily extrema, and the
 freshness timestamp is not advanced. The rejection does **not** force the downstream circuit breaker
 open — a single bad frame among good ones is absorbed, and only *persistent* bad frames let the
-staleness watchdog and breaker open naturally (identical to persistent bad reads). Rejected frames
+staleness watchdog and breaker open naturally. This differs from ordinary bad reads
+(transport/length/parse failures), which signal `read_failed()` and open the downstream breaker on
+the first failure; invalid-frame rejections instead rely solely on staleness. Rejected frames
 are counted by the **RS485 Invalid Frames** diagnostic sensor, which is distinct from **RS485 Master
 Read Failures** (transport/length/parse failures); a rejected frame increments both, so Invalid
 Frames isolates the parsed-but-rejected subset.
