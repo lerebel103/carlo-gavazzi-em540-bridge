@@ -139,11 +139,46 @@ class TestFrameValidationPure(unittest.TestCase):
             self.assertEqual(_validate(regs), f"sentinel:{slug}")
 
     # 3. Every INT32 instantaneous variable in the spec mapping is sentinel-checked.
-    # Enumerate the full _PRIMARY_INT32_MSW table (the core spec register map) so
-    # a missing/mistyped offset or slug fails the suite, not just a sampled subset.
+    # The expected (MSW register index, slug) pairs are declared INDEPENDENTLY here
+    # from literal spec addresses (EM500_CPP_Mod_V1.3 §4.1), NOT read from the
+    # production _PRIMARY_INT32_MSW table — so a mistyped address or slug in the
+    # production table fails this test instead of being masked by circular reuse.
+    _EXPECTED_INT32_MSW = (
+        (0x01, "v_l1n"),
+        (0x03, "v_l2n"),
+        (0x05, "v_l3n"),
+        (0x07, "v_l1l2"),
+        (0x09, "v_l2l3"),
+        (0x0B, "v_l3l1"),
+        (0x0D, "a_l1"),
+        (0x0F, "a_l2"),
+        (0x11, "a_l3"),
+        (0x13, "w_l1"),
+        (0x15, "w_l2"),
+        (0x17, "w_l3"),
+        (0x19, "va_l1"),
+        (0x1B, "va_l2"),
+        (0x1D, "va_l3"),
+        (0x1F, "var_l1"),
+        (0x21, "var_l2"),
+        (0x23, "var_l3"),
+        (0x25, "v_ln_sys"),
+        (0x27, "v_ll_sys"),
+        (0x29, "w_sys"),
+        (0x2B, "va_sys"),
+        (0x2D, "var_sys"),
+    )
+
+    def test_primary_int32_msw_table_matches_spec(self):
+        # The production table must exactly equal the independently-declared spec
+        # map (same entries, same order) — guards against a drifted/typo'd table.
+        self.assertEqual(tuple(_PRIMARY_INT32_MSW), self._EXPECTED_INT32_MSW)
+
     def test_sentinel_covers_all_int32_instants(self):
-        self.assertEqual(len(_PRIMARY_INT32_MSW), 23)
-        for msw_idx, slug in _PRIMARY_INT32_MSW:
+        # Sweep from the INDEPENDENT expected map (not the production table) so a
+        # production typo cannot both pick the index and define the expectation.
+        self.assertEqual(len(self._EXPECTED_INT32_MSW), 23)
+        for msw_idx, slug in self._EXPECTED_INT32_MSW:
             regs = _realistic_registers()
             regs[msw_idx] = 0x7FFF
             self.assertEqual(
@@ -219,6 +254,41 @@ class TestFrameValidationPure(unittest.TestCase):
     def test_ll_voltage_boundary_passes(self):
         regs = _realistic_registers(v_ll=6250)  # 625.0 V passes
         self.assertIsNone(_validate(regs))
+
+    # 8b. Each range-checked channel is validated INDEPENDENTLY. Set exactly ONE
+    # channel out of range (all others realistic/in-range) and assert that
+    # channel's specific reason slug, so the L2/L3/system branches are exercised
+    # and a wrong attribute or reason in any single branch fails the suite.
+    def test_each_channel_range_checked_independently(self):
+        # (LSW offset, out-of-range INT32 raw value, expected reason slug).
+        # Values chosen to breach only the targeted channel's bound.
+        OVER_CURRENT = 150000  # 150.0 A  (> 130 A)
+        OVER_V_LN = 4000  # 400.0 V  (> 360 V)
+        OVER_V_LL = 7000  # 700.0 V  (> 625 V)
+        cases = (
+            (OFF_A_L1, OVER_CURRENT, "range:a_l1"),
+            (OFF_A_L2, OVER_CURRENT, "range:a_l2"),
+            (OFF_A_L3, OVER_CURRENT, "range:a_l3"),
+            (OFF_V_L1N, OVER_V_LN, "range:v_ln_l1"),
+            (OFF_V_L2N, OVER_V_LN, "range:v_ln_l2"),
+            (OFF_V_L3N, OVER_V_LN, "range:v_ln_l3"),
+            (OFF_V_LN_SYS, OVER_V_LN, "range:v_ln_sys"),
+            (OFF_V_L1L2, OVER_V_LL, "range:v_ll_l1"),
+            (OFF_V_L2L3, OVER_V_LL, "range:v_ll_l2"),
+            (OFF_V_L3L1, OVER_V_LL, "range:v_ll_l3"),
+            (OFF_V_LL_SYS, OVER_V_LL, "range:v_ll_sys"),
+        )
+        for off, raw, expected in cases:
+            regs = _realistic_registers()  # all channels in range
+            _set_int32(regs, off, raw)  # breach exactly one channel
+            # System L-N/L-L are decoded from their own system registers, so a
+            # per-phase override does not change the system value and vice versa;
+            # each case therefore isolates a single validator branch.
+            self.assertEqual(
+                _validate(regs),
+                expected,
+                msg=f"offset {hex(off)} raw {raw} expected {expected}, got {_validate(regs)!r}",
+            )
 
     # 9. Frequency out of range.
     def test_frequency_out_of_range_rejected(self):

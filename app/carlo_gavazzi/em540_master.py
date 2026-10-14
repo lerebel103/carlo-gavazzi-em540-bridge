@@ -913,13 +913,15 @@ class Em540Master:
         else:
             logger.warning(
                 "Unrecognized meter device type %r; treating as EM540 "
-                "(direct input, current magnitude bound 130/390 A).",
+                "(direct input, current magnitude bounds phase<=%s A, An<=%s A).",
                 device_type_id,
+                self._max_phase_current_a,
+                self._max_system_current_a,
             )
 
         if model != "EM530":
             # EM540 / unrecognized: nothing to change. is_em530 stays False, no
-            # 0x1003 read, bounds remain the configured 130/390 A.
+            # 0x1003 read, bounds remain the configured EM540 values.
             return
 
         # EM530 detected. Make BOTH frames EM530-shaped before the extra read so
