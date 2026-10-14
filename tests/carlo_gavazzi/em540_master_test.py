@@ -1137,6 +1137,11 @@ class TestFrameValidationIntegration(unittest.TestCase):
         listener.new_data = AsyncMock()
         master.add_listener(listener)
 
+        # Anchor the "last accepted frame" to the patched clock so the elapsed
+        # time at this single rejection is 0 (< max_consecutive_invalid_s): a
+        # lone bad frame must be ABSORBED, not fail closed.
+        master._last_accepted_frame_monotonic = 999.0
+
         client.read_holding_registers = AsyncMock(side_effect=self._tick_responses(master, regs))
         with patch("app.carlo_gavazzi.em540_master.time.monotonic", return_value=999.0):
             with patch.object(master._condition, "notify"):
@@ -1167,9 +1172,14 @@ class TestFrameValidationIntegration(unittest.TestCase):
         self._set_int32(regs, 0x0C, 150000)  # 150 A on L1
 
         front_before = master._front_data
+        # Lone rejection: anchor to the patched clock so elapsed is 0 and the
+        # frame is absorbed (no fail-closed) rather than depending on wall-clock
+        # proximity to construction time.
+        master._last_accepted_frame_monotonic = 999.0
         client.read_holding_registers = AsyncMock(side_effect=self._tick_responses(master, regs))
-        with patch.object(master._condition, "notify"):
-            result = asyncio.run(master.acquire_data())
+        with patch("app.carlo_gavazzi.em540_master.time.monotonic", return_value=999.0):
+            with patch.object(master._condition, "notify"):
+                result = asyncio.run(master.acquire_data())
 
         self.assertFalse(result)
         self.assertEqual(master._stats.invalid_frame_total, 1)
@@ -1389,9 +1399,12 @@ class TestFrameValidationIntegration(unittest.TestCase):
         regs = self._realistic_current(2_000_001)  # 2000.001 A
 
         front_before = master._front_data
+        # Lone rejection absorbed: anchor to the patched clock (elapsed 0 < window).
+        master._last_accepted_frame_monotonic = 1600.0
         client.read_holding_registers = AsyncMock(side_effect=self._tick_responses(master, regs))
-        with patch.object(master._condition, "notify"):
-            result = asyncio.run(master.acquire_data())
+        with patch("app.carlo_gavazzi.em540_master.time.monotonic", return_value=1600.0):
+            with patch.object(master._condition, "notify"):
+                result = asyncio.run(master.acquire_data())
 
         self.assertFalse(result)
         self.assertEqual(master._stats.invalid_frame_total, 1)
@@ -1430,9 +1443,12 @@ class TestFrameValidationIntegration(unittest.TestCase):
         self.assertEqual(master._effective_max_system_current_a, 30.0)
 
         regs = self._realistic_current(150000)  # 150 A > 10 A bound
+        # Lone rejection absorbed: anchor to the patched clock (elapsed 0 < window).
+        master._last_accepted_frame_monotonic = 1600.0
         client.read_holding_registers = AsyncMock(side_effect=self._tick_responses(master, regs))
-        with patch.object(master._condition, "notify"):
-            self.assertFalse(asyncio.run(master.acquire_data()))
+        with patch("app.carlo_gavazzi.em540_master.time.monotonic", return_value=1600.0):
+            with patch.object(master._condition, "notify"):
+                self.assertFalse(asyncio.run(master.acquire_data()))
         self.assertEqual(master._stats.last_invalid_frame_reason, "range:a_l1")
 
     # 19. EM540 regression: effective bounds remain 130/390 (is_em530 False).
