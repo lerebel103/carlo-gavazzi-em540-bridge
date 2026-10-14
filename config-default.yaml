@@ -50,8 +50,11 @@ em540_master:
   # Upstream frame validation. Each parsed frame is checked against the meter's
   # documented overflow sentinel and physical limits before it is published or
   # folded into daily min/max. A failing frame is dropped (last-good value is
-  # retained) and counted as an "RS485 Invalid Frames" diagnostic; persistent
-  # failures let the staleness watchdog and downstream breaker open naturally.
+  # retained) and counted as an "RS485 Invalid Frames" diagnostic. A lone/
+  # transient bad frame is absorbed; once rejections persist past
+  # max_consecutive_invalid_s (below) the master directly fails closed (opens the
+  # downstream breaker, marks HA unavailable), independent of the staleness
+  # watchdog.
   frame_validation:
     enabled: true
     # Reject if an INT32 instantaneous variable's MSW == 0x7FFF

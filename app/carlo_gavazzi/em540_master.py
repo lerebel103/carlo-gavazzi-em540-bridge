@@ -78,10 +78,12 @@ class Em540MasterStats:
         # frame validation (overflow sentinel or out-of-physical-range). Distinct
         # from read_failed_total (transport/length/parse failures). A rejected
         # frame ALSO increments read_failed_total (via _count_read_failure, from
-        # the freshness standpoint it is "no fresh good frame this tick") but,
-        # unlike a transport failure, does NOT notify listeners (no forced
-        # circuit-breaker trip); this counter isolates the parsed-but-invalid
-        # subset for diagnostics.
+        # the freshness standpoint it is "no fresh good frame this tick"). Unlike
+        # a transport failure, a lone/transient rejected frame is absorbed WITHOUT
+        # notifying listeners (no forced breaker trip); only once rejections
+        # persist past max_consecutive_invalid_s does the gate notify listeners
+        # and fail closed. This counter isolates the parsed-but-invalid subset
+        # for diagnostics regardless of which path recorded the read failure.
         self.invalid_frame_total: int = 0
         # Last rejection reason (short string) for logging/potential future use;
         # None until the first rejection. Single-writer (master loop), read without

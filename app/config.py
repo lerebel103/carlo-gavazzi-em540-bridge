@@ -38,7 +38,10 @@ class ConfigError(Exception):
 class FrameValidationConfig:
     # Master-side spec-based validation of each parsed upstream frame. When a
     # frame fails, it is dropped (last-good retained) and counted as an invalid
-    # frame; the staleness watchdog/breaker open naturally if failures persist.
+    # frame. A lone/transient rejection is absorbed; once rejections persist past
+    # max_consecutive_invalid_s (see below) the master directly notifies
+    # listeners so the downstream breaker and Home Assistant fail closed —
+    # independent of the em540_master.health_max_stale_s watchdog.
     enabled: bool = True
     # Overflow-sentinel check (EM500_CPP_Mod_V1.3 §3.3: INT32 MSW == 0x7FFFh).
     # Always recommended; togglable, defaults on.
