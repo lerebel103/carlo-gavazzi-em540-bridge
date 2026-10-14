@@ -783,15 +783,16 @@ class Em540Master:
         # frame is never folded into DailyExtrema, never advances the freshness
         # timestamp, and leaves _front_data (last-good) in place.
         #
-        # A rejection counts the read failure (keeping read_failed_total
-        # authoritative) but deliberately does NOT notify listeners via
-        # _notify_listeners_read_failed(): the listeners' read_failed() opens
-        # their circuit breakers / marks HA unavailable immediately, which would
-        # turn a single transient bad frame into an instant outage. Instead we
-        # just withhold the buffer swap and the freshness-timestamp advance, so
-        # downstream consumers retain the last-good snapshot and their own
-        # staleness timeouts (and the master freshness watchdog) open the circuit
-        # NATURALLY only if bad frames persist.
+        # A rejection always counts the read failure (keeping read_failed_total
+        # authoritative) and withholds the buffer swap + freshness-timestamp
+        # advance so consumers retain the last-good snapshot. Whether it also
+        # notifies listeners (read_failed() -> downstream breaker open + HA
+        # unavailable) is time-bounded: a lone/transient bad frame is absorbed
+        # WITHOUT notifying (so one bad frame is never an instant outage), but
+        # once no accepted frame has arrived for _max_consecutive_invalid_s the
+        # rejection fails closed by notifying listeners. See the gate body below
+        # for the exact anchor logic; it is independent of the freshness
+        # watchdog and works even when health_max_stale_s <= 0.
         if is_ok and self._validation_enabled:
             reason = self._validate_frame(self._back_data)
             if reason is not None:
@@ -1046,9 +1047,12 @@ class Em540Master:
 
         Mirrors _count_read_failure: increments the dedicated invalid-frame
         counter and stores the last reason under the stats lock (uncontended on
-        the hot path). The caller also calls _count_read_failure() for the same
+        the hot path). The caller also records a read failure for the same
         rejected frame (a rejected frame is "no fresh good frame this tick" for
-        freshness purposes), but does NOT notify listeners.
+        freshness purposes) — directly via _count_read_failure() while the
+        rejection is still being absorbed, or via _notify_listeners_read_failed()
+        once persistent rejections have crossed _max_consecutive_invalid_s and
+        the gate fails closed. See the validation gate in acquire_data().
         """
         with self._stats.lock:
             self._stats.invalid_frame_total += 1
