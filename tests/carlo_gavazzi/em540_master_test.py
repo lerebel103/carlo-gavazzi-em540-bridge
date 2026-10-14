@@ -45,6 +45,7 @@ def _make_config(**overrides):
         max_voltage_ll_v=fv_overrides.get("frame_validation_max_voltage_ll_v", 625.0),
         min_frequency_hz=fv_overrides.get("frame_validation_min_frequency_hz", 40.0),
         max_frequency_hz=fv_overrides.get("frame_validation_max_frequency_hz", 70.0),
+        max_consecutive_invalid_s=fv_overrides.get("frame_validation_max_consecutive_invalid_s", 5.0),
     )
     return SimpleNamespace(frame_validation=fv, **defaults)
 
@@ -1195,37 +1196,158 @@ class TestFrameValidationIntegration(unittest.TestCase):
         snap = master.daily_extrema.snapshot()
         self.assertAlmostEqual(snap["current_l1_max"], 10.0, places=2)
 
-    # 14. Breaker not forced; watchdog freezes on persistence.
-    def test_persistent_bad_frames_freeze_timestamp_single_bad_ignored(self):
+    # 14. Lone bad frame absorbed (no breaker); persistent rejections fail closed.
+    def test_persistent_bad_frames_fail_closed_single_bad_absorbed(self):
         master, client = self._build()
+        listener = MagicMock(spec=MeterDataListener)
+        listener.read_failed = AsyncMock()
+        listener.new_data = AsyncMock()
+        master.add_listener(listener)
+
         good = self._realistic()
         bad = self._realistic()
         bad[0x0C] = 0xFFFF
         bad[0x0D] = 0x7FFF
 
-        # One good frame advances the timestamp.
+        # One good frame advances the timestamp and arms the single-frame absorb.
         client.read_holding_registers = AsyncMock(side_effect=self._tick_responses(master, good))
         with patch("app.carlo_gavazzi.em540_master.time.monotonic", return_value=100.0):
             with patch.object(master._condition, "notify"):
                 self.assertTrue(asyncio.run(master.acquire_data()))
         self.assertEqual(master.last_frame_monotonic, 100.0)
 
-        # Several consecutive bad frames do not advance the timestamp (watchdog
-        # would open naturally) and never touch a breaker-trip path.
-        for _ in range(5):
+        # A lone bad frame WITHIN the 5.0s window is absorbed: no read_failed,
+        # last-good retained, freshness timestamp not advanced.
+        client.read_holding_registers = AsyncMock(side_effect=self._tick_responses(master, bad))
+        with patch("app.carlo_gavazzi.em540_master.time.monotonic", return_value=104.0):
+            with patch.object(master._condition, "notify"):
+                self.assertFalse(asyncio.run(master.acquire_data()))
+        listener.read_failed.assert_not_awaited()
+        self.assertEqual(master.last_frame_monotonic, 100.0)
+
+        # Persistent bad frames: once elapsed-since-last-accept crosses the 5.0s
+        # window the gate fails closed, notifying listeners on each reject while
+        # the timestamp stays frozen (last-good retained).
+        for _ in range(3):
             client.read_holding_registers = AsyncMock(side_effect=self._tick_responses(master, bad))
             with patch("app.carlo_gavazzi.em540_master.time.monotonic", return_value=200.0):
                 with patch.object(master._condition, "notify"):
                     self.assertFalse(asyncio.run(master.acquire_data()))
         self.assertEqual(master.last_frame_monotonic, 100.0)
-        self.assertEqual(master._stats.invalid_frame_total, 5)
+        self.assertEqual(listener.read_failed.await_count, 3)
+        self.assertEqual(master._stats.invalid_frame_total, 4)
 
-        # A subsequent good frame recovers in-process.
+        # A subsequent good frame recovers in-process and re-arms the absorb.
         client.read_holding_registers = AsyncMock(side_effect=self._tick_responses(master, good))
         with patch("app.carlo_gavazzi.em540_master.time.monotonic", return_value=300.0):
             with patch.object(master._condition, "notify"):
                 self.assertTrue(asyncio.run(master.acquire_data()))
         self.assertEqual(master.last_frame_monotonic, 300.0)
+
+        # After recovery, a lone bad frame is absorbed again (anchor reset).
+        prev_await_count = listener.read_failed.await_count
+        client.read_holding_registers = AsyncMock(side_effect=self._tick_responses(master, bad))
+        with patch("app.carlo_gavazzi.em540_master.time.monotonic", return_value=301.0):
+            with patch.object(master._condition, "notify"):
+                self.assertFalse(asyncio.run(master.acquire_data()))
+        self.assertEqual(listener.read_failed.await_count, prev_await_count)
+
+    # 14a. (Fix #1 a) A single bad frame after a good one does NOT fail closed.
+    def test_single_bad_frame_no_read_failed(self):
+        master, client = self._build()
+        listener = MagicMock(spec=MeterDataListener)
+        listener.read_failed = AsyncMock()
+        listener.new_data = AsyncMock()
+        master.add_listener(listener)
+
+        good = self._realistic()
+        bad = self._realistic()
+        bad[0x0C] = 0xFFFF
+        bad[0x0D] = 0x7FFF  # A L1 MSW sentinel
+
+        client.read_holding_registers = AsyncMock(side_effect=self._tick_responses(master, good))
+        with patch("app.carlo_gavazzi.em540_master.time.monotonic", return_value=1000.0):
+            with patch.object(master._condition, "notify"):
+                self.assertTrue(asyncio.run(master.acquire_data()))
+
+        client.read_holding_registers = AsyncMock(side_effect=self._tick_responses(master, bad))
+        with patch("app.carlo_gavazzi.em540_master.time.monotonic", return_value=1002.0):
+            with patch.object(master._condition, "notify"):
+                self.assertFalse(asyncio.run(master.acquire_data()))
+
+        listener.read_failed.assert_not_awaited()
+        self.assertEqual(master._stats.invalid_frame_total, 1)
+        # Exactly one read_failed_total increment for the single rejected frame.
+        self.assertEqual(master._stats.read_failed_total, 1)
+
+    # 14b. (Fix #1 b) Crossing the window DOES fail closed (breaker/HA).
+    def test_persistent_bad_frames_cross_window_read_failed(self):
+        # Shorten the window so the test does not depend on large time jumps.
+        master, client = self._build(frame_validation_max_consecutive_invalid_s=1.0)
+        listener = MagicMock(spec=MeterDataListener)
+        listener.read_failed = AsyncMock()
+        listener.new_data = AsyncMock()
+        master.add_listener(listener)
+
+        good = self._realistic()
+        bad = self._realistic()
+        bad[0x0C] = 0xFFFF
+        bad[0x0D] = 0x7FFF
+
+        client.read_holding_registers = AsyncMock(side_effect=self._tick_responses(master, good))
+        with patch("app.carlo_gavazzi.em540_master.time.monotonic", return_value=500.0):
+            with patch.object(master._condition, "notify"):
+                self.assertTrue(asyncio.run(master.acquire_data()))
+
+        # Elapsed 2.0s >= 1.0s window -> fail closed on this reject.
+        client.read_holding_registers = AsyncMock(side_effect=self._tick_responses(master, bad))
+        with patch("app.carlo_gavazzi.em540_master.time.monotonic", return_value=502.0):
+            with patch.object(master._condition, "notify"):
+                self.assertFalse(asyncio.run(master.acquire_data()))
+
+        listener.read_failed.assert_awaited_once()
+        # Still exactly one read_failed_total increment for this reject
+        # (_notify_listeners_read_failed does the single count).
+        self.assertEqual(master._stats.read_failed_total, 1)
+        self.assertEqual(master._stats.invalid_frame_total, 1)
+
+    # 14c. (Fix #1 c) An accepted frame resets the anchor so the next lone bad
+    # frame is absorbed again.
+    def test_accepted_frame_resets_window(self):
+        master, client = self._build(frame_validation_max_consecutive_invalid_s=1.0)
+        listener = MagicMock(spec=MeterDataListener)
+        listener.read_failed = AsyncMock()
+        listener.new_data = AsyncMock()
+        master.add_listener(listener)
+
+        good = self._realistic()
+        bad = self._realistic()
+        bad[0x0C] = 0xFFFF
+        bad[0x0D] = 0x7FFF
+
+        # Good -> bad (crosses) -> read_failed.
+        client.read_holding_registers = AsyncMock(side_effect=self._tick_responses(master, good))
+        with patch("app.carlo_gavazzi.em540_master.time.monotonic", return_value=10.0):
+            with patch.object(master._condition, "notify"):
+                self.assertTrue(asyncio.run(master.acquire_data()))
+        client.read_holding_registers = AsyncMock(side_effect=self._tick_responses(master, bad))
+        with patch("app.carlo_gavazzi.em540_master.time.monotonic", return_value=20.0):
+            with patch.object(master._condition, "notify"):
+                self.assertFalse(asyncio.run(master.acquire_data()))
+        self.assertEqual(listener.read_failed.await_count, 1)
+
+        # A good frame resets the anchor.
+        client.read_holding_registers = AsyncMock(side_effect=self._tick_responses(master, good))
+        with patch("app.carlo_gavazzi.em540_master.time.monotonic", return_value=21.0):
+            with patch.object(master._condition, "notify"):
+                self.assertTrue(asyncio.run(master.acquire_data()))
+
+        # Next lone bad frame WITHIN the window is absorbed again (no new notify).
+        client.read_holding_registers = AsyncMock(side_effect=self._tick_responses(master, bad))
+        with patch("app.carlo_gavazzi.em540_master.time.monotonic", return_value=21.5):
+            with patch.object(master._condition, "notify"):
+                self.assertFalse(asyncio.run(master.acquire_data()))
+        self.assertEqual(listener.read_failed.await_count, 1)
 
     # 15. Config toggle disables validation.
     def test_disabled_validation_publishes_sentinel_frame(self):
@@ -1508,6 +1630,103 @@ class TestModelDetection(unittest.TestCase):
         self.assertTrue(master._front_data.frame.is_em530)
         self.assertEqual(master._effective_max_phase_current_a, phase_bound)
         self.assertEqual(master._effective_max_system_current_a, system_bound)
+
+    @patch("app.carlo_gavazzi.em540_master.AsyncModbusTcpClient")
+    def _build_toggleable_ct(self, mock_tcp_cls, *, device_type_id, ct_ratio_raw):
+        """Build a master whose 0x1003 read fails until ``ct_ok`` is flipped True.
+
+        Returns ``(master, client, state)`` where ``state`` is a mutable dict with
+        a ``ct_ok`` flag and a captured ``requested_addrs`` list. This models a
+        transient first-connect CT read failure that recovers on a later connect.
+        """
+        mock_client = MagicMock()
+        mock_client.connect = AsyncMock()
+        mock_client.close = MagicMock()
+        type(mock_client).connected = PropertyMock(return_value=True)
+
+        state = {"ct_ok": False, "requested_addrs": []}
+
+        async def _read(address, count=1, device_id=None):
+            state["requested_addrs"].append(address)
+            result = MagicMock()
+            if address == 0x1003 and not state["ct_ok"]:
+                result.isError.return_value = True
+                result.registers = []
+                return result
+            result.isError.return_value = False
+            if address == 0x000B:
+                result.registers = [device_type_id] * count
+            elif address == 0x1003:
+                regs = _encode_uint32_le(ct_ratio_raw)
+                result.registers = regs[:count] if count <= len(regs) else regs + [0] * (count - len(regs))
+            else:
+                result.registers = [0] * count
+            return result
+
+        mock_client.read_holding_registers = AsyncMock(side_effect=_read)
+        mock_tcp_cls.return_value = mock_client
+
+        config = _make_config(frame_validation_enabled=True)
+        master = Em540Master(config)
+        master._client = mock_client
+        master._static_data_valid = False
+        return master, mock_client, state
+
+    def test_em530_ct_read_recovers_on_reconnect(self):
+        """EM530: first 0x1003 read fails (inf bounds), reconnect re-reads and recovers."""
+        master, client, state = self._build_toggleable_ct(device_type_id=2096, ct_ratio_raw=2000)
+
+        # First connect: CT read fails -> is_em530 True, bounds unset (inf).
+        asyncio.run(master.connect())
+        self.assertTrue(master._front_data.frame.is_em530)
+        self.assertEqual(master._effective_max_phase_current_a, float("inf"))
+        self.assertEqual(master._effective_max_system_current_a, float("inf"))
+
+        # Reconnect with CT read now succeeding -> bounds become CT-derived.
+        state["ct_ok"] = True
+        state["requested_addrs"].clear()
+        asyncio.run(master.connect())
+
+        # Reconnect skips detection (no 0x000B re-read) but DID retry 0x1003.
+        self.assertNotIn(0x000B, state["requested_addrs"])
+        self.assertIn(0x1003, state["requested_addrs"])
+        self.assertEqual(master._effective_max_phase_current_a, 2000.0)
+        self.assertEqual(master._effective_max_system_current_a, 6000.0)
+        # Both buffers carry the recovered 0x1003 value.
+        self.assertEqual(
+            master._front_data.frame.static_reg_map[0x1003].values,
+            master._back_data.frame.static_reg_map[0x1003].values,
+        )
+        self.assertEqual(master._front_data.frame.static_reg_map[0x1003].values, _encode_uint32_le(2000))
+
+    def test_em540_reconnect_unaffected_by_ct_retry(self):
+        """EM540 reconnect: no 0x1003 read, bounds stay 130/390."""
+        master, client = self._build(device_type_id=1744)
+        asyncio.run(master.connect())
+        self.assertFalse(master._front_data.frame.is_em530)
+
+        client.read_holding_registers.reset_mock()
+        master._requested_addrs.clear()
+        asyncio.run(master.connect())
+
+        self.assertNotIn(0x1003, master._requested_addrs)
+        self.assertEqual(master._effective_max_phase_current_a, 130.0)
+        self.assertEqual(master._effective_max_system_current_a, 390.0)
+
+    def test_em530_successful_first_read_not_reread_on_reconnect(self):
+        """EM530 whose first 0x1003 read succeeded is NOT re-read on reconnect."""
+        master, client = self._build(device_type_id=2096, ct_ratio_raw=2000)
+        asyncio.run(master.connect())
+        self.assertEqual(master._effective_max_phase_current_a, 2000.0)
+
+        # Reconnect: bounds already finite -> guard skips the CT retry.
+        client.read_holding_registers.reset_mock()
+        master._requested_addrs.clear()
+        asyncio.run(master.connect())
+
+        self.assertNotIn(0x1003, master._requested_addrs)
+        self.assertEqual(master._effective_max_phase_current_a, 2000.0)
+        self.assertEqual(master._effective_max_system_current_a, 6000.0)
 
 
 if __name__ == "__main__":

@@ -43,14 +43,25 @@ class FrameValidationConfig:
     # Overflow-sentinel check (EM500_CPP_Mod_V1.3 §3.3: INT32 MSW == 0x7FFFh).
     # Always recommended; togglable, defaults on.
     check_overflow_sentinel: bool = True
-    # Physical-range bounds (EM540 datasheet). Defaults are datasheet-derived;
-    # override only with equally justified values.
-    max_phase_current_a: float = 130.0  # 2 x Imax(65 A)
-    max_system_current_a: float = 390.0  # 3 x per-phase bound
+    # Physical-range bounds. The two CURRENT bounds below apply to EM540 /
+    # direct-input meters only: an EM530 is CT-connected and derives its
+    # per-phase and system (An) current bound from the meter CT ratio (register
+    # 0x1003), ignoring these two values. The voltage/frequency bounds apply to
+    # both models. Defaults are datasheet-derived; override only with equally
+    # justified values.
+    max_phase_current_a: float = 130.0  # EM540/direct-input only; 2 x Imax(65 A)
+    max_system_current_a: float = 390.0  # EM540/direct-input only; 3 x per-phase bound
     max_voltage_ln_v: float = 360.0  # 1.5 x Un(240 V)
     max_voltage_ll_v: float = 625.0  # ~1.5 x L-L(415 V)
     min_frequency_hz: float = 40.0  # 45 Hz - 5 Hz guard
     max_frequency_hz: float = 70.0  # 65 Hz + 5 Hz guard
+    # Time (seconds) since the last ACCEPTED frame after which PERSISTENT frame
+    # rejections notify listeners so the downstream breaker and Home Assistant
+    # fail closed. A single/transient rejected frame among good ones is still
+    # absorbed (last-good retained); only when no good frame arrives for this
+    # long do rejections start signalling read_failed(). Independent of and
+    # complementary to em540_master.health_max_stale_s. Applies to EM540 & EM530.
+    max_consecutive_invalid_s: float = 5.0
 
 
 @dataclass
@@ -381,6 +392,7 @@ class ConfigManager:
             ("em540_master.frame_validation.max_voltage_ll_v", fv.max_voltage_ll_v),
             ("em540_master.frame_validation.min_frequency_hz", fv.min_frequency_hz),
             ("em540_master.frame_validation.max_frequency_hz", fv.max_frequency_hz),
+            ("em540_master.frame_validation.max_consecutive_invalid_s", fv.max_consecutive_invalid_s),
         )
         for name, value in bound_fields:
             if isinstance(value, bool) or not isinstance(value, (int, float)):

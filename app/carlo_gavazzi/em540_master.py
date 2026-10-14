@@ -395,6 +395,12 @@ class Em540Master:
         self._max_voltage_ll_v: float = float(getattr(fv, "max_voltage_ll_v", MAX_VOLTAGE_LL_V))
         self._min_frequency_hz: float = float(getattr(fv, "min_frequency_hz", MIN_FREQUENCY_HZ))
         self._max_frequency_hz: float = float(getattr(fv, "max_frequency_hz", MAX_FREQUENCY_HZ))
+        # Bounded fail-closed window (seconds). Once no ACCEPTED frame has
+        # arrived for this long, PERSISTENT frame rejections start notifying
+        # listeners so the downstream breaker opens / HA goes unavailable. A
+        # lone/transient rejected frame is still absorbed. getattr fallback keeps
+        # a minimal SimpleNamespace config constructible.
+        self._max_consecutive_invalid_s: float = float(getattr(fv, "max_consecutive_invalid_s", 5.0))
         # Rate-limit state for the WARNING log (single-writer: master loop).
         self._last_invalid_frame_log: float = 0.0
         self._static_read_plan: tuple[int, ...] = tuple(self._front_data.frame.static_reg_map.keys())
@@ -412,6 +418,17 @@ class Em540Master:
         # only from the acquisition loop (single writer, lock-free — a single
         # float store is atomic under CPython) and read from the watchdog thread.
         self._last_frame_monotonic: float = 0.0
+
+        # Fix #1 anchor: monotonic time of the last ACCEPTED frame, used ONLY by
+        # the bounded persistent-rejection fail-closed gate. Deliberately SEPARATE
+        # from _last_frame_monotonic (which feeds the external freshness watchdog
+        # and only advances once publishing is gated on): this gate must work
+        # even when the watchdog is disabled (health_max_stale_s <= 0), so it
+        # cannot share that store. Initialised to "now" so a bridge that never
+        # produces a good frame still fails closed once the window elapses from
+        # process start, not only after a first accept. Advanced on every
+        # accepted frame; single-float, lock-free, single-writer (master loop).
+        self._last_accepted_frame_monotonic: float = time.monotonic()
 
         # Register count mismatch tracking. Transient mismatches (e.g. stale RTU
         # responses after reconnection) are tolerated and discarded. If mismatches
@@ -573,20 +590,33 @@ class Em540Master:
                     # bounds recompute below sees live CT data on FIRST connect.
                     # Runs ONLY here on the static-read path, never on the tick.
                     await self._detect_and_apply_model()
-                    # SINGLE refresh point for the EM530 CT-ratio-aware current
+                    # PRIMARY refresh point for the EM530 CT-ratio-aware current
                     # bounds. The model (is_em530) and the CT register (0x1003)
                     # are set immediately above by _detect_and_apply_model(), so
-                    # the recompute sees the correct model/CT ratio. The CT
-                    # register is static and only read here (when not
-                    # self._static_data_valid); an ordinary reconnect keeps
-                    # _static_data_valid True and does NOT re-run detection or
-                    # re-read it. If a future change forces a static re-read on
-                    # reconnect, it MUST re-run _detect_and_apply_model() AND
+                    # the recompute sees the correct model/CT ratio. The model
+                    # (is_em530) is detected ONLY here, on the first-connect
+                    # static-read path, and is NEVER re-detected on a reconnect.
+                    # The CT register (0x1003) is normally read only here too, but
+                    # see the reconnect else-branch below: if an EM530's one-time
+                    # first read failed (bounds left at inf), a later reconnect
+                    # re-reads 0x1003 so the CT-derived bound can recover. If a
+                    # future change forces a full static re-read on reconnect, it
+                    # MUST re-run _detect_and_apply_model() AND
                     # _recompute_effective_current_bounds() so the cached model
                     # and bounds stay in sync.
                     self._recompute_effective_current_bounds()
             else:
                 fresh_static_read = False
+                # Reconnect path (static data already valid): the model is NOT
+                # re-detected. But if this is an EM530 whose one-time first-connect
+                # 0x1003 read failed — leaving the current bounds at the unset
+                # (inf) state — retry the CT-ratio read now so a transient first
+                # failure recovers on a later successful reconnect. Guarded on the
+                # unset-bounds state so a successful first read is never re-read
+                # (no extra Modbus traffic on ordinary reconnects). Reconnect/
+                # connect path only, NEVER on the 10Hz tick.
+                if self._front_data.frame.is_em530 and self._effective_max_phase_current_a == float("inf"):
+                    await self._retry_em530_ct_ratio_on_reconnect()
 
             # Read/log meter config and optionally correct it. On the first
             # connect the static read above just populated these registers, so no
@@ -766,9 +796,28 @@ class Em540Master:
             reason = self._validate_frame(self._back_data)
             if reason is not None:
                 self._count_invalid_frame(reason)
-                self._count_read_failure()
                 self._maybe_log_invalid_frame(reason)
                 is_ok = False
+                # Fix #1: a lone/transient rejected frame among good ones is
+                # STILL absorbed exactly as before — no read_failed(), no
+                # breaker, last-good retained — because the preceding accept
+                # reset _last_accepted_frame_monotonic so elapsed stays small.
+                # Only once NO accepted frame has arrived for
+                # _max_consecutive_invalid_s do we fail closed, notifying
+                # listeners so the downstream breaker opens and HA goes
+                # unavailable; we keep notifying on each subsequent reject until
+                # an accepted frame resets the anchor. This gate is INDEPENDENT
+                # of the freshness watchdog and works even when
+                # health_max_stale_s <= 0. Reject-path cost is one subtraction +
+                # compare; the listener fan-out only runs in the degraded state.
+                # Exactly one read_failed_total increment per reject either way:
+                # _notify_listeners_read_failed() does the single
+                # _count_read_failure() on the tripped path; otherwise we call it
+                # directly on the absorbed path.
+                if time.monotonic() - self._last_accepted_frame_monotonic >= self._max_consecutive_invalid_s:
+                    await self._notify_listeners_read_failed()
+                else:
+                    self._count_read_failure()
 
         if is_ok:
             # Fold this frame into daily extrema BEFORE the buffer swap. This is
@@ -783,7 +832,12 @@ class Em540Master:
             # successful frame. Single lock-free float store on the tick path
             # (same cost profile as the extrema update above). The watchdog
             # thread reads this to decide whether acquisition has wedged.
-            self._last_frame_monotonic = time.monotonic()
+            now_mono = time.monotonic()
+            self._last_frame_monotonic = now_mono
+            # Fix #1: an accepted frame is the single reset point for the
+            # persistent-rejection fail-closed gate — it is "the last time data
+            # was good". The next lone bad frame is therefore absorbed again.
+            self._last_accepted_frame_monotonic = now_mono
 
             # Swap buffers under the condition lock so the front buffer stays immutable
             # for listener threads (which read _front_data under _condition). The swap is
@@ -888,6 +942,37 @@ class Em540Master:
                 "current magnitude bound disabled (overflow sentinel still applies)."
             )
 
+    async def _retry_em530_ct_ratio_on_reconnect(self) -> None:
+        """Re-read the EM530 CT-ratio register (0x1003) on a reconnect.
+
+        Called ONLY from connect()'s reconnect branch, and only for an EM530
+        whose one-time first-connect 0x1003 read failed (effective bounds still
+        the unset inf state). Re-reads 0x1003 into the front frame, mirrors it
+        into BOTH buffers via _set_config_register (the same both-buffers path
+        _detect_and_apply_model uses, so a subsequent tick swap cannot surface a
+        half-updated frame), then recomputes the effective current bounds. is_em530
+        and the 0x1003 map entry were already set on both frames at first-connect
+        detection, so no map rebuild is needed here.
+
+        Non-fatal: on a read failure the bounds stay at inf (the overflow sentinel
+        still guards the frame) and the next reconnect retries again. Reconnect/
+        connect path only, NEVER on the 10Hz tick.
+        """
+        front_frame = self._front_data.frame
+        if await self._read_registers(front_frame.static_reg_map, reg_addrs=(_EM530_CT_RATIO_REG,)):
+            self._set_config_register(_EM530_CT_RATIO_REG, front_frame.static_reg_map[_EM530_CT_RATIO_REG].values)
+            self._recompute_effective_current_bounds()
+            logger.info(
+                "Recovered EM530 CT-ratio register 0x1003 on reconnect; current bounds now phase<=%s A, An<=%s A.",
+                self._effective_max_phase_current_a,
+                self._effective_max_system_current_a,
+            )
+        else:
+            logger.debug(
+                "EM530 CT-ratio register 0x1003 re-read on reconnect failed; "
+                "current magnitude bound still disabled (overflow sentinel still applies)."
+            )
+
     def _recompute_effective_current_bounds(self) -> None:
         """Recompute the cached effective per-phase / system current bounds.
 
@@ -909,6 +994,11 @@ class Em540Master:
             self._effective_max_phase_current_a = self._max_phase_current_a
             self._effective_max_system_current_a = self._max_system_current_a
             return
+
+        # EM530 (CT-connected): the configured max_phase_current_a /
+        # max_system_current_a knobs are intentionally NOT applied — an EM530
+        # derives its current bound from the meter CT ratio (register 0x1003)
+        # below, since the decoded primary current legitimately exceeds 130 A.
 
         raw_ct_ratio: int | None = None
         reg = frame.static_reg_map.get(_EM530_CT_RATIO_REG)

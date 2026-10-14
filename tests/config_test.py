@@ -1490,6 +1490,16 @@ def test_frame_validation_defaults(tmp_path):
     assert fv.max_voltage_ll_v == 625.0
     assert fv.min_frequency_hz == 40.0
     assert fv.max_frequency_hz == 70.0
+    assert fv.max_consecutive_invalid_s == 5.0
+
+
+def test_frame_validation_max_consecutive_invalid_s_override_loads(tmp_path):
+    path = _make_config(
+        tmp_path,
+        {"em540_master.frame_validation.max_consecutive_invalid_s": 2.5},
+    )
+    fv = ConfigManager(path).load().em540_master.frame_validation
+    assert fv.max_consecutive_invalid_s == 2.5
 
 
 def test_frame_validation_override_loads(tmp_path):
@@ -1528,6 +1538,7 @@ def test_frame_validation_toggles_reject_non_boolean(tmp_path, field, value):
         "em540_master.frame_validation.max_voltage_ll_v",
         "em540_master.frame_validation.min_frequency_hz",
         "em540_master.frame_validation.max_frequency_hz",
+        "em540_master.frame_validation.max_consecutive_invalid_s",
     ],
 )
 # 10**1000 is a valid positive int but not representable as a finite float, so

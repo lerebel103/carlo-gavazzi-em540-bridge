@@ -57,13 +57,20 @@ em540_master:
     # Reject if an INT32 instantaneous variable's MSW == 0x7FFF
     # (EM500_CPP_Mod_V1.3 section 3.3 "Maximum electrical values").
     check_overflow_sentinel: true
-    # Physical bounds (EM540 datasheet). Defaults are datasheet-derived.
-    max_phase_current_a: 130.0    # 2 x Imax(65 A)
-    max_system_current_a: 390.0   # 3 x per-phase bound
+    # Physical bounds. The two current bounds apply to EM540 / direct-input
+    # meters ONLY: an EM530 is CT-connected and derives its per-phase and
+    # system (An) current bound from the meter CT ratio (register 0x1003),
+    # ignoring these two values. Voltage/frequency bounds apply to both models.
+    max_phase_current_a: 130.0    # EM540/direct-input only; 2 x Imax(65 A)
+    max_system_current_a: 390.0   # EM540/direct-input only; 3 x per-phase bound
     max_voltage_ln_v: 360.0       # 1.5 x Un(240 V)
     max_voltage_ll_v: 625.0       # ~1.5 x L-L(415 V)
     min_frequency_hz: 40.0        # datasheet 45 Hz minus 5 Hz guard
     max_frequency_hz: 70.0        # datasheet 65 Hz plus 5 Hz guard
+    # Seconds since the last ACCEPTED frame after which PERSISTENT rejections
+    # fail closed (downstream breaker opens, HA goes unavailable). A single/
+    # transient bad frame is still absorbed; independent of health_max_stale_s.
+    max_consecutive_invalid_s: 5.0
   # Log level for the master component
   log_level: INFO
 

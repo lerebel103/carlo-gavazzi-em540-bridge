@@ -114,23 +114,34 @@ or folded into the daily min/max extrema. Two independent, spec-grounded criteri
 
   | Key | Default | Basis |
   |-----|---------|-------|
-  | `max_phase_current_a` | `130.0` | 2 × Imax (65 A) |
-  | `max_system_current_a` | `390.0` | 3 × per-phase bound (defensive) |
+  | `max_phase_current_a` | `130.0` | 2 × Imax (65 A) **(EM540 only)** |
+  | `max_system_current_a` | `390.0` | 3 × per-phase bound (defensive) **(EM540 only)** |
   | `max_voltage_ln_v` | `360.0` | 1.5 × Un (240 V) |
   | `max_voltage_ll_v` | `625.0` | ~1.5 × L-L (415 V) |
   | `min_frequency_hz` | `40.0` | 45 Hz − 5 Hz guard |
   | `max_frequency_hz` | `70.0` | 65 Hz + 5 Hz guard |
 
+  The two current bounds apply to EM540 / direct-input meters only. An EM530 is
+  CT-connected, so its per-phase and system (An) current bound is derived from the
+  meter CT ratio (register `0x1003`) at connect time and the two config values
+  above are ignored for that model. The voltage and frequency bounds apply to
+  both models.
+
 If **any** validated quantity fails, the **whole frame is rejected** (atomic): the last-good values
 are retained downstream and in Home Assistant, nothing is folded into the daily extrema, and the
-freshness timestamp is not advanced. The rejection does **not** force the downstream circuit breaker
-open — a single bad frame among good ones is absorbed, and only *persistent* bad frames let the
-staleness watchdog and breaker open naturally. This differs from ordinary bad reads
-(transport/length/parse failures), which signal `read_failed()` and open the downstream breaker on
-the first failure; invalid-frame rejections instead rely solely on staleness. Rejected frames
-are counted by the **RS485 Invalid Frames** diagnostic sensor, which is distinct from **RS485 Master
-Read Failures** (transport/length/parse failures); a rejected frame increments both, so Invalid
-Frames isolates the parsed-but-rejected subset.
+freshness timestamp is not advanced. A **single/transient** bad frame among good ones does **not**
+force the downstream circuit breaker open — it is absorbed, keeping last-good. This differs from
+ordinary bad reads (transport/length/parse failures), which signal `read_failed()` and open the
+downstream breaker on the first failure.
+
+Only **persistent** rejections fail closed: once no accepted frame has arrived for
+`max_consecutive_invalid_s` seconds (default `5.0`), each subsequent rejected frame signals
+`read_failed()` so the downstream breaker opens and Home Assistant goes unavailable, until an
+accepted frame recovers (which re-arms the single-frame absorb). This bounded gate is independent of
+and complementary to the freshness watchdog (`health_max_stale_s`); it still fails closed even when
+the watchdog is disabled. Rejected frames are counted by the **RS485 Invalid Frames** diagnostic
+sensor, which is distinct from **RS485 Master Read Failures** (transport/length/parse failures); a
+rejected frame increments both, so Invalid Frames isolates the parsed-but-rejected subset.
 
 Set `enabled: false` to disable validation entirely, or `check_overflow_sentinel: false` to disable
 only the sentinel check. Override the numeric bounds only with equally justified values.
