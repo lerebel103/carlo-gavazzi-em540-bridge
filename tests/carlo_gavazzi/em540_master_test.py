@@ -1301,7 +1301,7 @@ class TestFrameValidationIntegration(unittest.TestCase):
                 self.assertFalse(asyncio.run(master.acquire_data()))
         self.assertEqual(master._stats.last_invalid_frame_reason, "sentinel:a_l1")
 
-    # 18. EM530 clamp: raw 5 clamps to CT 1.0 -> bound 100 A; 150 A dropped.
+    # 18. EM530 clamp: raw 5 clamps to CT 1.0 -> phase bound 10 A (2 x 5 A); 150 A dropped.
     def test_em530_clamp_low_yields_finite_bound(self):
         master, client = self._make_em530(5)  # below min 10 -> clamp to 10 (CT 1.0)
         self.assertEqual(master._effective_max_phase_current_a, 10.0)
