@@ -16,6 +16,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 - (Fixes in development)
 
+## [0.5.0] - 2026-10-15
+
+### Added
+- Spec-grounded upstream frame validation: each parsed primary-block frame is checked against the meter's documented overflow sentinel (INT32 MSW == `0x7FFF`, EM500_CPP_Mod_V1.3 §3.3) and datasheet-derived physical bounds (per-phase/system current, L-N/L-L voltage, frequency) before it is published or folded into the daily extrema. A failing frame is rejected atomically (last-good retained), preventing transient garbage such as the INT32-saturated per-phase current (`0x7FFFFFFF`/1000 ≈ 2,147,483.65 A) from latching into readings or daily min/max.
+- Live EM540/EM530 model detection on connect: the device type (register `0x000B`) is read, logged, and applied internally so model-dependent paths are correct. EM530 (CT-connected) derives its per-phase/system current bound from the meter CT ratio (register `0x1003`), while EM540 (direct input) uses the datasheet 65 A-based bounds.
+- New `RS485 Invalid Frames` Home Assistant diagnostic sensor and `invalid_frame_total` master stat, distinct from `RS485 Master Read Failures`, to track parsed-but-rejected frames.
+- New `em540_master.frame_validation` configuration block (enable toggle, overflow-sentinel toggle, physical bounds, and `max_consecutive_invalid_s`).
+
+### Changed
+- Invalid-frame handling is fail-open for a single/transient rejection (absorbed, last-good retained) but bounded fail-closed once rejections persist past `max_consecutive_invalid_s` (default 5 s): downstream Modbus breakers open and Home Assistant goes unavailable, independent of the freshness watchdog.
+- A transient CT-ratio (`0x1003`) read failure on an EM530 is retried on a later reconnect so current-range validation recovers without a restart.
+
+### Fixed
+- Home Assistant apparent-energy sensor (`kVAh`) discovery was corrected to publish without an `energy` device class (carried over from v0.4.2; the invalid unit/device-class pairing is now avoided across diagnostic sensors).
+
 ## [0.4.2] - 2026-10-06
 
 ### Fixed
