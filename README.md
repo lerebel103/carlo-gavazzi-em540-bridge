@@ -100,6 +100,52 @@ Behaviour and safety:
 > On reconnect the config registers are re-read (a few extra Modbus reads, on reconnect only) so a
 > change made on the device while the bridge was disconnected is observed and, if enabled, re-applied.
 
+### Upstream frame validation
+
+Each parsed upstream frame is checked against the meter's documented limits before it is published
+or folded into the daily min/max extrema. Two independent, spec-grounded criteria are applied under
+`em540_master.frame_validation`:
+
+- **Overflow sentinel** — the meter signals an over-range reading by setting the most-significant
+  word of the relevant INT32 variable to `0x7FFF` (EM500_CPP_Mod_V1.3 §3.3 "Maximum electrical
+  values"). This catches the exact INT32 saturation that previously surfaced as absurd per-phase
+  current peaks.
+- **Physical bounds** — datasheet-derived magnitude limits (EM540 datasheet):
+
+  | Key | Default | Basis |
+  |-----|---------|-------|
+  | `max_phase_current_a` | `130.0` | 2 × Imax (65 A) **(EM540 only)** |
+  | `max_system_current_a` | `390.0` | 3 × per-phase bound (defensive) **(EM540 only)** |
+  | `max_voltage_ln_v` | `360.0` | 1.5 × Un (240 V) |
+  | `max_voltage_ll_v` | `625.0` | ~1.5 × L-L (415 V) |
+  | `min_frequency_hz` | `40.0` | 45 Hz − 5 Hz guard |
+  | `max_frequency_hz` | `70.0` | 65 Hz + 5 Hz guard |
+
+  The two current bounds apply to EM540 / direct-input meters only. An EM530 is
+  CT-connected, so its per-phase and system (An) current bound is derived from the
+  meter CT ratio (register `0x1003`) at connect time and the two config values
+  above are ignored for that model. The voltage and frequency bounds apply to
+  both models.
+
+If **any** validated quantity fails, the **whole frame is rejected** (atomic): the last-good values
+are retained downstream and in Home Assistant, nothing is folded into the daily extrema, and the
+freshness timestamp is not advanced. A **single/transient** bad frame among good ones does **not**
+force the downstream circuit breaker open — it is absorbed, keeping last-good. This differs from
+ordinary bad reads (transport/length/parse failures), which signal `read_failed()` and open the
+downstream breaker on the first failure.
+
+Only **persistent** rejections fail closed: once no accepted frame has arrived for
+`max_consecutive_invalid_s` seconds (default `5.0`), each subsequent rejected frame signals
+`read_failed()` so the downstream breaker opens and Home Assistant goes unavailable, until an
+accepted frame recovers (which re-arms the single-frame absorb). This bounded gate is independent of
+and complementary to the freshness watchdog (`health_max_stale_s`); it still fails closed even when
+the watchdog is disabled. Rejected frames are counted by the **RS485 Invalid Frames** diagnostic
+sensor, which is distinct from **RS485 Master Read Failures** (transport/length/parse failures); a
+rejected frame increments both, so Invalid Frames isolates the parsed-but-rejected subset.
+
+Set `enabled: false` to disable validation entirely, or `check_overflow_sentinel: false` to disable
+only the sentinel check. Override the numeric bounds only with equally justified values.
+
 ## Requirements
 
 - **Hardware:** RS485 to Modbus/RTU physical converter to connect the EM540 meter to your network.
@@ -197,8 +243,9 @@ The following measurement sensors are published to Home Assistant and refreshed 
 | Run Hours              | h     | duration       | total_increasing | 1         |
 
 The following diagnostic sensors are also published (entity category: `diagnostic`). Many are disabled
-by default in Home Assistant to reduce clutter; enable the ones you need from the device page. All
-state classes are `measurement`.
+by default in Home Assistant to reduce clutter; enable the ones you need from the device page. Most
+state classes are `measurement`; monotonic counters (e.g. RS485 Invalid Frames) use
+`total_increasing`.
 
 | Sensor Name                       | Unit | Device Class | Precision | Enabled by default |
 |-----------------------------------|------|--------------|-----------|--------------------|
@@ -207,6 +254,7 @@ state classes are `measurement`.
 | Acq Rate                          | Hz   | frequency    | 2         | yes                |
 | MQTT Data Update Rate             | Hz   | frequency    | 2         | no                 |
 | RS485 Master Read Failures        |      |              | 0         | no                 |
+| RS485 Invalid Frames              |      |              | 0         | no                 |
 | RS485 Consumer Missed Updates     |      |              | 0         | no                 |
 | RS485 Consumer Max Seq Gap        |      |              | 0         | no                 |
 | Acq Dur Min                       | ms   | duration     | 2         | no                 |

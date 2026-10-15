@@ -82,6 +82,16 @@ class HADiagnostics:
             entity_category="diagnostic",
             enabled_by_default=False,
         )
+        self.invalid_frame_count = Sensor(
+            "RS485 Invalid Frames",
+            None,
+            None,
+            "total_increasing",
+            self.state_topic,
+            precision=0,
+            entity_category="diagnostic",
+            enabled_by_default=False,
+        )
         self.consumer_missed_updates_total = Sensor(
             "RS485 Consumer Missed Updates",
             None,
@@ -510,6 +520,7 @@ class HADiagnostics:
             self.mqtt_update_rate,
             *self._daily_extrema_sensors.values(),
             self.read_failed_count,
+            self.invalid_frame_count,
             self.consumer_missed_updates_total,
             self.consumer_max_seq_gap,
             self.acquisition_duration_min_ms,
@@ -645,6 +656,7 @@ class HADiagnostics:
             self.em540_serial_disconnect_count.update_value(self._em540_slave_stats.serial.disconnect_count)
         if self._em540_master_stats is not None:
             self.read_failed_count.update_value(self._em540_master_stats.read_failed_total)
+            self.invalid_frame_count.update_value(self._em540_master_stats.invalid_frame_total)
             master_stats = self._em540_master_stats.snapshot_and_reset_interval_extrema()
             self.consumer_missed_updates_total.update_value(master_stats["consumer_missed_updates_total"])
             self.consumer_max_seq_gap.update_value(master_stats["consumer_max_seq_gap"])

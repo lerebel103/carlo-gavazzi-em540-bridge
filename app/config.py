@@ -35,6 +35,39 @@ class ConfigError(Exception):
 
 
 @dataclass
+class FrameValidationConfig:
+    # Master-side spec-based validation of each parsed upstream frame. When a
+    # frame fails, it is dropped (last-good retained) and counted as an invalid
+    # frame. A lone/transient rejection is absorbed; once rejections persist past
+    # max_consecutive_invalid_s (see below) the master directly notifies
+    # listeners so the downstream breaker and Home Assistant fail closed —
+    # independent of the em540_master.health_max_stale_s watchdog.
+    enabled: bool = True
+    # Overflow-sentinel check (EM500_CPP_Mod_V1.3 §3.3: INT32 MSW == 0x7FFFh).
+    # Always recommended; togglable, defaults on.
+    check_overflow_sentinel: bool = True
+    # Physical-range bounds. The two CURRENT bounds below apply to EM540 /
+    # direct-input meters only: an EM530 is CT-connected and derives its
+    # per-phase and system (An) current bound from the meter CT ratio (register
+    # 0x1003), ignoring these two values. The voltage/frequency bounds apply to
+    # both models. Defaults are datasheet-derived; override only with equally
+    # justified values.
+    max_phase_current_a: float = 130.0  # EM540/direct-input only; 2 x Imax(65 A)
+    max_system_current_a: float = 390.0  # EM540/direct-input only; 3 x per-phase bound
+    max_voltage_ln_v: float = 360.0  # 1.5 x Un(240 V)
+    max_voltage_ll_v: float = 625.0  # ~1.5 x L-L(415 V)
+    min_frequency_hz: float = 40.0  # 45 Hz - 5 Hz guard
+    max_frequency_hz: float = 70.0  # 65 Hz + 5 Hz guard
+    # Time (seconds) since the last ACCEPTED frame after which PERSISTENT frame
+    # rejections notify listeners so the downstream breaker and Home Assistant
+    # fail closed. A single/transient rejected frame among good ones is still
+    # absorbed (last-good retained); only when no good frame arrives for this
+    # long do rejections start signalling read_failed(). Independent of and
+    # complementary to em540_master.health_max_stale_s. Applies to EM540 & EM530.
+    max_consecutive_invalid_s: float = 5.0
+
+
+@dataclass
 class Em540MasterConfig:
     mode: str = "serial"
     baudrate: int = 9600
@@ -63,6 +96,7 @@ class Em540MasterConfig:
     # may reset the meter's kWh counters, so this is disabled by default.
     ensure_3phase_measuring_system: bool = False
     log_level: str = "INFO"
+    frame_validation: FrameValidationConfig = field(default_factory=FrameValidationConfig)
 
 
 @dataclass
@@ -340,6 +374,49 @@ class ConfigManager:
         for name, value in bool_fields:
             if not isinstance(value, bool):
                 raise ConfigError(f"{name} must be a boolean (true/false), got {value!r}")
+
+        # 8. frame validation — toggles must be booleans and every numeric bound
+        # must be a finite number > 0 (bool rejected explicitly: it is an int
+        # subclass). Frequencies must additionally satisfy min < max.
+        self._validate_frame_validation(state.em540_master.frame_validation)
+
+    def _validate_frame_validation(self, fv: FrameValidationConfig) -> None:
+        for name, value in (
+            ("em540_master.frame_validation.enabled", fv.enabled),
+            ("em540_master.frame_validation.check_overflow_sentinel", fv.check_overflow_sentinel),
+        ):
+            if not isinstance(value, bool):
+                raise ConfigError(f"{name} must be a boolean (true/false), got {value!r}")
+
+        bound_fields = (
+            ("em540_master.frame_validation.max_phase_current_a", fv.max_phase_current_a),
+            ("em540_master.frame_validation.max_system_current_a", fv.max_system_current_a),
+            ("em540_master.frame_validation.max_voltage_ln_v", fv.max_voltage_ln_v),
+            ("em540_master.frame_validation.max_voltage_ll_v", fv.max_voltage_ll_v),
+            ("em540_master.frame_validation.min_frequency_hz", fv.min_frequency_hz),
+            ("em540_master.frame_validation.max_frequency_hz", fv.max_frequency_hz),
+            ("em540_master.frame_validation.max_consecutive_invalid_s", fv.max_consecutive_invalid_s),
+        )
+        for name, value in bound_fields:
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise ConfigError(f"{name} must be a number, got {value!r}")
+            # Must be representable as a finite float: Em540Master.__init__ coerces
+            # every bound with float(), and an oversized int (e.g. 10**1000) raises
+            # OverflowError there instead of a clean ConfigError. Check it here.
+            try:
+                as_float = float(value)
+            except (OverflowError, ValueError) as exc:
+                raise ConfigError(f"{name} must be a finite number, got {value!r}") from exc
+            if not math.isfinite(as_float):
+                raise ConfigError(f"{name} must be finite, got {value}")
+            if value <= 0:
+                raise ConfigError(f"{name} must be > 0, got {value}")
+
+        if fv.min_frequency_hz >= fv.max_frequency_hz:
+            raise ConfigError(
+                "em540_master.frame_validation.min_frequency_hz must be < max_frequency_hz, "
+                f"got min={fv.min_frequency_hz} max={fv.max_frequency_hz}"
+            )
 
     def _populate_config(self, target, section_data: dict, path: str) -> None:
         for key, value in section_data.items():

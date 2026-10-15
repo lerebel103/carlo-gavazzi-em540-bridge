@@ -6,3 +6,6 @@ __pycache__/
 .hypothesis/
 config.yaml
 .pymodbus-fork/
+
+# Agent workflow artifacts (design notes, plans, reviews, investigation reports)
+.agents/

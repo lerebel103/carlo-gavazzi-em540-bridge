@@ -9,11 +9,12 @@ from threading import Thread
 from typing import Callable
 
 from pymodbus import FramerType, ModbusException
-from pymodbus.client import AsyncModbusSerialClient, AsyncModbusTcpClient, ModbusBaseClient
+from pymodbus.client import AsyncModbusSerialClient, AsyncModbusTcpClient, ModbusBaseClient, ModbusTcpClient
 from pymodbus.exceptions import ModbusIOException
 
 from app.carlo_gavazzi.em540_data import (
     _DYNAMIC_PRIMARY_BLOCK_ADDR,
+    _EM530_STATIC_REGISTER_SPECS,
     _ENERGY_BLOCK_ADDR,
     ENERGY_BLOCK_TOTAL_SIZE,
     MEASUREMENT_MODE_BIDIRECTIONAL,
@@ -25,9 +26,24 @@ from app.carlo_gavazzi.em540_data import (
     REG_WRONG_CONNECTION_BLOCK,
     WRONG_CONNECTION_LABELS,
     WRONG_CONNECTION_STATUS_OFFSET,
+    _build_register_map,
     describe_register_value,
 )
-from app.carlo_gavazzi.meter_data import MeterData
+from app.carlo_gavazzi.frame_validation import (
+    MAX_FREQUENCY_HZ,
+    MAX_PHASE_CURRENT_A,
+    MAX_SYSTEM_CURRENT_A,
+    MAX_VOLTAGE_LL_V,
+    MAX_VOLTAGE_LN_V,
+    MIN_FREQUENCY_HZ,
+    compute_em530_current_bounds,
+    validate_primary_frame,
+)
+from app.carlo_gavazzi.meter_data import MeterData, _convert_from_registers_little, model_name_from_device_type
+
+# CT ratio register (EM530-only); UINT32, 2 words, LSW->MSW. See
+# frame_validation.compute_em530_current_bounds for the spec citation.
+_EM530_CT_RATIO_REG: int = 0x1003
 
 logger = logging.getLogger("Em540Master")
 
@@ -58,6 +74,21 @@ class Em540MasterStats:
         # primary block read failure, corrupt frame, and energy block chunk read
         # failure. This is the authoritative "RS485 Master Read Failures" metric.
         self.read_failed_total: int = 0
+        # Count of frames that parsed structurally but were rejected by spec-based
+        # frame validation (overflow sentinel or out-of-physical-range). Distinct
+        # from read_failed_total (transport/length/parse failures). A rejected
+        # frame ALSO increments read_failed_total (via _count_read_failure, from
+        # the freshness standpoint it is "no fresh good frame this tick"). Unlike
+        # a transport failure, a lone/transient rejected frame is absorbed WITHOUT
+        # notifying listeners (no forced breaker trip); only once rejections
+        # persist past max_consecutive_invalid_s does the gate notify listeners
+        # and fail closed. This counter isolates the parsed-but-invalid subset
+        # for diagnostics regardless of which path recorded the read failure.
+        self.invalid_frame_total: int = 0
+        # Last rejection reason (short string) for logging/potential future use;
+        # None until the first rejection. Single-writer (master loop), read without
+        # a lock by other threads (atomic reference read under the GIL).
+        self.last_invalid_frame_reason: str | None = None
         self._listeners: list[Callable[["Em540MasterStats"], None]] = []
 
     def snapshot_and_reset_interval_extrema(self) -> dict[str, float | int]:
@@ -304,6 +335,11 @@ class Em540Master:
     # Interval between repeated "still disconnected" log messages (seconds).
     _RECONNECT_LOG_INTERVAL: float = 30.0
 
+    # Interval between repeated "rejected invalid frame" WARNING logs (seconds).
+    # Rejections are logged at WARNING but rate-limited so a storm of bad frames
+    # at 10Hz cannot flood logs or do handler I/O on the tick loop.
+    _INVALID_FRAME_LOG_INTERVAL: float = 5.0
+
     # Interval between periodic diagnostics debug-log lines (seconds), emitted
     # only when DEBUG logging is enabled for this master.
     _DIAGNOSTICS_LOG_INTERVAL: float = 5.0
@@ -338,6 +374,37 @@ class Em540Master:
         self._condition: threading.Condition = threading.Condition()
         self._stats: Em540MasterStats = Em540MasterStats()
         self._daily_extrema: DailyExtrema = DailyExtrema()
+
+        # Cache the frame-validation config once into plain attributes so the hot
+        # path never walks the config object. getattr fallbacks keep a minimal
+        # SimpleNamespace config (used in some tests) constructible with the
+        # datasheet defaults. _validation_enabled gates the whole check.
+        fv = getattr(config, "frame_validation", None)
+        self._validation_enabled: bool = bool(getattr(fv, "enabled", True))
+        self._check_sentinel: bool = bool(getattr(fv, "check_overflow_sentinel", True))
+        self._max_phase_current_a: float = float(getattr(fv, "max_phase_current_a", MAX_PHASE_CURRENT_A))
+        self._max_system_current_a: float = float(getattr(fv, "max_system_current_a", MAX_SYSTEM_CURRENT_A))
+        # Effective per-tick current bounds actually passed to the validator. For
+        # an EM540 (direct 65 A input) these equal the configured 130/390 A
+        # bounds. For a CT-connected EM530 the decoded primary current scales with
+        # the meter's CT ratio and legitimately exceeds 130 A, so these are
+        # recomputed from register 0x1003 once the static block is read
+        # (_recompute_effective_current_bounds). Cached here as plain floats so the
+        # 10Hz validate path reads two attributes with no CT decode / allocation.
+        self._effective_max_phase_current_a: float = self._max_phase_current_a
+        self._effective_max_system_current_a: float = self._max_system_current_a
+        self._max_voltage_ln_v: float = float(getattr(fv, "max_voltage_ln_v", MAX_VOLTAGE_LN_V))
+        self._max_voltage_ll_v: float = float(getattr(fv, "max_voltage_ll_v", MAX_VOLTAGE_LL_V))
+        self._min_frequency_hz: float = float(getattr(fv, "min_frequency_hz", MIN_FREQUENCY_HZ))
+        self._max_frequency_hz: float = float(getattr(fv, "max_frequency_hz", MAX_FREQUENCY_HZ))
+        # Bounded fail-closed window (seconds). Once no ACCEPTED frame has
+        # arrived for this long, PERSISTENT frame rejections start notifying
+        # listeners so the downstream breaker opens / HA goes unavailable. A
+        # lone/transient rejected frame is still absorbed. getattr fallback keeps
+        # a minimal SimpleNamespace config constructible.
+        self._max_consecutive_invalid_s: float = float(getattr(fv, "max_consecutive_invalid_s", 5.0))
+        # Rate-limit state for the WARNING log (single-writer: master loop).
+        self._last_invalid_frame_log: float = 0.0
         self._static_read_plan: tuple[int, ...] = tuple(self._front_data.frame.static_reg_map.keys())
         logger.setLevel(config.log_level)
         self._client: ModbusBaseClient
@@ -353,6 +420,17 @@ class Em540Master:
         # only from the acquisition loop (single writer, lock-free — a single
         # float store is atomic under CPython) and read from the watchdog thread.
         self._last_frame_monotonic: float = 0.0
+
+        # Fix #1 anchor: monotonic time of the last ACCEPTED frame, used ONLY by
+        # the bounded persistent-rejection fail-closed gate. Deliberately SEPARATE
+        # from _last_frame_monotonic (which feeds the external freshness watchdog
+        # and only advances once publishing is gated on): this gate must work
+        # even when the watchdog is disabled (health_max_stale_s <= 0), so it
+        # cannot share that store. Initialised to "now" so a bridge that never
+        # produces a good frame still fails closed once the window elapses from
+        # process start, not only after a first accept. Advanced on every
+        # accepted frame; single-float, lock-free, single-writer (master loop).
+        self._last_accepted_frame_monotonic: float = time.monotonic()
 
         # Register count mismatch tracking. Transient mismatches (e.g. stale RTU
         # responses after reconnection) are tolerated and discarded. If mismatches
@@ -375,7 +453,10 @@ class Em540Master:
         # daemon worker performs the actual logger.debug() call off the loop.
         # Bounded so a stalled/slow log handler cannot accumulate messages for the
         # lifetime of this long-running service; the newest summary wins on Full.
-        self._diag_log_queue: queue.Queue[str] = queue.Queue(maxsize=1)
+        # Items are (log level, preformatted message) so the worker can emit the
+        # periodic DEBUG diagnostics summary and the WARNING frame-rejection
+        # notice through the same off-loop handler I/O path.
+        self._diag_log_queue: queue.Queue[tuple[int, str]] = queue.Queue(maxsize=1)
         # Start the background log worker once, here at construction (off the tick
         # loop). It blocks on the queue until a summary is enqueued, so an idle
         # daemon thread costs essentially nothing. Starting it lazily from the
@@ -505,8 +586,39 @@ class Em540Master:
                     fresh_static_read = True
                     # Keep both buffers aligned so skipped reads in dynamic maps keep prior values.
                     self._copy_meter_data(self._front_data, self._back_data)
+                    # Detect the meter model from the just-read Device Type
+                    # register (0x000B), log it, set is_em530 on BOTH frames, and
+                    # — for an EM530 — read the CT-ratio register (0x1003) so the
+                    # bounds recompute below sees live CT data on FIRST connect.
+                    # Runs ONLY here on the static-read path, never on the tick.
+                    await self._detect_and_apply_model()
+                    # PRIMARY refresh point for the EM530 CT-ratio-aware current
+                    # bounds. The model (is_em530) and the CT register (0x1003)
+                    # are set immediately above by _detect_and_apply_model(), so
+                    # the recompute sees the correct model/CT ratio. The model
+                    # (is_em530) is detected ONLY here, on the first-connect
+                    # static-read path, and is NEVER re-detected on a reconnect.
+                    # The CT register (0x1003) is normally read only here too, but
+                    # see the reconnect else-branch below: if an EM530's one-time
+                    # first read failed (bounds left at inf), a later reconnect
+                    # re-reads 0x1003 so the CT-derived bound can recover. If a
+                    # future change forces a full static re-read on reconnect, it
+                    # MUST re-run _detect_and_apply_model() AND
+                    # _recompute_effective_current_bounds() so the cached model
+                    # and bounds stay in sync.
+                    self._recompute_effective_current_bounds()
             else:
                 fresh_static_read = False
+                # Reconnect path (static data already valid): the model is NOT
+                # re-detected. But if this is an EM530 whose one-time first-connect
+                # 0x1003 read failed — leaving the current bounds at the unset
+                # (inf) state — retry the CT-ratio read now so a transient first
+                # failure recovers on a later successful reconnect. Guarded on the
+                # unset-bounds state so a successful first read is never re-read
+                # (no extra Modbus traffic on ordinary reconnects). Reconnect/
+                # connect path only, NEVER on the 10Hz tick.
+                if self._front_data.frame.is_em530 and self._effective_max_phase_current_a == float("inf"):
+                    await self._retry_em530_ct_ratio_on_reconnect()
 
             # Read/log meter config and optionally correct it. On the first
             # connect the static read above just populated these registers, so no
@@ -668,6 +780,48 @@ class Em540Master:
             is_ok = False
             await self._notify_listeners_read_failed()
 
+        # Spec-based frame validation gate: runs AFTER parse but BEFORE the
+        # extrema fold / timestamp advance / buffer swap below, so a rejected
+        # frame is never folded into DailyExtrema, never advances the freshness
+        # timestamp, and leaves _front_data (last-good) in place.
+        #
+        # A rejection always counts the read failure (keeping read_failed_total
+        # authoritative) and withholds the buffer swap + freshness-timestamp
+        # advance so consumers retain the last-good snapshot. Whether it also
+        # notifies listeners (read_failed() -> downstream breaker open + HA
+        # unavailable) is time-bounded: a lone/transient bad frame is absorbed
+        # WITHOUT notifying (so one bad frame is never an instant outage), but
+        # once no accepted frame has arrived for _max_consecutive_invalid_s the
+        # rejection fails closed by notifying listeners. See the gate body below
+        # for the exact anchor logic; it is independent of the freshness
+        # watchdog and works even when health_max_stale_s <= 0.
+        if is_ok and self._validation_enabled:
+            reason = self._validate_frame(self._back_data)
+            if reason is not None:
+                self._count_invalid_frame(reason)
+                self._maybe_log_invalid_frame(reason)
+                is_ok = False
+                # Fix #1: a lone/transient rejected frame among good ones is
+                # STILL absorbed exactly as before — no read_failed(), no
+                # breaker, last-good retained — because the preceding accept
+                # reset _last_accepted_frame_monotonic so elapsed stays small.
+                # Only once NO accepted frame has arrived for
+                # _max_consecutive_invalid_s do we fail closed, notifying
+                # listeners so the downstream breaker opens and HA goes
+                # unavailable; we keep notifying on each subsequent reject until
+                # an accepted frame resets the anchor. This gate is INDEPENDENT
+                # of the freshness watchdog and works even when
+                # health_max_stale_s <= 0. Reject-path cost is one subtraction +
+                # compare; the listener fan-out only runs in the degraded state.
+                # Exactly one read_failed_total increment per reject either way:
+                # _notify_listeners_read_failed() does the single
+                # _count_read_failure() on the tripped path; otherwise we call it
+                # directly on the absorbed path.
+                if time.monotonic() - self._last_accepted_frame_monotonic >= self._max_consecutive_invalid_s:
+                    await self._notify_listeners_read_failed()
+                else:
+                    self._count_read_failure()
+
         if is_ok:
             # Fold this frame into daily extrema BEFORE the buffer swap. This is
             # the only point that observes every upstream frame; downstream
@@ -681,7 +835,12 @@ class Em540Master:
             # successful frame. Single lock-free float store on the tick path
             # (same cost profile as the extrema update above). The watchdog
             # thread reads this to decide whether acquisition has wedged.
-            self._last_frame_monotonic = time.monotonic()
+            now_mono = time.monotonic()
+            self._last_frame_monotonic = now_mono
+            # Fix #1: an accepted frame is the single reset point for the
+            # persistent-rejection fail-closed gate — it is "the last time data
+            # was good". The next lone bad frame is therefore absorbed again.
+            self._last_accepted_frame_monotonic = now_mono
 
             # Swap buffers under the condition lock so the front buffer stays immutable
             # for listener threads (which read _front_data under _condition). The swap is
@@ -719,6 +878,203 @@ class Em540Master:
         """
         with self._stats.lock:
             self._stats.read_failed_total += 1
+
+    async def _detect_and_apply_model(self) -> None:
+        """Detect the meter model from Device Type (0x000B) and apply it.
+
+        Runs exactly once per process, on the first successful connect (the
+        static-read path), immediately before _recompute_effective_current_bounds().
+        NEVER on the 10Hz tick path. The register DECODE path and the 0x000B
+        Device Type overlay are untouched: this only reads the already-fetched
+        Device Type value and, for an EM530, issues one targeted extra read of
+        the CT-ratio register.
+
+        Steps:
+        1. Read the Device Type id from the just-read static block and resolve
+           the model name (shared mapping with MeterData.model_number).
+        2. Log the model at INFO (raw id shown); WARNING + stated EM540 fallback
+           for an unrecognized/empty id.
+        3. For an EM530: set is_em530 on BOTH frames, add the EM530-only 0x1003
+           register to BOTH static maps, then read 0x1003 from the device and
+           copy it into BOTH buffers. A 0x1003 read failure is non-fatal (logged
+           WARNING; the recompute then takes the (inf, inf) skip so the overflow
+           sentinel still guards the frame).
+        4. For EM540 / unrecognized: leave is_em530 False and the maps untouched,
+           so EM540 behaviour is byte-for-byte identical to before this change.
+        """
+        front_frame = self._front_data.frame
+        device_type_reg = front_frame.static_reg_map.get(0x000B)
+        device_type_id: int | None = (
+            device_type_reg.values[0] if device_type_reg is not None and device_type_reg.values else None
+        )
+
+        model = model_name_from_device_type(device_type_id) if device_type_id is not None else ""
+
+        if model:
+            logger.info("Detected meter model: %s (device type %d)", model, device_type_id)
+        else:
+            logger.warning(
+                "Unrecognized meter device type %r; treating as EM540 "
+                "(direct input, current magnitude bounds phase<=%s A, An<=%s A).",
+                device_type_id,
+                self._max_phase_current_a,
+                self._max_system_current_a,
+            )
+
+        if model != "EM530":
+            # EM540 / unrecognized: nothing to change. is_em530 stays False, no
+            # 0x1003 read, bounds remain the configured EM540 values.
+            return
+
+        # EM530 detected. Make BOTH frames EM530-shaped before the extra read so
+        # a later per-tick buffer swap can never surface a frame that is EM530 in
+        # flag but missing the 0x1003 register (or vice versa).
+        for frame in (front_frame, self._back_data.frame):
+            frame.is_em530 = True
+            if _EM530_CT_RATIO_REG not in frame.static_reg_map:
+                frame.static_reg_map.update(_build_register_map(_EM530_STATIC_REGISTER_SPECS))
+
+        # One-time targeted read of the CT-ratio register into the front frame,
+        # then mirror the value into both buffers via the established
+        # both-buffers-consistent mutation path. On failure, leave 0x1003
+        # empty/all-zero so _recompute_effective_current_bounds() takes the
+        # (inf, inf) skip; do NOT fail the connection over it.
+        if await self._read_registers(front_frame.static_reg_map, reg_addrs=(_EM530_CT_RATIO_REG,)):
+            self._set_config_register(_EM530_CT_RATIO_REG, front_frame.static_reg_map[_EM530_CT_RATIO_REG].values)
+        else:
+            logger.warning(
+                "EM530 detected but failed to read CT ratio register 0x1003; "
+                "current magnitude bound disabled (overflow sentinel still applies)."
+            )
+
+    async def _retry_em530_ct_ratio_on_reconnect(self) -> None:
+        """Re-read the EM530 CT-ratio register (0x1003) on a reconnect.
+
+        Called ONLY from connect()'s reconnect branch, and only for an EM530
+        whose one-time first-connect 0x1003 read failed (effective bounds still
+        the unset inf state). Re-reads 0x1003 into the front frame, mirrors it
+        into BOTH buffers via _set_config_register (the same both-buffers path
+        _detect_and_apply_model uses, so a subsequent tick swap cannot surface a
+        half-updated frame), then recomputes the effective current bounds. is_em530
+        and the 0x1003 map entry were already set on both frames at first-connect
+        detection, so no map rebuild is needed here.
+
+        Non-fatal: on a read failure the bounds stay at inf (the overflow sentinel
+        still guards the frame) and the next reconnect retries again. Reconnect/
+        connect path only, NEVER on the 10Hz tick.
+        """
+        front_frame = self._front_data.frame
+        if await self._read_registers(front_frame.static_reg_map, reg_addrs=(_EM530_CT_RATIO_REG,)):
+            self._set_config_register(_EM530_CT_RATIO_REG, front_frame.static_reg_map[_EM530_CT_RATIO_REG].values)
+            self._recompute_effective_current_bounds()
+            logger.info(
+                "Recovered EM530 CT-ratio register 0x1003 on reconnect; current bounds now phase<=%s A, An<=%s A.",
+                self._effective_max_phase_current_a,
+                self._effective_max_system_current_a,
+            )
+        else:
+            logger.debug(
+                "EM530 CT-ratio register 0x1003 re-read on reconnect failed; "
+                "current magnitude bound still disabled (overflow sentinel still applies)."
+            )
+
+    def _recompute_effective_current_bounds(self) -> None:
+        """Recompute the cached effective per-phase / system current bounds.
+
+        Called once after the static register block is read (see connect()). For
+        an EM540 (not is_em530) the effective bounds stay at the configured
+        130/390 A values. For a CT-connected EM530 the decoded primary current
+        scales with the meter's CT ratio, so the bounds are derived from register
+        0x1003 (CT ratio x 10, UINT32, LSW->MSW) via
+        compute_em530_current_bounds. A missing/empty register yields
+        (inf, inf) which skips the current magnitude bound (the overflow sentinel
+        still applies); see compute_em530_current_bounds for the rationale.
+
+        Not on the hot path: this runs on connect, not per tick. The validator
+        reads only the cached floats set here.
+        """
+        frame = self._front_data.frame
+        if not frame.is_em530:
+            # EM540 / direct-input: use the configured datasheet bounds unchanged.
+            self._effective_max_phase_current_a = self._max_phase_current_a
+            self._effective_max_system_current_a = self._max_system_current_a
+            return
+
+        # EM530 (CT-connected): the configured max_phase_current_a /
+        # max_system_current_a knobs are intentionally NOT applied — an EM530
+        # derives its current bound from the meter CT ratio (register 0x1003)
+        # below, since the decoded primary current legitimately exceeds 130 A.
+
+        raw_ct_ratio: int | None = None
+        reg = frame.static_reg_map.get(_EM530_CT_RATIO_REG)
+        if reg is not None and reg.values and any(reg.values):
+            # UINT32, LSW->MSW word order; reuse the shared little-endian decode
+            # helper (do not reinvent decoding). A missing/empty/all-zero read is
+            # treated as "no CT ratio yet" (raw_ct_ratio stays None -> skip bound).
+            raw_ct_ratio = int(_convert_from_registers_little(reg.values, ModbusTcpClient.DATATYPE.UINT32))
+
+        phase_bound, system_bound = compute_em530_current_bounds(raw_ct_ratio)
+        self._effective_max_phase_current_a = phase_bound
+        self._effective_max_system_current_a = system_bound
+        logger.debug(
+            "EM530 CT-aware current bounds: raw_0x1003=%s -> phase<=%s A, An<=%s A",
+            raw_ct_ratio,
+            phase_bound,
+            system_bound,
+        )
+
+    def _validate_frame(self, data: MeterData) -> str | None:
+        """Validate a freshly parsed frame's instantaneous quantities.
+
+        Fetches the live upstream primary block (pre-overlay; the 0x000B Device
+        Type overlay is applied later in the slave bridge on a different map) and
+        delegates to the pure validator. Returns None if the frame is acceptable,
+        or a short reason string (for diagnostics/logging) describing the first
+        failing check. Reads parse output and the raw primary block; does not
+        alter decode. Hot path: lock-free and allocation-free on the accept path.
+        """
+        registers = data.frame.dynamic_reg_map[_DYNAMIC_PRIMARY_BLOCK_ADDR].values
+        return validate_primary_frame(
+            registers,
+            data,
+            max_phase_current_a=self._effective_max_phase_current_a,
+            max_system_current_a=self._effective_max_system_current_a,
+            max_voltage_ln_v=self._max_voltage_ln_v,
+            max_voltage_ll_v=self._max_voltage_ll_v,
+            min_frequency_hz=self._min_frequency_hz,
+            max_frequency_hz=self._max_frequency_hz,
+            check_sentinel=self._check_sentinel,
+        )
+
+    def _count_invalid_frame(self, reason: str) -> None:
+        """Record a parsed-but-rejected frame in diagnostics.
+
+        Mirrors _count_read_failure: increments the dedicated invalid-frame
+        counter and stores the last reason under the stats lock (uncontended on
+        the hot path). The caller also records a read failure for the same
+        rejected frame (a rejected frame is "no fresh good frame this tick" for
+        freshness purposes) — directly via _count_read_failure() while the
+        rejection is still being absorbed, or via _notify_listeners_read_failed()
+        once persistent rejections have crossed _max_consecutive_invalid_s and
+        the gate fails closed. See the validation gate in acquire_data().
+        """
+        with self._stats.lock:
+            self._stats.invalid_frame_total += 1
+            self._stats.last_invalid_frame_reason = reason
+
+    def _maybe_log_invalid_frame(self, reason: str) -> None:
+        """Log a frame rejection at WARNING, rate-limited to avoid log floods.
+
+        The actual handler I/O is handed to the background log worker (via
+        _enqueue_diagnostics_log at WARNING level) so a slow stderr/file handler
+        never stalls the 10 Hz acquisition loop, even during an invalid-frame
+        storm. Rate limiting bounds how often we enqueue; the worker bounds the
+        latency off-loop.
+        """
+        now = time.monotonic()
+        if now - self._last_invalid_frame_log >= self._INVALID_FRAME_LOG_INTERVAL:
+            self._enqueue_diagnostics_log(f"Rejected invalid upstream frame: {reason}", logging.WARNING)
+            self._last_invalid_frame_log = now
 
     async def _notify_listeners_read_failed(self) -> None:
         """Signal listeners that the tick produced no usable data.
@@ -965,33 +1321,49 @@ class Em540Master:
         self._diag_log_last_time = now
         self._diag_log_last_tick_count = self._dyn_reg_read_counter
 
-    def _enqueue_diagnostics_log(self, message: str) -> None:
-        """Hand a pre-formatted diagnostics line to the background log worker.
+    def _enqueue_diagnostics_log(self, message: str, level: int = logging.DEBUG) -> None:
+        """Hand a pre-formatted log line (with its level) to the background worker.
 
         Non-blocking and allocation-light: the tick loop never performs
         logging-handler I/O nor thread creation (the worker is started at
-        construction). The worker is a daemon so it never blocks shutdown.
+        construction). The worker is a daemon so it never blocks shutdown. Used
+        both for the periodic DEBUG diagnostics summary and the WARNING frame-
+        rejection notice so neither does handler I/O on the 10 Hz loop.
         """
-        # Non-blocking, latest-wins: if the worker is behind (slow/stalled log
-        # handler), drop the stale pending summary and enqueue the newest one so
-        # the queue can never grow unbounded and the tick loop never blocks.
+        # Non-blocking, newest-wins but severity-aware: if the worker is behind
+        # (slow/stalled log handler) the queue is full. Only evict the pending
+        # item when the incoming item is at least as severe; otherwise keep the
+        # higher-severity pending item and drop the incoming one. This stops a
+        # routine DEBUG diagnostics summary from evicting a pending WARNING
+        # frame-rejection notice (both run on ~5 s intervals). The queue can
+        # never grow unbounded and the tick loop never blocks either way.
+        item = (level, message)
         try:
-            self._diag_log_queue.put_nowait(message)
+            self._diag_log_queue.put_nowait(item)
         except queue.Full:
+            pending = None
             try:
-                self._diag_log_queue.get_nowait()
+                pending = self._diag_log_queue.get_nowait()
             except queue.Empty:
-                pass
+                pending = None
+            # If we pulled a strictly higher-severity pending item, put it back
+            # and drop the incoming lower-severity one.
+            if pending is not None and pending[0] > level:
+                try:
+                    self._diag_log_queue.put_nowait(pending)
+                except queue.Full:
+                    pass
+                return
             try:
-                self._diag_log_queue.put_nowait(message)
+                self._diag_log_queue.put_nowait(item)
             except queue.Full:
                 pass
 
     def _diagnostics_log_worker(self) -> None:
         while True:
-            message = self._diag_log_queue.get()
+            level, message = self._diag_log_queue.get()
             try:
-                logger.debug("%s", message)
+                logger.log(level, "%s", message)
             except Exception:
                 # Never let a logging-handler failure kill the worker.
                 pass

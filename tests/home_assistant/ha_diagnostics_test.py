@@ -330,3 +330,53 @@ def test_wrong_connection_sensor_advertised_and_enabled_by_default():
     assert cfg["name"] == "EM540 Wiring Check Error"
     assert cfg["enabled_by_default"] is True
     assert cfg["entity_category"] == "diagnostic"
+
+
+def test_invalid_frame_count_published_from_master_stats():
+    diagnostics = HADiagnostics(topic_prefix="test")
+
+    master_stats = Em540MasterStats()
+    master_stats.read_failed_total = 3
+    master_stats.invalid_frame_total = 5
+    diagnostics.set_em540_master_stats(master_stats)
+
+    with patch.dict("sys.modules", {"uptime": SimpleNamespace(uptime=lambda: 1)}):
+        _, payload = diagnostics.mqtt_data()
+    payload_obj = json.loads(payload)
+
+    # Bad-frame counter distinct from the bad-read counter.
+    assert payload_obj["rs485_invalid_frames"] == 5
+    assert payload_obj["rs485_master_read_failures"] == 3
+
+
+def test_invalid_frame_sensor_discovery_is_valid_and_distinct():
+    diagnostics = HADiagnostics(topic_prefix="test")
+
+    _, payload = diagnostics.invalid_frame_count.discovery()
+    cfg = json.loads(payload)
+
+    # No energy device_class / unit: a plain counter (sidesteps the HA validity
+    # rule that rejected kVAh + energy on the original apparent-energy sensor).
+    assert "device_class" not in cfg
+    assert "unit_of_measurement" not in cfg
+    assert cfg["state_class"] == "total_increasing"
+    assert cfg["entity_category"] == "diagnostic"
+    assert cfg["enabled_by_default"] is False
+    assert cfg["unique_id"] == "em540_bridge_test_rs485_invalid_frames"
+
+    # Distinct identity from the bad-read sensor.
+    _, rf_payload = diagnostics.read_failed_count.discovery()
+    assert cfg["unique_id"] != json.loads(rf_payload)["unique_id"]
+
+
+def test_read_failed_sensor_identity_unchanged():
+    diagnostics = HADiagnostics(topic_prefix="test")
+
+    _, payload = diagnostics.read_failed_count.discovery()
+    cfg = json.loads(payload)
+
+    assert cfg["name"] == "RS485 Master Read Failures"
+    assert cfg["unique_id"] == "em540_bridge_test_rs485_master_read_failures"
+    assert cfg["state_class"] == "measurement"
+    assert "device_class" not in cfg
+    assert "unit_of_measurement" not in cfg

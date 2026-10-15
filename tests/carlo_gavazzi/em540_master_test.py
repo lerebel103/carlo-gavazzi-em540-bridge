@@ -29,7 +29,25 @@ def _make_config(**overrides):
         ensure_3phase_measuring_system=False,
     )
     defaults.update(overrides)
-    return SimpleNamespace(**defaults)
+    # Nested frame-validation block mirroring config.FrameValidationConfig. The
+    # existing plumbing tests here drive all-zero mock frames (frequency 0 Hz,
+    # which legitimately fails the >=40 Hz physical bound), so validation is
+    # DISABLED by default in this helper to keep those tests focused on their
+    # read/energy/listener plumbing. The dedicated validation tests below opt in
+    # with frame_validation_enabled=True.
+    fv_overrides = {k: defaults.pop(k) for k in list(defaults) if k.startswith("frame_validation_")}
+    fv = SimpleNamespace(
+        enabled=fv_overrides.get("frame_validation_enabled", False),
+        check_overflow_sentinel=fv_overrides.get("frame_validation_check_overflow_sentinel", True),
+        max_phase_current_a=fv_overrides.get("frame_validation_max_phase_current_a", 130.0),
+        max_system_current_a=fv_overrides.get("frame_validation_max_system_current_a", 390.0),
+        max_voltage_ln_v=fv_overrides.get("frame_validation_max_voltage_ln_v", 360.0),
+        max_voltage_ll_v=fv_overrides.get("frame_validation_max_voltage_ll_v", 625.0),
+        min_frequency_hz=fv_overrides.get("frame_validation_min_frequency_hz", 40.0),
+        max_frequency_hz=fv_overrides.get("frame_validation_max_frequency_hz", 70.0),
+        max_consecutive_invalid_s=fv_overrides.get("frame_validation_max_consecutive_invalid_s", 5.0),
+    )
+    return SimpleNamespace(frame_validation=fv, **defaults)
 
 
 def _make_successful_result(num_registers):
@@ -1025,6 +1043,706 @@ class TestEm540MasterMeterConfig(unittest.TestCase):
         ok = asyncio.run(master._write_register(0x1103, 2))
 
         self.assertTrue(ok)
+
+
+class TestFrameValidationIntegration(unittest.TestCase):
+    """Master-loop integration of the spec-based frame-validation gate."""
+
+    @patch("app.carlo_gavazzi.em540_master.AsyncModbusTcpClient")
+    def _build(self, mock_tcp_cls, **fv_overrides):
+        mock_client = MagicMock()
+        mock_client.read_holding_registers = AsyncMock(
+            side_effect=lambda address, count=1, device_id=None: _make_successful_result(count)
+        )
+        mock_client.connect = AsyncMock()
+        mock_client.close = MagicMock()
+        type(mock_client).connected = PropertyMock(return_value=True)
+        mock_tcp_cls.return_value = mock_client
+
+        fv_overrides.setdefault("frame_validation_enabled", True)
+        config = _make_config(**fv_overrides)
+        master = Em540Master(config)
+        master._client = mock_client
+        master._static_data_valid = True
+        master._energy_initial_read_complete = True
+        return master, mock_client
+
+    @staticmethod
+    def _primary_result(regs):
+        result = MagicMock()
+        result.isError.return_value = False
+        result.registers = list(regs)
+        return result
+
+    def _tick_responses(self, master, regs):
+        from app.carlo_gavazzi.em540_data import ENERGY_BLOCK_TOTAL_SIZE
+
+        return [
+            self._primary_result(regs),
+            _make_successful_result(ENERGY_BLOCK_TOTAL_SIZE),
+        ]
+
+    @staticmethod
+    def _realistic():
+        from tests.carlo_gavazzi.frame_validation_test import _realistic_registers
+
+        return _realistic_registers()
+
+    @staticmethod
+    def _set_int32(regs, off, value):
+        from tests.carlo_gavazzi.frame_validation_test import _set_int32
+
+        _set_int32(regs, off, value)
+
+    @staticmethod
+    def _realistic_current(current):
+        """Realistic primary block with a specific per-phase current (Ampere*1000)."""
+        from tests.carlo_gavazzi.frame_validation_test import _realistic_registers
+
+        return _realistic_registers(current=current)
+
+    @staticmethod
+    def _encode_uint32_le(value):
+        """Encode a UINT32 as little-endian word order (LSW first)."""
+        v = value & 0xFFFFFFFF
+        return [v & 0xFFFF, (v >> 16) & 0xFFFF]
+
+    def _make_em530(self, raw_ct_ratio, **fv_overrides):
+        """Build a master whose front frame is an EM530 with a chosen CT ratio.
+
+        ``raw_ct_ratio`` is the raw value of register 0x1003 (CT ratio x 10), or
+        None to leave the register empty (fallback path). After swapping in the
+        EM530 frame the effective current bounds are recomputed, mirroring what
+        connect() does once the static block is read.
+        """
+        from app.carlo_gavazzi.em540_data import Em540Frame
+
+        master, client = self._build(**fv_overrides)
+        master._front_data.frame = Em540Frame(is_em530=True)
+        if raw_ct_ratio is not None:
+            master._front_data.frame.static_reg_map[0x1003].values = self._encode_uint32_le(raw_ct_ratio)
+        master._recompute_effective_current_bounds()
+        return master, client
+
+    # 11. Sentinel current frame dropped end-to-end.
+    def test_sentinel_current_frame_dropped(self):
+        master, client = self._build()
+        regs = self._realistic()
+        regs[0x0C] = 0xFFFF
+        regs[0x0D] = 0x7FFF  # A L1 MSW sentinel
+
+        front_before = master._front_data
+        listener = MagicMock(spec=MeterDataListener)
+        listener.read_failed = AsyncMock()
+        listener.new_data = AsyncMock()
+        master.add_listener(listener)
+
+        # Anchor the "last accepted frame" to the patched clock so the elapsed
+        # time at this single rejection is 0 (< max_consecutive_invalid_s): a
+        # lone bad frame must be ABSORBED, not fail closed.
+        master._last_accepted_frame_monotonic = 999.0
+
+        client.read_holding_registers = AsyncMock(side_effect=self._tick_responses(master, regs))
+        with patch("app.carlo_gavazzi.em540_master.time.monotonic", return_value=999.0):
+            with patch.object(master._condition, "notify"):
+                result = asyncio.run(master.acquire_data())
+
+        self.assertFalse(result)
+        self.assertEqual(master._stats.invalid_frame_total, 1)
+        self.assertEqual(master._stats.last_invalid_frame_reason, "sentinel:a_l1")
+        self.assertGreaterEqual(master._stats.read_failed_total, 1)
+        # Listeners are NOT notified on a rejected frame: read_failed() would
+        # force downstream circuit breakers open / mark HA unavailable
+        # immediately, turning one transient bad frame into an instant outage.
+        # Instead the buffer swap/timestamp advance are withheld so consumers
+        # keep last-good and their own staleness timeouts open the breaker only
+        # if bad frames persist.
+        listener.read_failed.assert_not_awaited()
+        # Last-good retained (front buffer unchanged), timestamp not advanced.
+        self.assertIs(master._front_data, front_before)
+        self.assertEqual(master.last_frame_monotonic, 0.0)
+        # Daily extrema not folded with the sentinel current (~2.1M A).
+        snap = master.daily_extrema.snapshot()
+        self.assertIsNone(snap["current_l1_max"])
+
+    # 12. Out-of-range frame dropped.
+    def test_out_of_range_current_frame_dropped(self):
+        master, client = self._build()
+        regs = self._realistic()
+        self._set_int32(regs, 0x0C, 150000)  # 150 A on L1
+
+        front_before = master._front_data
+        # Lone rejection: anchor to the patched clock so elapsed is 0 and the
+        # frame is absorbed (no fail-closed) rather than depending on wall-clock
+        # proximity to construction time.
+        master._last_accepted_frame_monotonic = 999.0
+        client.read_holding_registers = AsyncMock(side_effect=self._tick_responses(master, regs))
+        with patch("app.carlo_gavazzi.em540_master.time.monotonic", return_value=999.0):
+            with patch.object(master._condition, "notify"):
+                result = asyncio.run(master.acquire_data())
+
+        self.assertFalse(result)
+        self.assertEqual(master._stats.invalid_frame_total, 1)
+        self.assertEqual(master._stats.last_invalid_frame_reason, "range:a_l1")
+        self.assertIs(master._front_data, front_before)
+        self.assertEqual(master.last_frame_monotonic, 0.0)
+        snap = master.daily_extrema.snapshot()
+        self.assertIsNone(snap["current_l1_max"])
+
+    # 13. Normal frame unaffected.
+    def test_normal_frame_passes_and_publishes(self):
+        master, client = self._build()
+        regs = self._realistic()
+
+        client.read_holding_registers = AsyncMock(side_effect=self._tick_responses(master, regs))
+        with patch("app.carlo_gavazzi.em540_master.time.monotonic", return_value=4242.0):
+            with patch.object(master._condition, "notify"):
+                result = asyncio.run(master.acquire_data())
+
+        self.assertTrue(result)
+        self.assertEqual(master._stats.invalid_frame_total, 0)
+        self.assertEqual(master.last_frame_monotonic, 4242.0)
+        # Extrema folded: L1 current ~10 A observed.
+        snap = master.daily_extrema.snapshot()
+        self.assertAlmostEqual(snap["current_l1_max"], 10.0, places=2)
+
+    # 14. Lone bad frame absorbed (no breaker); persistent rejections fail closed.
+    def test_persistent_bad_frames_fail_closed_single_bad_absorbed(self):
+        master, client = self._build()
+        listener = MagicMock(spec=MeterDataListener)
+        listener.read_failed = AsyncMock()
+        listener.new_data = AsyncMock()
+        master.add_listener(listener)
+
+        good = self._realistic()
+        bad = self._realistic()
+        bad[0x0C] = 0xFFFF
+        bad[0x0D] = 0x7FFF
+
+        # One good frame advances the timestamp and arms the single-frame absorb.
+        client.read_holding_registers = AsyncMock(side_effect=self._tick_responses(master, good))
+        with patch("app.carlo_gavazzi.em540_master.time.monotonic", return_value=100.0):
+            with patch.object(master._condition, "notify"):
+                self.assertTrue(asyncio.run(master.acquire_data()))
+        self.assertEqual(master.last_frame_monotonic, 100.0)
+
+        # A lone bad frame WITHIN the 5.0s window is absorbed: no read_failed,
+        # last-good retained, freshness timestamp not advanced.
+        client.read_holding_registers = AsyncMock(side_effect=self._tick_responses(master, bad))
+        with patch("app.carlo_gavazzi.em540_master.time.monotonic", return_value=104.0):
+            with patch.object(master._condition, "notify"):
+                self.assertFalse(asyncio.run(master.acquire_data()))
+        listener.read_failed.assert_not_awaited()
+        self.assertEqual(master.last_frame_monotonic, 100.0)
+
+        # Persistent bad frames: once elapsed-since-last-accept crosses the 5.0s
+        # window the gate fails closed, notifying listeners on each reject while
+        # the timestamp stays frozen (last-good retained).
+        for _ in range(3):
+            client.read_holding_registers = AsyncMock(side_effect=self._tick_responses(master, bad))
+            with patch("app.carlo_gavazzi.em540_master.time.monotonic", return_value=200.0):
+                with patch.object(master._condition, "notify"):
+                    self.assertFalse(asyncio.run(master.acquire_data()))
+        self.assertEqual(master.last_frame_monotonic, 100.0)
+        self.assertEqual(listener.read_failed.await_count, 3)
+        self.assertEqual(master._stats.invalid_frame_total, 4)
+
+        # A subsequent good frame recovers in-process and re-arms the absorb.
+        client.read_holding_registers = AsyncMock(side_effect=self._tick_responses(master, good))
+        with patch("app.carlo_gavazzi.em540_master.time.monotonic", return_value=300.0):
+            with patch.object(master._condition, "notify"):
+                self.assertTrue(asyncio.run(master.acquire_data()))
+        self.assertEqual(master.last_frame_monotonic, 300.0)
+
+        # After recovery, a lone bad frame is absorbed again (anchor reset).
+        prev_await_count = listener.read_failed.await_count
+        client.read_holding_registers = AsyncMock(side_effect=self._tick_responses(master, bad))
+        with patch("app.carlo_gavazzi.em540_master.time.monotonic", return_value=301.0):
+            with patch.object(master._condition, "notify"):
+                self.assertFalse(asyncio.run(master.acquire_data()))
+        self.assertEqual(listener.read_failed.await_count, prev_await_count)
+
+    # 14a. (Fix #1 a) A single bad frame after a good one does NOT fail closed.
+    def test_single_bad_frame_no_read_failed(self):
+        master, client = self._build()
+        listener = MagicMock(spec=MeterDataListener)
+        listener.read_failed = AsyncMock()
+        listener.new_data = AsyncMock()
+        master.add_listener(listener)
+
+        good = self._realistic()
+        bad = self._realistic()
+        bad[0x0C] = 0xFFFF
+        bad[0x0D] = 0x7FFF  # A L1 MSW sentinel
+
+        client.read_holding_registers = AsyncMock(side_effect=self._tick_responses(master, good))
+        with patch("app.carlo_gavazzi.em540_master.time.monotonic", return_value=1000.0):
+            with patch.object(master._condition, "notify"):
+                self.assertTrue(asyncio.run(master.acquire_data()))
+
+        client.read_holding_registers = AsyncMock(side_effect=self._tick_responses(master, bad))
+        with patch("app.carlo_gavazzi.em540_master.time.monotonic", return_value=1002.0):
+            with patch.object(master._condition, "notify"):
+                self.assertFalse(asyncio.run(master.acquire_data()))
+
+        listener.read_failed.assert_not_awaited()
+        self.assertEqual(master._stats.invalid_frame_total, 1)
+        # Exactly one read_failed_total increment for the single rejected frame.
+        self.assertEqual(master._stats.read_failed_total, 1)
+
+    # 14b. (Fix #1 b) Crossing the window DOES fail closed (breaker/HA).
+    def test_persistent_bad_frames_cross_window_read_failed(self):
+        # Shorten the window so the test does not depend on large time jumps.
+        master, client = self._build(frame_validation_max_consecutive_invalid_s=1.0)
+        listener = MagicMock(spec=MeterDataListener)
+        listener.read_failed = AsyncMock()
+        listener.new_data = AsyncMock()
+        master.add_listener(listener)
+
+        good = self._realistic()
+        bad = self._realistic()
+        bad[0x0C] = 0xFFFF
+        bad[0x0D] = 0x7FFF
+
+        client.read_holding_registers = AsyncMock(side_effect=self._tick_responses(master, good))
+        with patch("app.carlo_gavazzi.em540_master.time.monotonic", return_value=500.0):
+            with patch.object(master._condition, "notify"):
+                self.assertTrue(asyncio.run(master.acquire_data()))
+
+        # Elapsed 2.0s >= 1.0s window -> fail closed on this reject.
+        client.read_holding_registers = AsyncMock(side_effect=self._tick_responses(master, bad))
+        with patch("app.carlo_gavazzi.em540_master.time.monotonic", return_value=502.0):
+            with patch.object(master._condition, "notify"):
+                self.assertFalse(asyncio.run(master.acquire_data()))
+
+        listener.read_failed.assert_awaited_once()
+        # Still exactly one read_failed_total increment for this reject
+        # (_notify_listeners_read_failed does the single count).
+        self.assertEqual(master._stats.read_failed_total, 1)
+        self.assertEqual(master._stats.invalid_frame_total, 1)
+
+    # 14c. (Fix #1 c) An accepted frame resets the anchor so the next lone bad
+    # frame is absorbed again.
+    def test_accepted_frame_resets_window(self):
+        master, client = self._build(frame_validation_max_consecutive_invalid_s=1.0)
+        listener = MagicMock(spec=MeterDataListener)
+        listener.read_failed = AsyncMock()
+        listener.new_data = AsyncMock()
+        master.add_listener(listener)
+
+        good = self._realistic()
+        bad = self._realistic()
+        bad[0x0C] = 0xFFFF
+        bad[0x0D] = 0x7FFF
+
+        # Good -> bad (crosses) -> read_failed.
+        client.read_holding_registers = AsyncMock(side_effect=self._tick_responses(master, good))
+        with patch("app.carlo_gavazzi.em540_master.time.monotonic", return_value=10.0):
+            with patch.object(master._condition, "notify"):
+                self.assertTrue(asyncio.run(master.acquire_data()))
+        client.read_holding_registers = AsyncMock(side_effect=self._tick_responses(master, bad))
+        with patch("app.carlo_gavazzi.em540_master.time.monotonic", return_value=20.0):
+            with patch.object(master._condition, "notify"):
+                self.assertFalse(asyncio.run(master.acquire_data()))
+        self.assertEqual(listener.read_failed.await_count, 1)
+
+        # A good frame resets the anchor.
+        client.read_holding_registers = AsyncMock(side_effect=self._tick_responses(master, good))
+        with patch("app.carlo_gavazzi.em540_master.time.monotonic", return_value=21.0):
+            with patch.object(master._condition, "notify"):
+                self.assertTrue(asyncio.run(master.acquire_data()))
+
+        # Next lone bad frame WITHIN the window is absorbed again (no new notify).
+        client.read_holding_registers = AsyncMock(side_effect=self._tick_responses(master, bad))
+        with patch("app.carlo_gavazzi.em540_master.time.monotonic", return_value=21.5):
+            with patch.object(master._condition, "notify"):
+                self.assertFalse(asyncio.run(master.acquire_data()))
+        self.assertEqual(listener.read_failed.await_count, 1)
+
+    # 15. Config toggle disables validation.
+    def test_disabled_validation_publishes_sentinel_frame(self):
+        master, client = self._build(frame_validation_enabled=False)
+        regs = self._realistic()
+        regs[0x0C] = 0xFFFF
+        regs[0x0D] = 0x7FFF  # sentinel that WOULD be rejected if enabled
+
+        client.read_holding_registers = AsyncMock(side_effect=self._tick_responses(master, regs))
+        with patch("app.carlo_gavazzi.em540_master.time.monotonic", return_value=777.0):
+            with patch.object(master._condition, "notify"):
+                result = asyncio.run(master.acquire_data())
+
+        self.assertTrue(result)
+        self.assertEqual(master._stats.invalid_frame_total, 0)
+        self.assertEqual(master.last_frame_monotonic, 777.0)
+
+    # 16. EM530 CT ratio 200.0 (raw 2000) -> bound 2000 A: 1500 A publishes.
+    def test_em530_1500a_publishes(self):
+        master, client = self._make_em530(2000)
+        self.assertEqual(master._effective_max_phase_current_a, 2000.0)
+        self.assertEqual(master._effective_max_system_current_a, 6000.0)
+        regs = self._realistic_current(1_500_000)  # 1500 A per phase
+
+        client.read_holding_registers = AsyncMock(side_effect=self._tick_responses(master, regs))
+        with patch("app.carlo_gavazzi.em540_master.time.monotonic", return_value=1500.0):
+            with patch.object(master._condition, "notify"):
+                result = asyncio.run(master.acquire_data())
+
+        self.assertTrue(result)
+        self.assertEqual(master._stats.invalid_frame_total, 0)
+        self.assertEqual(master.last_frame_monotonic, 1500.0)
+        snap = master.daily_extrema.snapshot()
+        self.assertAlmostEqual(snap["current_l1_max"], 1500.0, places=1)
+
+    # 16b. EM530 bound 2000 A: a frame above it is dropped range:a_l1.
+    def test_em530_over_bound_dropped(self):
+        master, client = self._make_em530(2000)
+        regs = self._realistic_current(2_000_001)  # 2000.001 A
+
+        front_before = master._front_data
+        # Lone rejection absorbed: anchor to the patched clock (elapsed 0 < window).
+        master._last_accepted_frame_monotonic = 1600.0
+        client.read_holding_registers = AsyncMock(side_effect=self._tick_responses(master, regs))
+        with patch("app.carlo_gavazzi.em540_master.time.monotonic", return_value=1600.0):
+            with patch.object(master._condition, "notify"):
+                result = asyncio.run(master.acquire_data())
+
+        self.assertFalse(result)
+        self.assertEqual(master._stats.invalid_frame_total, 1)
+        self.assertEqual(master._stats.last_invalid_frame_reason, "range:a_l1")
+        self.assertIs(master._front_data, front_before)
+        self.assertEqual(master.last_frame_monotonic, 0.0)
+
+    # 17. EM530 with MISSING/empty 0x1003: skip fallback publishes 1500 A, but a
+    # current MSW sentinel is still dropped (sentinel always applies).
+    def test_em530_missing_ct_ratio_skip_fallback(self):
+        master, client = self._make_em530(None)
+        self.assertEqual(master._effective_max_phase_current_a, float("inf"))
+        self.assertEqual(master._effective_max_system_current_a, float("inf"))
+
+        regs = self._realistic_current(1_500_000)  # 1500 A — far above 130 A
+        client.read_holding_registers = AsyncMock(side_effect=self._tick_responses(master, regs))
+        with patch("app.carlo_gavazzi.em540_master.time.monotonic", return_value=1700.0):
+            with patch.object(master._condition, "notify"):
+                self.assertTrue(asyncio.run(master.acquire_data()))
+        self.assertEqual(master._stats.invalid_frame_total, 0)
+
+        # Sentinel still rejected under the skip fallback.
+        sentinel = self._realistic_current(1_500_000)
+        sentinel[0x0C] = 0xFFFF
+        sentinel[0x0D] = 0x7FFF  # A L1 MSW sentinel
+        client.read_holding_registers = AsyncMock(side_effect=self._tick_responses(master, sentinel))
+        with patch("app.carlo_gavazzi.em540_master.time.monotonic", return_value=1800.0):
+            with patch.object(master._condition, "notify"):
+                self.assertFalse(asyncio.run(master.acquire_data()))
+        self.assertEqual(master._stats.last_invalid_frame_reason, "sentinel:a_l1")
+
+    # 18. EM530 clamp: raw 5 clamps to CT 1.0 -> phase bound 10 A (2 x 5 A); 150 A dropped.
+    def test_em530_clamp_low_yields_finite_bound(self):
+        master, client = self._make_em530(5)  # below min 10 -> clamp to 10 (CT 1.0)
+        self.assertEqual(master._effective_max_phase_current_a, 10.0)
+        self.assertEqual(master._effective_max_system_current_a, 30.0)
+
+        regs = self._realistic_current(150000)  # 150 A > 10 A bound
+        # Lone rejection absorbed: anchor to the patched clock (elapsed 0 < window).
+        master._last_accepted_frame_monotonic = 1600.0
+        client.read_holding_registers = AsyncMock(side_effect=self._tick_responses(master, regs))
+        with patch("app.carlo_gavazzi.em540_master.time.monotonic", return_value=1600.0):
+            with patch.object(master._condition, "notify"):
+                self.assertFalse(asyncio.run(master.acquire_data()))
+        self.assertEqual(master._stats.last_invalid_frame_reason, "range:a_l1")
+
+    # 19. EM540 regression: effective bounds remain 130/390 (is_em530 False).
+    def test_em540_bounds_unchanged(self):
+        master, _client = self._build()
+        self.assertEqual(master._effective_max_phase_current_a, 130.0)
+        self.assertEqual(master._effective_max_system_current_a, 390.0)
+        # Recompute is a no-op for an EM540 frame (is_em530 defaults False).
+        master._recompute_effective_current_bounds()
+        self.assertEqual(master._effective_max_phase_current_a, 130.0)
+        self.assertEqual(master._effective_max_system_current_a, 390.0)
+
+
+def _encode_uint32_le(value):
+    """Encode a UINT32 as little-endian word order (LSW first)."""
+    v = value & 0xFFFFFFFF
+    return [v & 0xFFFF, (v >> 16) & 0xFFFF]
+
+
+class TestModelDetection(unittest.TestCase):
+    """Live model detection on the first-connect static-read path.
+
+    Validates the fix for the dead EM530 CT-aware current bound: wiring up
+    is_em530 from the Device Type register (0x000B) so the EM530 code paths are
+    reached, exactly once per process, on connect and never on the tick.
+    """
+
+    @patch("app.carlo_gavazzi.em540_master.AsyncModbusTcpClient")
+    def _build(self, mock_tcp_cls, *, device_type_id, ct_ratio_raw=None, ct_read_error=False):
+        """Build a master with a connect-driven mock client.
+
+        ``device_type_id`` is returned for register 0x000B (and 0x5012 Device
+        State / any single-register read reuses the generic realistic default).
+        ``ct_ratio_raw`` (if not None) is the raw 0x1003 value returned for an
+        EM530. ``ct_read_error`` forces the 0x1003 read to return an error. The
+        set of addresses actually requested is captured in ``requested_addrs``.
+        """
+        mock_client = MagicMock()
+        mock_client.connect = AsyncMock()
+        mock_client.close = MagicMock()
+        type(mock_client).connected = PropertyMock(return_value=True)
+
+        requested_addrs = []
+
+        async def _read(address, count=1, device_id=None):
+            requested_addrs.append(address)
+            result = MagicMock()
+            if address == 0x1003 and ct_read_error:
+                result.isError.return_value = True
+                result.registers = []
+                return result
+            result.isError.return_value = False
+            if address == 0x000B:
+                # Device Type is a single register (0x000B); overlay invariant
+                # holds because the static read never populates the L3-L1 high
+                # word here.
+                result.registers = [device_type_id] * count
+            elif address == 0x1003:
+                regs = _encode_uint32_le(ct_ratio_raw if ct_ratio_raw is not None else 0)
+                result.registers = regs[:count] if count <= len(regs) else regs + [0] * (count - len(regs))
+            else:
+                result.registers = [0] * count
+            return result
+
+        mock_client.read_holding_registers = AsyncMock(side_effect=_read)
+        mock_tcp_cls.return_value = mock_client
+
+        config = _make_config(frame_validation_enabled=True)
+        master = Em540Master(config)
+        master._client = mock_client
+        # Force the first-connect static-read path (detection runs here).
+        master._static_data_valid = False
+        master._requested_addrs = requested_addrs  # expose for assertions
+        return master, mock_client
+
+    def test_em530_id_2096_end_to_end(self):
+        """EM530 id 2096: is_em530 True on both frames, 0x1003 read, CT bound live."""
+        master, _client = self._build(device_type_id=2096, ct_ratio_raw=2000)
+
+        with self.assertLogs("Em540Master", level="INFO") as cm:
+            asyncio.run(master.connect())
+
+        self.assertTrue(master._front_data.frame.is_em530)
+        self.assertTrue(master._back_data.frame.is_em530)
+        self.assertIn(0x1003, master._front_data.frame.static_reg_map)
+        self.assertIn(0x1003, master._back_data.frame.static_reg_map)
+        self.assertIn(0x1003, master._requested_addrs)
+        # CT ratio raw 2000 -> CT 200.0 -> phase bound 2000 A, system 6000 A.
+        self.assertEqual(master._effective_max_phase_current_a, 2000.0)
+        self.assertEqual(master._effective_max_system_current_a, 6000.0)
+        self.assertTrue(any("Detected meter model: EM530 (device type 2096)" in m for m in cm.output))
+        self.assertFalse(any("Unrecognized" in m for m in cm.output))
+
+    def test_em530_id_1956_end_to_end(self):
+        """EM530 id 1956 maps to EM530 identically to 2096."""
+        master, _client = self._build(device_type_id=1956, ct_ratio_raw=2000)
+
+        with self.assertLogs("Em540Master", level="INFO") as cm:
+            asyncio.run(master.connect())
+
+        self.assertTrue(master._front_data.frame.is_em530)
+        self.assertTrue(master._back_data.frame.is_em530)
+        self.assertEqual(master._effective_max_phase_current_a, 2000.0)
+        self.assertTrue(any("Detected meter model: EM530 (device type 1956)" in m for m in cm.output))
+
+    def test_em540_id_1744(self):
+        """EM540 id: is_em530 False, no 0x1003 read, bounds stay 130/390."""
+        master, _client = self._build(device_type_id=1744)
+
+        with self.assertLogs("Em540Master", level="INFO") as cm:
+            asyncio.run(master.connect())
+
+        self.assertFalse(master._front_data.frame.is_em530)
+        self.assertFalse(master._back_data.frame.is_em530)
+        self.assertNotIn(0x1003, master._front_data.frame.static_reg_map)
+        self.assertNotIn(0x1003, master._back_data.frame.static_reg_map)
+        self.assertNotIn(0x1003, master._requested_addrs)
+        self.assertEqual(master._effective_max_phase_current_a, 130.0)
+        self.assertEqual(master._effective_max_system_current_a, 390.0)
+        self.assertTrue(any("Detected meter model: EM540 (device type 1744)" in m for m in cm.output))
+
+    def test_unrecognized_device_type(self):
+        """Unrecognized id: WARNING with raw id + EM540 fallback, bounds 130/390."""
+        master, _client = self._build(device_type_id=9999)
+
+        with self.assertLogs("Em540Master", level="WARNING") as cm:
+            asyncio.run(master.connect())
+
+        self.assertFalse(master._front_data.frame.is_em530)
+        self.assertNotIn(0x1003, master._requested_addrs)
+        self.assertEqual(master._effective_max_phase_current_a, 130.0)
+        self.assertEqual(master._effective_max_system_current_a, 390.0)
+        self.assertTrue(any("Unrecognized meter device type 9999" in m for m in cm.output))
+
+    def test_empty_device_type(self):
+        """Device type 0 (empty/zero): treated as unrecognized -> EM540 fallback."""
+        master, _client = self._build(device_type_id=0)
+
+        with self.assertLogs("Em540Master", level="WARNING") as cm:
+            asyncio.run(master.connect())
+
+        self.assertFalse(master._front_data.frame.is_em530)
+        self.assertEqual(master._effective_max_phase_current_a, 130.0)
+        self.assertTrue(any("Unrecognized meter device type 0" in m for m in cm.output))
+
+    def test_em530_ct_read_failure_non_fatal(self):
+        """EM530 but 0x1003 read fails: connect succeeds, WARNING, bounds skip (inf)."""
+        master, _client = self._build(device_type_id=2096, ct_read_error=True)
+
+        with self.assertLogs("Em540Master", level="WARNING") as cm:
+            asyncio.run(master.connect())
+
+        # Connection completed: static data valid and failure counter reset.
+        self.assertTrue(master._static_data_valid)
+        self.assertEqual(master._consecutive_connect_failures, 0)
+        self.assertTrue(master._front_data.frame.is_em530)
+        self.assertEqual(master._effective_max_phase_current_a, float("inf"))
+        self.assertEqual(master._effective_max_system_current_a, float("inf"))
+        self.assertTrue(any("failed to read CT ratio register 0x1003" in m for m in cm.output))
+
+    def test_both_buffers_consistent_after_em530_connect(self):
+        """Front and back frames agree on is_em530, 0x1003 membership, and values."""
+        master, _client = self._build(device_type_id=2096, ct_ratio_raw=2000)
+        asyncio.run(master.connect())
+
+        front = master._front_data.frame
+        back = master._back_data.frame
+        self.assertEqual(front.is_em530, back.is_em530)
+        self.assertEqual(0x1003 in front.static_reg_map, 0x1003 in back.static_reg_map)
+        self.assertEqual(
+            front.static_reg_map[0x1003].values,
+            back.static_reg_map[0x1003].values,
+        )
+        self.assertEqual(front.static_reg_map[0x1003].values, _encode_uint32_le(2000))
+
+    def test_reconnect_skips_detection_and_keeps_bounds(self):
+        """A reconnect (static already valid) does not re-run detection."""
+        master, client = self._build(device_type_id=2096, ct_ratio_raw=2000)
+        asyncio.run(master.connect())
+
+        self.assertTrue(master._front_data.frame.is_em530)
+        phase_bound = master._effective_max_phase_current_a
+        system_bound = master._effective_max_system_current_a
+
+        # Second connect: static data already valid -> static read + detection
+        # block skipped. Record addresses requested on the reconnect only.
+        client.read_holding_registers.reset_mock()
+        master._requested_addrs.clear()
+        asyncio.run(master.connect())
+
+        # No Device Type / CT re-read for detection on the reconnect.
+        self.assertNotIn(0x000B, master._requested_addrs)
+        self.assertNotIn(0x1003, master._requested_addrs)
+        # Model + cached bounds persist unchanged.
+        self.assertTrue(master._front_data.frame.is_em530)
+        self.assertEqual(master._effective_max_phase_current_a, phase_bound)
+        self.assertEqual(master._effective_max_system_current_a, system_bound)
+
+    @patch("app.carlo_gavazzi.em540_master.AsyncModbusTcpClient")
+    def _build_toggleable_ct(self, mock_tcp_cls, *, device_type_id, ct_ratio_raw):
+        """Build a master whose 0x1003 read fails until ``ct_ok`` is flipped True.
+
+        Returns ``(master, client, state)`` where ``state`` is a mutable dict with
+        a ``ct_ok`` flag and a captured ``requested_addrs`` list. This models a
+        transient first-connect CT read failure that recovers on a later connect.
+        """
+        mock_client = MagicMock()
+        mock_client.connect = AsyncMock()
+        mock_client.close = MagicMock()
+        type(mock_client).connected = PropertyMock(return_value=True)
+
+        state = {"ct_ok": False, "requested_addrs": []}
+
+        async def _read(address, count=1, device_id=None):
+            state["requested_addrs"].append(address)
+            result = MagicMock()
+            if address == 0x1003 and not state["ct_ok"]:
+                result.isError.return_value = True
+                result.registers = []
+                return result
+            result.isError.return_value = False
+            if address == 0x000B:
+                result.registers = [device_type_id] * count
+            elif address == 0x1003:
+                regs = _encode_uint32_le(ct_ratio_raw)
+                result.registers = regs[:count] if count <= len(regs) else regs + [0] * (count - len(regs))
+            else:
+                result.registers = [0] * count
+            return result
+
+        mock_client.read_holding_registers = AsyncMock(side_effect=_read)
+        mock_tcp_cls.return_value = mock_client
+
+        config = _make_config(frame_validation_enabled=True)
+        master = Em540Master(config)
+        master._client = mock_client
+        master._static_data_valid = False
+        return master, mock_client, state
+
+    def test_em530_ct_read_recovers_on_reconnect(self):
+        """EM530: first 0x1003 read fails (inf bounds), reconnect re-reads and recovers."""
+        master, client, state = self._build_toggleable_ct(device_type_id=2096, ct_ratio_raw=2000)
+
+        # First connect: CT read fails -> is_em530 True, bounds unset (inf).
+        asyncio.run(master.connect())
+        self.assertTrue(master._front_data.frame.is_em530)
+        self.assertEqual(master._effective_max_phase_current_a, float("inf"))
+        self.assertEqual(master._effective_max_system_current_a, float("inf"))
+
+        # Reconnect with CT read now succeeding -> bounds become CT-derived.
+        state["ct_ok"] = True
+        state["requested_addrs"].clear()
+        asyncio.run(master.connect())
+
+        # Reconnect skips detection (no 0x000B re-read) but DID retry 0x1003.
+        self.assertNotIn(0x000B, state["requested_addrs"])
+        self.assertIn(0x1003, state["requested_addrs"])
+        self.assertEqual(master._effective_max_phase_current_a, 2000.0)
+        self.assertEqual(master._effective_max_system_current_a, 6000.0)
+        # Both buffers carry the recovered 0x1003 value.
+        self.assertEqual(
+            master._front_data.frame.static_reg_map[0x1003].values,
+            master._back_data.frame.static_reg_map[0x1003].values,
+        )
+        self.assertEqual(master._front_data.frame.static_reg_map[0x1003].values, _encode_uint32_le(2000))
+
+    def test_em540_reconnect_unaffected_by_ct_retry(self):
+        """EM540 reconnect: no 0x1003 read, bounds stay 130/390."""
+        master, client = self._build(device_type_id=1744)
+        asyncio.run(master.connect())
+        self.assertFalse(master._front_data.frame.is_em530)
+
+        client.read_holding_registers.reset_mock()
+        master._requested_addrs.clear()
+        asyncio.run(master.connect())
+
+        self.assertNotIn(0x1003, master._requested_addrs)
+        self.assertEqual(master._effective_max_phase_current_a, 130.0)
+        self.assertEqual(master._effective_max_system_current_a, 390.0)
+
+    def test_em530_successful_first_read_not_reread_on_reconnect(self):
+        """EM530 whose first 0x1003 read succeeded is NOT re-read on reconnect."""
+        master, client = self._build(device_type_id=2096, ct_ratio_raw=2000)
+        asyncio.run(master.connect())
+        self.assertEqual(master._effective_max_phase_current_a, 2000.0)
+
+        # Reconnect: bounds already finite -> guard skips the CT retry.
+        client.read_holding_registers.reset_mock()
+        master._requested_addrs.clear()
+        asyncio.run(master.connect())
+
+        self.assertNotIn(0x1003, master._requested_addrs)
+        self.assertEqual(master._effective_max_phase_current_a, 2000.0)
+        self.assertEqual(master._effective_max_system_current_a, 6000.0)
 
 
 if __name__ == "__main__":
