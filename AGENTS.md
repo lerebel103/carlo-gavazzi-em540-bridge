@@ -114,9 +114,11 @@ working system.
 
 ### Staleness protection ladder
 
-Staleness is caught by five independent tiers, each fail-closed. Listed in the order they fire
-during an upstream wedge (lowest threshold first). These thresholds form a fail-closed ladder;
-keep them monotonic.
+Staleness is caught by five independent tiers, each fail-closed. Listed by role, not by threshold
+magnitude: the consumer-facing wall-clock breakers (tiers 1-2) first, then the upstream detectors
+that cause them to fire (tiers 3-4), then the last-resort self-exit (tier 5). The thresholds are
+therefore not monotonic by design (0.5s -> 3.0s -> 1.0s -> 5.0s -> 30.0s); each is tuned for its
+own consumer or detector. Preserve this fail-closed layering when changing any threshold.
 
 1. **Downstream Modbus bridge wall-clock breaker** — `em540_slave.update_timeout` /
    `ts65a_slave.update_timeout` = 0.5s. Per-request breaker; returns a Modbus exception instead of
