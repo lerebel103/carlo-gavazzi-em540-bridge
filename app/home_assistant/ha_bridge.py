@@ -277,6 +277,15 @@ class HABridge(MeterDataListener):
                 self._snapshot_pending = False
                 self._availability_dirty = False
 
+            # Wall-clock freshness watchdog: evaluate BEFORE the publish gate so a
+            # stale front snapshot transitions the bridge offline and suppresses
+            # publishing this iteration. Re-reads self._availability_dirty because
+            # the watchdog may have just set it via _set_data_available(False).
+            self._evaluate_freshness(snapshot, time.time())
+            if self._availability_dirty:
+                availability_dirty = True
+                self._availability_dirty = False
+
             if availability_dirty:
                 self._publish_availability()
 
@@ -338,6 +347,39 @@ class HABridge(MeterDataListener):
 
         skipped_intervals = int((now - deadline) // interval) + 1
         return deadline + skipped_intervals * interval
+
+    def _evaluate_freshness(self, snapshot: _HASnapshot, now: float) -> None:
+        """HA/MQTT wall-clock freshness watchdog.
+
+        Transitions the bridge offline (via the same _set_data_available(False)
+        path read_failed() uses) when the newest snapshot's wall-clock age exceeds
+        ha_max_stale_s, so downstream HA never sees silently stale values even if
+        the master never signalled a failure. This runs on the HA bridge's own
+        notify thread/loop — it adds no work to the master tick loop or listener
+        notification path.
+
+        Notes / accepted limitations:
+        - `now` and snapshot.timestamp are both wall-clock (time.time()), matching
+          MeterData.update_from_frame. A wall-clock step/adjustment is an accepted
+          limitation (the frame timestamp is wall-clock by design), identical to
+          the downstream PduHelper breaker tradeoff.
+        - Detection latency is bounded by the loop wake cadence (the MQTT
+          update_interval publish deadline), so staleness is caught at worst one
+          update_interval late.
+        - The snapshot.timestamp > 0 guard preserves pre-first-frame semantics:
+          before any frame is received the watchdog never trips, exactly as today.
+        - ha_max_stale_s <= 0 disables the watchdog (mirrors health_max_stale_s).
+        - Idempotent: _set_data_available(False) early-returns once already offline,
+          so the offline transition publishes exactly once (no per-iteration spam).
+          Recovery is automatic — a fresh new_data() restores a current timestamp
+          and sets _data_available True, so the next evaluation passes.
+        """
+        max_stale = self._mqtt_config.ha_max_stale_s
+        if max_stale <= 0 or snapshot.timestamp <= 0 or not self._data_available:
+            return
+
+        if now - snapshot.timestamp > max_stale:
+            self._set_data_available(False)
 
     def _set_data_available(self, available: bool) -> None:
         if self._data_available == available:

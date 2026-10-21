@@ -1,3 +1,35 @@
+# ============================================================================
+# Staleness protection ladder (fail-closed, in fire order during an upstream
+# wedge). Every tier is independent and fails CLOSED. Keep the thresholds
+# monotonic / non-inverted — a lower tier must trip before a higher one.
+#
+#   1. Downstream Modbus bridge wall-clock breaker — em540_slave.update_timeout /
+#      ts65a_slave.update_timeout = 0.5s. Bounds Modbus consumers: a per-request
+#      breaker that returns a Modbus exception instead of stale registers. Blind
+#      to a meter that keeps emitting a repeating-but-valid frame (that refreshes
+#      the frame timestamp and keeps this breaker satisfied).
+#   2. HA/MQTT wall-clock freshness watchdog (NEW) — mqtt.ha_max_stale_s = 3.0s.
+#      Bounds MQTT/HA consumers: marks HA unavailable on wall-clock frame age.
+#      Same blind spot as tier 1 (a refreshing timestamp satisfies it).
+#   3. Upstream stale/duplicate-frame detector —
+#      em540_master.stale_frame_detection.max_stale_s = 1.0s. This is the REASON
+#      data stops flowing for a stuck-but-plausible meter: it detects a repeating
+#      frame (identical fast-changing registers) and fails closed, which is what
+#      then trips tiers 1/2. Blind to a frame that keeps changing plausibly.
+#   4. Persistent-invalid-frame gate —
+#      em540_master.frame_validation.max_consecutive_invalid_s = 5.0s. Fails
+#      closed when frames persistently violate the spec/physical bounds. Blind to
+#      an in-range but wrong value.
+#   5. Last-resort process self-exit — em540_master.health_max_stale_s = 30.0s
+#      (runtime floor ~25s, 40s startup grace). Exits so Docker restarts a wedged
+#      instance. Coarsest tier; only fires when nothing fresher recovered.
+#
+# Modbus consumers are bound by tier 1; MQTT/HA by tier 2. Tiers 3/4 are the
+# reason data stops flowing for a stuck-but-plausible meter (a repeating-but-
+# valid frame refreshes data.timestamp and would otherwise keep every wall-clock
+# breaker satisfied), not the only thing stopping it.
+# ============================================================================
+
 em540_master:
   # Whether to use serial RS485 (RTU) or TCP communication to the energy meter
   # Possible values: serial, tcp
@@ -170,6 +202,16 @@ mqtt:
   password: ""
   # Update interval in seconds for publishing the values to MQTT
   update_interval: 1.0
+  # HA/MQTT wall-clock freshness watchdog (staleness ladder tier 2). Max seconds
+  # since the last upstream frame before the HA bridge marks itself unavailable
+  # (retained "offline" on the availability topic) and stops publishing fresh
+  # sensor state. This is the MQTT path's OWN self-protecting staleness breaker:
+  # it fires on wall-clock frame age independent of any master signal, so HA never
+  # shows silently stale values. Default 3.0s is ~3x update_interval (above) so a
+  # single missed publish does not flap HA offline. Detection is bounded by the
+  # MQTT publish wake cadence (update_interval), so staleness is caught at worst
+  # one update_interval late. Set to 0 (or negative) to disable the watchdog.
+  ha_max_stale_s: 3.0
   # Log level for the MQTT component
   log_level: INFO
 

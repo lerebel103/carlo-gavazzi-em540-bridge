@@ -172,6 +172,121 @@ class TestHABridge(unittest.TestCase):
         self.assertTrue(self.bridge._availability_dirty)
         self.bridge._condition.notify_all.assert_called_once()
 
+    # -- HA/MQTT wall-clock freshness watchdog --
+
+    def test_freshness_watchdog_goes_offline_when_snapshot_too_old(self):
+        # Data available, a frame was received, but its wall-clock age exceeds
+        # ha_max_stale_s: the watchdog must mark the bridge offline WITHOUT any
+        # read_failed() call. Mock the condition so _set_data_available doesn't
+        # need a real lock; capture that the offline transition path fires.
+        self.bridge._mqtt_config.ha_max_stale_s = 3.0
+        self.bridge._data_available = True
+        self.bridge._condition = MagicMock()
+        snapshot = self.bridge._front_snapshot
+        snapshot.timestamp = 100.0
+
+        # now is 4s later -> age 4.0 > 3.0
+        self.bridge._evaluate_freshness(snapshot, 104.0)
+
+        self.assertFalse(self.bridge._data_available)
+        self.assertTrue(self.bridge._availability_dirty)
+        self.bridge._condition.notify_all.assert_called_once()
+
+    def test_freshness_watchdog_does_not_trip_when_fresh(self):
+        self.bridge._mqtt_config.ha_max_stale_s = 3.0
+        self.bridge._data_available = True
+        self.bridge._condition = MagicMock()
+        snapshot = self.bridge._front_snapshot
+        snapshot.timestamp = 100.0
+
+        # age 2.0 <= 3.0 -> stays online
+        self.bridge._evaluate_freshness(snapshot, 102.0)
+
+        self.assertTrue(self.bridge._data_available)
+        self.assertFalse(self.bridge._availability_dirty)
+
+    def test_freshness_watchdog_does_not_spam_offline(self):
+        # Repeated evaluations while already stale must not re-publish offline:
+        # _set_data_available(False) early-returns once already offline, so no
+        # further notify_all / availability_dirty churn occurs after the first.
+        self.bridge._mqtt_config.ha_max_stale_s = 3.0
+        self.bridge._data_available = True
+        self.bridge._condition = MagicMock()
+        snapshot = self.bridge._front_snapshot
+        snapshot.timestamp = 100.0
+
+        self.bridge._evaluate_freshness(snapshot, 104.0)
+        self.assertFalse(self.bridge._data_available)
+        self.assertEqual(self.bridge._condition.notify_all.call_count, 1)
+
+        # Clear the dirty flag as the notify loop would after publishing, then
+        # evaluate again while still stale: must be a no-op (idempotent).
+        self.bridge._availability_dirty = False
+        self.bridge._evaluate_freshness(snapshot, 110.0)
+
+        self.assertFalse(self.bridge._data_available)
+        self.assertFalse(self.bridge._availability_dirty)
+        self.assertEqual(self.bridge._condition.notify_all.call_count, 1)
+
+    def test_freshness_watchdog_recovers_on_fresh_frame(self):
+        import asyncio
+
+        # Start stale/offline.
+        self.bridge._mqtt_config.ha_max_stale_s = 3.0
+        self.bridge._data_available = True
+        self.bridge._condition = MagicMock()
+        snapshot = self.bridge._front_snapshot
+        snapshot.timestamp = 100.0
+        self.bridge._evaluate_freshness(snapshot, 104.0)
+        self.assertFalse(self.bridge._data_available)
+
+        # A genuinely fresh frame restores availability and publishing resumes.
+        data = MeterData()
+        data._timestamp = 200.0
+        data.frame.static_reg_map[0x5000].values = [
+            0x3142,
+            0x3344,
+            0x3546,
+            0x3748,
+            0x3949,
+            0x4141,
+            0x4242,
+            0x4343,
+        ]
+        asyncio.run(self.bridge.new_data(data))
+        self.assertTrue(self.bridge._data_available)
+
+        # Evaluating the fresh snapshot shortly after keeps it online.
+        self.bridge._evaluate_freshness(self.bridge._front_snapshot, 200.5)
+        self.assertTrue(self.bridge._data_available)
+
+    def test_freshness_watchdog_disabled_when_threshold_non_positive(self):
+        # ha_max_stale_s <= 0 disables the watchdog: never trips regardless of age.
+        self.bridge._mqtt_config.ha_max_stale_s = 0
+        self.bridge._data_available = True
+        self.bridge._condition = MagicMock()
+        snapshot = self.bridge._front_snapshot
+        snapshot.timestamp = 100.0
+
+        self.bridge._evaluate_freshness(snapshot, 1_000_000.0)
+
+        self.assertTrue(self.bridge._data_available)
+        self.assertFalse(self.bridge._availability_dirty)
+
+    def test_freshness_watchdog_ignores_pre_first_frame(self):
+        # Before any frame (timestamp == 0) the watchdog must not trip, preserving
+        # startup semantics.
+        self.bridge._mqtt_config.ha_max_stale_s = 3.0
+        self.bridge._data_available = True
+        self.bridge._condition = MagicMock()
+        snapshot = self.bridge._front_snapshot
+        snapshot.timestamp = 0.0
+
+        self.bridge._evaluate_freshness(snapshot, 1_000_000.0)
+
+        self.assertTrue(self.bridge._data_available)
+        self.assertFalse(self.bridge._availability_dirty)
+
 
 class TestHABridgeConfigEntities(unittest.TestCase):
     """Tests for HAConfigEntities integration in HABridge."""

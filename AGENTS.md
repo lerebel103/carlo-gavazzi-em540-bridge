@@ -112,6 +112,34 @@ working system.
   Exception responses to IDs the bridge does not serve are normal scan noise and are logged at DEBUG;
   exceptions for a served slave ID indicate a genuine failure and are logged at ERROR (`pdu_helper.py`).
 
+### Staleness protection ladder
+
+Staleness is caught by five independent tiers, each fail-closed. Listed in the order they fire
+during an upstream wedge (lowest threshold first). These thresholds form a fail-closed ladder;
+keep them monotonic.
+
+1. **Downstream Modbus bridge wall-clock breaker** — `em540_slave.update_timeout` /
+   `ts65a_slave.update_timeout` = 0.5s. Per-request breaker; returns a Modbus exception instead of
+   stale registers. Bounds Modbus consumers. Blind to a repeating-but-valid frame (it refreshes the
+   frame timestamp and keeps the breaker satisfied).
+2. **HA/MQTT wall-clock freshness watchdog** — `mqtt.ha_max_stale_s` = 3.0s (`<= 0` disables).
+   Marks HA unavailable on wall-clock frame age and stops publishing. Bounds MQTT/HA consumers.
+   Same blind spot as tier 1.
+3. **Upstream stale/duplicate-frame detector** — `em540_master.stale_frame_detection.max_stale_s`
+   = 1.0s. Detects a repeating frame (identical fast-changing registers) and fails closed via the
+   `read_failed()` fan-out — this is the REASON data stops flowing for a stuck-but-plausible meter,
+   which then trips tiers 1/2. Blind to a frame that keeps changing plausibly.
+4. **Persistent-invalid-frame gate** — `em540_master.frame_validation.max_consecutive_invalid_s`
+   = 5.0s. Fails closed when frames persistently violate the spec/physical bounds. Blind to an
+   in-range but wrong value.
+5. **Last-resort process self-exit** — `em540_master.health_max_stale_s` = 30.0s (runtime floor
+   25s, 40s startup grace; `<= 0` disables). Self-exits so Docker restarts a wedged instance.
+   Coarsest tier; only fires when nothing fresher recovered.
+
+Modbus consumers are bound by tier 1; MQTT/HA by tier 2. Tiers 3/4 are the reason data stops
+flowing for a stuck-but-plausible meter (a repeating-but-valid frame refreshes `data.timestamp`
+and would otherwise keep every wall-clock breaker satisfied), not the only thing stopping it.
+
 ## Architecture Map
 
 - `app/main.py`: startup and tick loop scheduling; wires master stats and the daily-extrema source into the MQTT bridge

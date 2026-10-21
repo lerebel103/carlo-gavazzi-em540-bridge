@@ -181,6 +181,15 @@ class MqttConfig:
     username: str = ""
     password: str = ""
     update_interval: float = 1.0
+    # HA/MQTT wall-clock freshness watchdog: max seconds since the last upstream
+    # frame before the HA bridge marks itself unavailable (retained "offline" on
+    # the availability topic) and stops publishing fresh sensor state. This is the
+    # MQTT path's OWN self-protecting staleness breaker — it fires on wall-clock
+    # frame age even if the master never signalled a failure. Default 3.0s is ~3x
+    # the default MQTT update_interval (1.0s) so a single missed publish does not
+    # flap HA offline, and ~10x tighter than the ~30s health_max_stale_s process
+    # watchdog. A value <= 0 DISABLES the watchdog (mirrors health_max_stale_s).
+    ha_max_stale_s: float = 3.0
     log_level: str = "INFO"
 
 

@@ -573,6 +573,31 @@ def test_valid_smoothing_window_seconds_accepted(tmp_path, value):
     assert state.ts65a_slave.smoothing_window_seconds == value
 
 
+# -- mqtt.ha_max_stale_s (HA/MQTT freshness watchdog) --
+
+
+def test_ha_max_stale_s_defaults_to_3(tmp_path):
+    # Unset in YAML -> dataclass default of 3.0.
+    path = _make_config(tmp_path)
+    state = ConfigManager(path).load()
+    assert state.mqtt.ha_max_stale_s == 3.0
+
+
+@pytest.mark.parametrize("value", [1.5, 0.5, 10, 30.0])
+def test_ha_max_stale_s_override_accepted(tmp_path, value):
+    path = _make_config(tmp_path, {"mqtt.ha_max_stale_s": value})
+    state = ConfigManager(path).load()
+    assert state.mqtt.ha_max_stale_s == value
+
+
+@pytest.mark.parametrize("value", [0, 0.0, -1, -5.0])
+def test_ha_max_stale_s_non_positive_disables_and_loads(tmp_path, value):
+    # Disable convention (mirrors health_max_stale_s): <= 0 must load, not raise.
+    path = _make_config(tmp_path, {"mqtt.ha_max_stale_s": value})
+    state = ConfigManager(path).load()
+    assert state.mqtt.ha_max_stale_s == value
+
+
 # ---------------------------------------------------------------------------
 # Persistence tests (Task 2.4)
 # ---------------------------------------------------------------------------
