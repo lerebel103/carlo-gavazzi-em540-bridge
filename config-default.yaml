@@ -74,6 +74,24 @@ em540_master:
     # fail closed (downstream breaker opens, HA goes unavailable). A single/
     # transient bad frame is still absorbed; independent of health_max_stale_s.
     max_consecutive_invalid_s: 5.0
+  # Upstream stale/duplicate-frame safeguard. The meter can serve the same frame
+  # twice when polled faster than its internal update loop (the true poll rate,
+  # e.g. 12.5Hz, exceeds update_interval) and — more dangerously — can wedge and
+  # repeat one frame forever while still answering. Each accepted frame is reduced
+  # to an equality composite over six fast-changing primary-block registers (the
+  # three phase currents and the system power/apparent/reactive totals; voltage
+  # and frequency are excluded as too stable). Consecutive identical composites
+  # are counted stale, and once a stall lasts at least max_stale_s the master
+  # fails closed (downstream breaker opens, HA goes unavailable) exactly like the
+  # invalid-frame gate; a genuinely fresh frame resets the stall and resumes
+  # publishing. The threshold is in SECONDS (not a poll count), so it is
+  # independent of the meter's true poll rate and of health_max_stale_s.
+  stale_frame_detection:
+    enabled: true
+    # Idle guard: an all-zero composite (no load — P, VA, var and all three
+    # currents == 0) is a legitimate zero-throughput idle state and is NEVER
+    # counted stale or allowed to open the breaker.
+    max_stale_s: 1.0
   # Log level for the master component
   log_level: INFO
 

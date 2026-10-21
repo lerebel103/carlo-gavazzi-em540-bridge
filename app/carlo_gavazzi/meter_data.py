@@ -24,6 +24,39 @@ def _fast_int32_from_regs_le(registers: list[int], offset: int) -> int:
     return _STRUCT_INT32_BE.unpack(_STRUCT_2H.pack(r1, r0))[0]
 
 
+# Primary-block (base 0x0000, physical addr == offset) INT32 LSW offsets of the
+# six registers used for the frame-freshness equality composite: the three phase
+# currents (0x0C, 0x0E, 0x10) and the system power / apparent / reactive totals
+# (0x28, 0x2A, 0x2C). Each INT32 spans offset and offset+1 (little-endian word
+# order). Voltage (0x00) and frequency (0x33) are deliberately EXCLUDED: they are
+# too stable to distinguish a genuinely refreshed frame from a stale duplicate at
+# a fast (>=10Hz) poll rate.
+_FRESHNESS_COMPOSITE_OFFSETS: tuple[int, ...] = (0x0C, 0x0E, 0x10, 0x28, 0x2A, 0x2C)
+
+
+def _fast_freshness_composite_from_regs_le(
+    registers: list[int],
+) -> tuple[int, int, int, int, int, int]:
+    """Build the six-value frame-freshness equality composite from raw registers.
+
+    Returns the six INT32 LE values ``(I1@0x0C, I2@0x0E, I3@0x10, P@0x28,
+    VA@0x2A, var@0x2C)`` decoded straight from the raw primary-block register
+    words. This is an EQUALITY composite only: it is used to detect stale/
+    duplicate frames (identical composites on consecutive frames), so decoding to
+    engineering units is neither required nor done — raw INT32 word decode is the
+    cheapest comparable form. Voltage and frequency are deliberately excluded (too
+    stable); see ``_FRESHNESS_COMPOSITE_OFFSETS``.
+    """
+    return (
+        _fast_int32_from_regs_le(registers, 0x0C),
+        _fast_int32_from_regs_le(registers, 0x0E),
+        _fast_int32_from_regs_le(registers, 0x10),
+        _fast_int32_from_regs_le(registers, 0x28),
+        _fast_int32_from_regs_le(registers, 0x2A),
+        _fast_int32_from_regs_le(registers, 0x2C),
+    )
+
+
 def _fast_int16_from_reg(registers: list[int], offset: int) -> int:
     """Fast signed INT16 decode from a single unsigned 16-bit register."""
     val = registers[offset] & 0xFFFF

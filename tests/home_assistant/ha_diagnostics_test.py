@@ -380,3 +380,44 @@ def test_read_failed_sensor_identity_unchanged():
     assert cfg["state_class"] == "measurement"
     assert "device_class" not in cfg
     assert "unit_of_measurement" not in cfg
+
+
+def test_stale_frame_count_published_from_master_stats():
+    diagnostics = HADiagnostics(topic_prefix="test")
+
+    master_stats = Em540MasterStats()
+    master_stats.stale_frame_total = 4
+    master_stats.stale_frame_breaker_open = 1
+    diagnostics.set_em540_master_stats(master_stats)
+
+    with patch.dict("sys.modules", {"uptime": SimpleNamespace(uptime=lambda: 1)}):
+        _, payload = diagnostics.mqtt_data()
+    payload_obj = json.loads(payload)
+
+    assert payload_obj["rs485_stale_frames"] == 4
+    assert payload_obj["rs485_stale_frame_breaker_open"] == 1
+
+
+def test_stale_frame_sensors_discovery():
+    diagnostics = HADiagnostics(topic_prefix="test")
+
+    _, count_payload = diagnostics.em540_stale_frame_count.discovery()
+    count_cfg = json.loads(count_payload)
+    assert count_cfg["name"] == "RS485 Stale Frames"
+    assert count_cfg["state_class"] == "total_increasing"
+    assert count_cfg["entity_category"] == "diagnostic"
+    assert count_cfg["enabled_by_default"] is False
+    assert count_cfg["unique_id"] == "em540_bridge_test_rs485_stale_frames"
+
+    _, breaker_payload = diagnostics.em540_stale_frame_breaker_open.discovery()
+    breaker_cfg = json.loads(breaker_payload)
+    assert breaker_cfg["name"] == "RS485 Stale Frame Breaker Open"
+    assert breaker_cfg["state_class"] == "measurement"
+    assert breaker_cfg["entity_category"] == "diagnostic"
+    assert breaker_cfg["enabled_by_default"] is False
+
+    # Distinct identities from each other and from the invalid-frame sensor.
+    _, inv_payload = diagnostics.invalid_frame_count.discovery()
+    inv_uid = json.loads(inv_payload)["unique_id"]
+    assert count_cfg["unique_id"] != breaker_cfg["unique_id"]
+    assert count_cfg["unique_id"] != inv_uid

@@ -39,7 +39,12 @@ from app.carlo_gavazzi.frame_validation import (
     compute_em530_current_bounds,
     validate_primary_frame,
 )
-from app.carlo_gavazzi.meter_data import MeterData, _convert_from_registers_little, model_name_from_device_type
+from app.carlo_gavazzi.meter_data import (
+    MeterData,
+    _convert_from_registers_little,
+    _fast_freshness_composite_from_regs_le,
+    model_name_from_device_type,
+)
 
 # CT ratio register (EM530-only); UINT32, 2 words, LSW->MSW. See
 # frame_validation.compute_em530_current_bounds for the spec citation.
@@ -89,6 +94,17 @@ class Em540MasterStats:
         # None until the first rejection. Single-writer (master loop), read without
         # a lock by other threads (atomic reference read under the GIL).
         self.last_invalid_frame_reason: str | None = None
+        # Cumulative count of accepted-but-stale (duplicate-composite, non-idle)
+        # upstream frames detected by the frame-freshness tracker. Persistent
+        # counter (never reset in the interval snapshot), mirroring
+        # invalid_frame_total. Single-writer = master loop under self.lock; read
+        # without a lock elsewhere (atomic int read under the GIL).
+        self.stale_frame_total: int = 0
+        # Current 0/1 state of the stale-frame circuit breaker: 1 while a stall
+        # has crossed max_stale_s and the master is failing closed, back to 0
+        # once a fresh frame resumes publishing. Single-writer = master loop
+        # under self.lock; read without a lock elsewhere.
+        self.stale_frame_breaker_open: int = 0
         self._listeners: list[Callable[["Em540MasterStats"], None]] = []
 
     def snapshot_and_reset_interval_extrema(self) -> dict[str, float | int]:
@@ -320,6 +336,105 @@ class DailyExtrema:
         return result
 
 
+class FrameFreshness:
+    """Detects stale/duplicate upstream frames via a fast equality composite.
+
+    The meter can serve the same frame twice when polled faster than its
+    internal update loop, and can also wedge and repeat one frame indefinitely
+    while still answering. Both are caught here by comparing a composite of six
+    fast-changing primary-block registers (built by
+    ``_fast_freshness_composite_from_regs_le``) across consecutive accepted
+    frames: identical composites are counted as stale and the monotonic time the
+    stall began is recorded, so a time-based breaker can trip once the stall
+    persists.
+
+    Idle guard: a composite whose six values are ALL zero (system P, VA, var AND
+    all three phase currents == 0) is a legitimate zero-throughput idle state
+    under genuine no load. It is NEVER counted as stale and can NEVER open the
+    breaker; it simply resets the stall like any fresh frame.
+
+    Concurrency: ``observe()`` is called only from the master acquisition loop
+    (single writer) and is deliberately lock-free so it never blocks on the
+    diagnostics reader — blocking the 10 Hz read path is prohibited. It performs
+    only integer/tuple compares, no allocation beyond the already-built
+    composite. The breaker-state / count readers run on other threads and read
+    the shared ints without a lock; individual reads and writes are atomic under
+    CPython's GIL, so no torn value can be observed and the only possible skew is
+    a count read a frame early, which is harmless for diagnostics (the same
+    "consumers may miss intermediate updates" tolerance the master applies
+    elsewhere).
+    """
+
+    def __init__(self, max_stale_s: float, enabled: bool) -> None:
+        self._max_stale_s: float = max_stale_s
+        self._enabled: bool = enabled
+        # Composite of the previous accepted frame, or None before the first
+        # frame. Single-writer (master loop).
+        self._prev_composite: tuple[int, ...] | None = None
+        # Number of consecutive stale (duplicate, non-idle) frames in the current
+        # stall, and the monotonic time the stall began (None when no stall is
+        # active). Both single-writer (master loop).
+        self._consecutive_stale: int = 0
+        self._stall_start_mono: float | None = None
+
+    @property
+    def consecutive_stale(self) -> int:
+        return self._consecutive_stale
+
+    @property
+    def stall_start_mono(self) -> float | None:
+        return self._stall_start_mono
+
+    def observe(self, composite: tuple[int, ...], now_mono: float) -> bool:
+        """Fold one accepted frame's composite in; return True if it is stale.
+
+        Lock-free single-writer path (master loop only); see class docstring.
+        Returns True only for a duplicate, non-idle composite (a genuine stale
+        frame); False for the first frame, any fresh/changed composite, the
+        disabled state, and the all-zero idle state.
+        """
+        if not self._enabled:
+            self._prev_composite = composite
+            return False
+
+        # Idle guard: an all-zero composite is legitimate zero-throughput idle,
+        # not a stale read. Reset any active stall and never count/trip.
+        if not any(composite):
+            self._consecutive_stale = 0
+            self._stall_start_mono = None
+            self._prev_composite = composite
+            return False
+
+        if self._prev_composite is not None and composite == self._prev_composite:
+            # Duplicate of the previous (non-idle) frame: stale. Start the stall
+            # clock on the first duplicate; keep _prev_composite identical.
+            self._consecutive_stale += 1
+            if self._stall_start_mono is None:
+                self._stall_start_mono = now_mono
+            return True
+
+        # First-ever frame, or a genuinely fresh (changed) composite: reset the
+        # stall and remember this composite for the next comparison.
+        self._consecutive_stale = 0
+        self._stall_start_mono = None
+        self._prev_composite = composite
+        return False
+
+    def stalled_for(self, now_mono: float) -> float:
+        """Seconds the current stall has lasted, or 0.0 when no stall is active."""
+        if self._stall_start_mono is None:
+            return 0.0
+        return now_mono - self._stall_start_mono
+
+    def breaker_should_open(self, now_mono: float) -> bool:
+        """True once an active stall has lasted at least ``max_stale_s``."""
+        return (
+            self._enabled
+            and self._stall_start_mono is not None
+            and (now_mono - self._stall_start_mono) >= self._max_stale_s
+        )
+
+
 class Em540Master:
     """Represents a Modbus master that reads data from an EM540 device.
 
@@ -405,6 +520,19 @@ class Em540Master:
         self._max_consecutive_invalid_s: float = float(getattr(fv, "max_consecutive_invalid_s", 5.0))
         # Rate-limit state for the WARNING log (single-writer: master loop).
         self._last_invalid_frame_log: float = 0.0
+
+        # Cache the stale-frame-detection config into plain attributes (same
+        # pattern as frame_validation) so the hot path never walks the config
+        # object. getattr fallbacks keep a minimal SimpleNamespace config (used in
+        # some tests) constructible with the defaults.
+        sfd = getattr(config, "stale_frame_detection", None)
+        self._stale_detection_enabled: bool = bool(getattr(sfd, "enabled", True))
+        self._max_stale_s: float = float(getattr(sfd, "max_stale_s", 1.0))
+        # Upstream stale/duplicate-frame tracker. Lock-free single-writer (this
+        # master loop), mirroring DailyExtrema. See FrameFreshness for the model.
+        self._frame_freshness: FrameFreshness = FrameFreshness(
+            max_stale_s=self._max_stale_s, enabled=self._stale_detection_enabled
+        )
         self._static_read_plan: tuple[int, ...] = tuple(self._front_data.frame.static_reg_map.keys())
         logger.setLevel(config.log_level)
         self._client: ModbusBaseClient
@@ -686,6 +814,10 @@ class Em540Master:
     def daily_extrema(self) -> "DailyExtrema":
         return self._daily_extrema
 
+    @property
+    def frame_freshness(self) -> "FrameFreshness":
+        return self._frame_freshness
+
     def remove_listener(self, listener: MeterDataListener) -> None:
         if listener in self._listeners:
             self._listeners.remove(listener)
@@ -836,6 +968,50 @@ class Em540Master:
             # (same cost profile as the extrema update above). The watchdog
             # thread reads this to decide whether acquisition has wedged.
             now_mono = time.monotonic()
+
+            # Upstream stale/duplicate-frame safeguard. Reduce this accepted frame
+            # to an equality composite over six fast primary registers and compare
+            # against the previous one (integer/tuple compares only — no blocking
+            # work on the tick loop). A duplicate (non-idle) composite is counted
+            # stale; once the stall lasts >= max_stale_s we fail closed via the
+            # SAME read_failed() listener fan-out the invalid-frame gate uses
+            # (downstream breaker opens, HA goes unavailable) and WITHHOLD this
+            # frame's publication (no buffer swap, no seq advance, and NO advance
+            # of the freshness/accepted timestamps), keeping last-good exactly
+            # like a rejected frame. This detector is INDEPENDENT of the
+            # health_max_stale_s watchdog (it works even when that watchdog is
+            # disabled). A genuinely fresh (changed-composite) frame — or the
+            # all-zero idle state — resets the stall, clears the breaker-open
+            # stat, and publishes normally below. Guarded on the enabled flag so a
+            # disabled detector is a no-op on the hot path. Run BEFORE advancing
+            # the freshness timestamps so a tripped frame leaves them frozen at
+            # their pre-trip values.
+            if self._stale_detection_enabled:
+                composite = _fast_freshness_composite_from_regs_le(
+                    self._back_data.frame.dynamic_reg_map[_DYNAMIC_PRIMARY_BLOCK_ADDR].values
+                )
+                if self._frame_freshness.observe(composite, now_mono):
+                    self._count_stale_frame()
+                    if self._frame_freshness.breaker_should_open(now_mono):
+                        # Fail closed: open the stale-frame breaker and signal
+                        # listeners (exactly one read_failed_total increment via
+                        # _notify_listeners_read_failed), then withhold this frame
+                        # so consumers retain last-good while stalled. The
+                        # freshness/accepted timestamps are deliberately NOT
+                        # advanced for this tick.
+                        self._set_stale_frame_breaker_open(1)
+                        await self._notify_listeners_read_failed()
+                        self._update_timing_stats(
+                            cycle_start=cycle_start,
+                            tick_deadline_mono=tick_deadline_mono,
+                            tick_interval_s=tick_interval_s,
+                        )
+                        return False
+                elif self._stats.stale_frame_breaker_open:
+                    # Fresh/changed composite (or idle): the stall is cleared, so
+                    # resume normal operation by closing the stale-frame breaker.
+                    self._set_stale_frame_breaker_open(0)
+
             self._last_frame_monotonic = now_mono
             # Fix #1: an accepted frame is the single reset point for the
             # persistent-rejection fail-closed gate — it is "the last time data
@@ -1061,6 +1237,26 @@ class Em540Master:
         with self._stats.lock:
             self._stats.invalid_frame_total += 1
             self._stats.last_invalid_frame_reason = reason
+
+    def _count_stale_frame(self) -> None:
+        """Record an accepted-but-stale (duplicate-composite) frame in diagnostics.
+
+        Mirrors _count_invalid_frame: increments the dedicated stale-frame
+        counter under the stats lock (uncontended on the hot path). Does not
+        itself notify listeners; the fail-closed trip is handled separately in
+        acquire_data() once the stall crosses max_stale_s.
+        """
+        with self._stats.lock:
+            self._stats.stale_frame_total += 1
+
+    def _set_stale_frame_breaker_open(self, value: int) -> None:
+        """Set the current 0/1 stale-frame breaker-open diagnostic state.
+
+        Single-writer (master loop) under the stats lock, mirroring the other
+        _count_* stat writes; read without a lock by the diagnostics thread.
+        """
+        with self._stats.lock:
+            self._stats.stale_frame_breaker_open = value
 
     def _maybe_log_invalid_frame(self, reason: str) -> None:
         """Log a frame rejection at WARNING, rate-limited to avoid log floods.

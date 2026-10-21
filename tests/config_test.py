@@ -1561,3 +1561,47 @@ def test_frame_validation_frequency_order_enforced(tmp_path):
     )
     with pytest.raises(ConfigError, match="min_frequency_hz"):
         ConfigManager(path).load()
+
+
+def test_stale_frame_detection_defaults(tmp_path):
+    """Absent stale_frame_detection block -> defaults enabled True, 1.0s."""
+    path = _make_config(tmp_path)
+    sfd = ConfigManager(path).load().em540_master.stale_frame_detection
+    assert sfd.enabled is True
+    assert sfd.max_stale_s == 1.0
+
+
+def test_stale_frame_detection_override_loads(tmp_path):
+    path = _make_config(
+        tmp_path,
+        {
+            "em540_master.stale_frame_detection.enabled": False,
+            "em540_master.stale_frame_detection.max_stale_s": 2.5,
+        },
+    )
+    sfd = ConfigManager(path).load().em540_master.stale_frame_detection
+    assert sfd.enabled is False
+    assert sfd.max_stale_s == 2.5
+
+
+@pytest.mark.parametrize("value", ["true", 1, "yes", None])
+def test_stale_frame_detection_enabled_rejects_non_boolean(tmp_path, value):
+    path = _make_config(tmp_path, {"em540_master.stale_frame_detection.enabled": value})
+    with pytest.raises(ConfigError, match="stale_frame_detection.enabled"):
+        ConfigManager(path).load()
+
+
+# 10**1000 is a valid positive int but not representable as a finite float, so
+# float() of it raises OverflowError at master init — validation must reject it
+# cleanly as a ConfigError first.
+@pytest.mark.parametrize("value", [0, -1.0, "nope", True, float("inf"), float("nan"), 10**1000])
+def test_stale_frame_detection_max_stale_s_rejects_invalid(tmp_path, value):
+    path = _make_config(tmp_path, {"em540_master.stale_frame_detection.max_stale_s": value})
+    with pytest.raises(ConfigError, match="stale_frame_detection.max_stale_s"):
+        ConfigManager(path).load()
+
+
+def test_stale_frame_detection_max_stale_s_positive_float_accepted(tmp_path):
+    path = _make_config(tmp_path, {"em540_master.stale_frame_detection.max_stale_s": 0.5})
+    sfd = ConfigManager(path).load().em540_master.stale_frame_detection
+    assert sfd.max_stale_s == 0.5
