@@ -22,6 +22,17 @@ REG_OFFSET = 0  # SimDevice uses raw 0-based Modbus protocol addresses directly
 # Holding register function code used for async_setValues/async_getValues.
 _FC_HOLDING_REGISTER = 3
 
+# Serial frame-latching ANCHOR registers (0-based Modbus protocol addresses in
+# the served EM540 map). These are the POWER registers a real client reads EVERY
+# polling cycle, so they are the per-cycle heartbeat the serial latch paces off:
+# an anchor-overlapping read starts a new cycle (wait for a fresh upstream frame
+# and pin it); every other block of the cycle serves coherently from that pin.
+# Confirmed against Victron dbus-cgwacs (Em540Commands), which reads system power
+# (0x0028) and the per-phase power block (0x0012) on every cycle at interval 0
+# while voltage/current, energy and frequency are staggered. This is a protocol
+# property of the served map, not a user tunable.
+_SERIAL_PACING_ANCHORS: frozenset[int] = frozenset({0x0028, 0x0012})
+
 # Some downstream EM540 clients issue contiguous bulk reads that span sparse gaps.
 # Populate these compatibility windows with explicit zero placeholders so reads
 # return stable values instead of illegal-address exceptions.
@@ -298,6 +309,7 @@ class Em540Slave(MeterDataListener):
             self._serial_pacing_max_wait_s,
             reg_start_address=self._reg_start_address,
             wire_budget=self._serial_wire_budget(),
+            anchors=_SERIAL_PACING_ANCHORS,
         )
         return serial_server
 

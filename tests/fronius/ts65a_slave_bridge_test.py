@@ -164,6 +164,13 @@ class TestTs65aSlaveBridge(unittest.TestCase):
         self.assertNotIsInstance(bridge._server.context, SerialPacingContext)
         self.assertIsNotNone(bridge._serial_gate)
 
+        # Anchor-based pacing: the proxy is wired with the Fronius AC-power anchors
+        # (Ac power value 40097 plus the three per-phase AC power starts).
+        from app.fronius.ts65a_slave_bridge import _SERIAL_PACING_ANCHORS
+
+        self.assertEqual(_SERIAL_PACING_ANCHORS, frozenset({40097, 40099, 40101, 40103}))
+        self.assertEqual(serial_server.context._anchors, frozenset({40097, 40099, 40101, 40103}))
+
     def test_new_data_bumps_generation_on_successful_write(self):
         bridge, _ = self._build_bridge()
         data = MeterData()

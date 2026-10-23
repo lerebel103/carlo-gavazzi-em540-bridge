@@ -3,9 +3,31 @@
 Downstream Modbus-over-SERIAL clients can poll the bridge faster than the
 upstream EM540/EM530 master refreshes, so they receive DUPLICATE frames. This
 module latches a serial client's effective read rate to the upstream refresh
-rate: when a serial read arrives and no NEW frame has been published into the
-downstream registers since that serial line was last served, the read BLOCKS
-until the next fresh frame lands, then releases and responds IMMEDIATELY.
+rate.
+
+ANCHOR-BASED PACING
+-------------------
+Real serial clients split one polling cycle into MULTIPLE separate reads (power
+block, then voltage/current, then energy). A naive per-read latch that advances
+a cursor on EVERY read is wrong for those clients: read 1 gets frame N, read 2
+waits for N+1, read 3 for N+2 — the blocks are torn across frames AND the full
+sweep rate is throttled to one picture per (number-of-blocks) upstream ticks.
+
+So pacing keys off ANCHOR registers instead. Each bridge supplies a set of
+anchor start addresses (its per-cycle heartbeat read — the POWER registers that
+the real client polls every cycle; see the bridge modules for the Victron /
+Fronius rationale). On each gated read:
+
+  - If the requested window OVERLAPS an anchor address, it is the start of a new
+    polling cycle: bounded-wait for a generation STRICTLY NEWER than the one
+    currently PINNED, then PIN that (generation, snapshot) pair and serve from
+    it. This paces the sweep to the upstream rate.
+  - If the read does NOT overlap an anchor, it is a follow-on read in the same
+    cycle: serve IMMEDIATELY from the pinned (generation, snapshot) pair with NO
+    wait, so every block of a sweep is coherent with the pinned anchor frame.
+
+The first-ever read before any pin exists behaves like today's first read: wait
+once for a fresh frame and pin it.
 
 The mechanism is structural serial-only scoping: only the serial server's
 ``context`` is swapped for :class:`SerialPacingContext`; the TCP and
@@ -31,6 +53,7 @@ preserved.
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Iterable
 from dataclasses import dataclass
 
 from pymodbus.constants import ExcCodes
@@ -174,13 +197,21 @@ class SerialPacingContext:
     """Serial-only async context proxy wrapping the real ``SimCore``.
 
     Forwards ``device_ids()`` and ``async_setValues(...)`` as straight
-    pass-throughs (writes are NEVER gated) and implements the read latch in
+    pass-throughs (writes are NEVER gated) and implements ANCHOR-BASED pacing in
     ``async_getValues(...)``.
 
-    A single per-instance ``_last_served_gen`` cursor models "has this serial
-    line been served the current frame yet?" — correct because a serial server
-    is single-handler/half-duplex (one awaiter at a time), so no per-connection
-    state is needed.
+    A single per-instance ``_pinned_generation`` cursor models "which frame is the
+    current polling cycle pinned to?" — correct because a serial server is
+    single-handler/half-duplex (one awaiter at a time), so no per-connection state
+    is needed. An anchor read advances the pin by bounded-waiting for a
+    strictly-newer generation; a non-anchor read serves coherently from the
+    existing pin without waiting.
+
+    The ``anchors`` set holds the 0-based Modbus protocol START addresses of this
+    bridge's per-cycle heartbeat reads (the POWER registers the real client polls
+    every cycle). A read is an ANCHOR read when any configured anchor address
+    falls in ``range(address, address + count)`` — overlap on the start address is
+    sufficient.
 
     If ``max_wait_s <= 0`` latching is disabled and ``async_getValues`` is a pure
     pass-through (today's behaviour, duplicate frames possible).
@@ -191,14 +222,14 @@ class SerialPacingContext:
     register array (which the listener thread can overwrite mid-read). Instead it
     samples the gate's ``(generation, snapshot)`` pair as ONE unit (the snapshot
     is the immutable register image the listener thread committed for that exact
-    generation) and slices the requested window out of THAT snapshot. Invariants
-    held by construction:
-      1. recorded generation == generation of the bytes returned (both come from
+    generation), PINS that pair on an anchor read, and slices every read of the
+    cycle out of the pinned snapshot. Invariants held by construction:
+      1. pinned generation == generation of the bytes returned (both come from
          the same sampled pair — there is no second read in between);
       2. no torn/duplicate frame across the listener-write / server-publish hop
          (the bytes are committed into the immutable snapshot BEFORE the
-         generation is announced, and a serial line only advances its cursor when
-         it consumes a strictly-newer generation);
+         generation is announced, and the pin only advances when an anchor read
+         consumes a strictly-newer generation);
       3. the listener thread does only a non-blocking snapshot copy + int bump +
          ``call_soon_threadsafe`` — no locks/awaits are added on that path.
     TCP/RTU-over-TCP are untouched: they keep the plain shared ``SimCore``.
@@ -212,6 +243,7 @@ class SerialPacingContext:
         max_wait_s: float,
         reg_start_address: int = 0,
         wire_budget: SerialWireBudget | None = None,
+        anchors: Iterable[int] | None = None,
     ) -> None:
         self._core = core
         self._gate = gate
@@ -225,7 +257,17 @@ class SerialPacingContext:
         # response still fits the serial client's read deadline. When None (e.g.
         # in unit tests) the flat max_wait_s is used unchanged.
         self._wire_budget = wire_budget
-        self._last_served_gen: int = 0
+        # ANCHOR addresses (0-based Modbus protocol start addresses). An empty set
+        # means no read is ever treated as an anchor, so EVERY gated read waits for
+        # a strictly-newer generation (degenerate per-read latch) — bridges always
+        # supply their power anchors, so this is only the unit-test/no-anchor case.
+        self._anchors: frozenset[int] = frozenset(anchors or ())
+        # The (generation, snapshot) pair the current polling cycle is pinned to.
+        # Pin 0 / None means "no frame pinned yet" (startup), handled like today's
+        # first read: the first anchor (or, with no anchors configured, the first
+        # read) waits once for a fresh frame and pins it.
+        self._pinned_generation: int = 0
+        self._pinned_snapshot: tuple[int, ...] | None = None
 
     def _effective_wait_s(self, count: int) -> float:
         """Effective latch wait for a ``count``-register read.
@@ -260,6 +302,17 @@ class SerialPacingContext:
             return None
         return list(snapshot[offset:end])
 
+    def _is_anchor_read(self, address: int, count: int) -> bool:
+        """True when the requested window covers (overlaps) an anchor address.
+
+        An anchor is identified by its START address; overlap on the start address
+        is sufficient (``any(a in range(address, address + count))``).
+        """
+        if not self._anchors:
+            return False
+        window_end = address + count
+        return any(address <= anchor < window_end for anchor in self._anchors)
+
     async def async_getValues(self, device_id, func_code, address, count: int = 1):
         # (a) STALE-BREAKER FIRST: if the upstream staleness breaker is open, fail
         # closed immediately with DEVICE_BUSY — never block a doomed request up to
@@ -271,46 +324,63 @@ class SerialPacingContext:
         if self._max_wait_s <= 0:
             return await self._core.async_getValues(device_id, func_code, address, count)
 
-        # (c) NORMAL WAIT: bounded wait for a generation strictly newer than the
-        # one this serial line was last served. The timeout is the per-request
-        # effective wait (Finding 2): min(configured cap, the budget that leaves
-        # room to serialize this read's response before the client's read
-        # deadline). A large read gets a shorter latch window so its longer
-        # on-wire response still fits. Returns immediately if a newer generation
-        # already exists at entry.
-        effective_wait_s = self._effective_wait_s(count)
-        if effective_wait_s <= 0:
-            # No room to latch this read without risking the client deadline:
-            # serve the freshest available frame immediately (still fail-closed on
-            # an open breaker, handled above) rather than waiting.
-            generation, snapshot = self._gate.current_frame()
-            self._last_served_gen = generation
-            sliced = self._slice_snapshot(snapshot, address, count)
+        is_anchor = self._is_anchor_read(address, count)
+        have_pin = self._pinned_generation > 0 and self._pinned_snapshot is not None
+
+        # (c) FOLLOW-ON READ: a non-anchor read in an established cycle serves
+        # IMMEDIATELY and coherently from the pinned (generation, snapshot) pair —
+        # no wait, no pin advance. Every block of the sweep comes from the SAME
+        # frame the anchor pinned, so no cross-frame tear and no sweep-rate
+        # throttling by block count. If the pin cannot cover the window (odd /
+        # out-of-range read) fall through to the live core so it behaves exactly
+        # as before.
+        if not is_anchor and have_pin:
+            sliced = self._slice_snapshot(self._pinned_snapshot, address, count)
             if sliced is not None:
                 return sliced
             return await self._core.async_getValues(device_id, func_code, address, count)
+
+        # (d) ANCHOR READ (or first-ever read before any pin exists): start of a
+        # new polling cycle. Bounded-wait for a generation strictly newer than the
+        # currently PINNED generation, then pin and serve from that pair. The
+        # timeout is the per-request effective wait (Finding 2): min(configured
+        # cap, the budget that leaves room to serialize this read's response
+        # before the client's read deadline). Returns immediately if a newer
+        # generation already exists at entry.
+        effective_wait_s = self._effective_wait_s(count)
+        if effective_wait_s <= 0:
+            # No room to latch this read without risking the client deadline:
+            # pin the freshest available frame immediately (still fail-closed on
+            # an open breaker, handled above) rather than waiting.
+            return await self._pin_and_serve(device_id, func_code, address, count)
         try:
             await asyncio.wait_for(
-                self._gate.wait_for_generation_after(self._last_served_gen),
+                self._gate.wait_for_generation_after(self._pinned_generation),
                 timeout=effective_wait_s,
             )
         except (asyncio.TimeoutError, TimeoutError):
-            # (d) JITTER FALLBACK: the bounded wait timed out. If the breaker
-            # OPENED during the wait, fail closed (DEVICE_BUSY). Otherwise serve
-            # the current frame (one possible duplicate, acceptable) rather than
-            # tripping a breaker on mere jitter.
+            # (e) JITTER FALLBACK: the bounded wait timed out. If the breaker
+            # OPENED during the wait, fail closed (DEVICE_BUSY). Otherwise pin and
+            # serve the current frame (one possible duplicate, acceptable) rather
+            # than tripping a breaker on mere jitter.
             if self._pdu_helper.circuit_open:
                 return ExcCodes.DEVICE_BUSY
 
-        # (e) After a successful wait OR jitter fallthrough: sample the gate's
-        # (generation, snapshot) pair as ONE unit, record THAT generation as
-        # served, and return the window sliced from THAT snapshot. Because the
-        # generation and the bytes come from the same sampled pair, the served
-        # generation always matches the bytes returned (Finding 1). If the
-        # snapshot cannot satisfy the request (missing / out of range) fall back
-        # to the live core so odd reads behave exactly as before.
+        return await self._pin_and_serve(device_id, func_code, address, count)
+
+    async def _pin_and_serve(self, device_id, func_code, address, count):
+        """Sample the gate's (generation, snapshot) pair, PIN it, and serve.
+
+        Samples the gate's ``(generation, snapshot)`` pair as ONE unit, pins THAT
+        pair as the current cycle, and returns the window sliced from THAT
+        snapshot. Because the generation and the bytes come from the same sampled
+        pair, the pinned generation always matches the bytes returned (Finding 1).
+        If the snapshot cannot satisfy the request (missing / out of range) fall
+        back to the live core so odd reads behave exactly as before.
+        """
         generation, snapshot = self._gate.current_frame()
-        self._last_served_gen = generation
+        self._pinned_generation = generation
+        self._pinned_snapshot = snapshot
         sliced = self._slice_snapshot(snapshot, address, count)
         if sliced is not None:
             return sliced

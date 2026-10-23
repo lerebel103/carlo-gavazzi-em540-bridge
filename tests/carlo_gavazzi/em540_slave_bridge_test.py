@@ -151,6 +151,13 @@ class TestEm540Slave(unittest.TestCase):
         # Gate was created on build (bound to the server loop at first await).
         self.assertIsNotNone(slave._serial_gate)
 
+        # Anchor-based pacing: the proxy is wired with the EM540 power anchors
+        # (system power 0x0028 and the per-phase power block start 0x0012).
+        from app.carlo_gavazzi.em540_slave_bridge import _SERIAL_PACING_ANCHORS
+
+        self.assertEqual(_SERIAL_PACING_ANCHORS, frozenset({0x0028, 0x0012}))
+        self.assertEqual(serial_server.context._anchors, frozenset({0x0028, 0x0012}))
+
     # --- Requirement 12.4: REG_OFFSET is 0 ---
 
     def test_reg_offset_is_zero(self):

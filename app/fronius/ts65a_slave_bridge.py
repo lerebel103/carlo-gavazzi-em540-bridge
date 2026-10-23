@@ -34,6 +34,17 @@ _COMPAT_ZERO_REGISTER = 50000
 _STRUCT_FLOAT32 = struct.Struct(">f")
 _STRUCT_2H = struct.Struct(">2H")
 
+# Serial frame-latching ANCHOR registers (0-based Modbus protocol addresses in
+# the served Fronius SunSpec map). These are the AC POWER FLOAT32 values a real
+# Fronius client reads every polling cycle, so they are the per-cycle heartbeat
+# the serial latch paces off: an anchor-overlapping read starts a new cycle (wait
+# for a fresh upstream frame and pin it); every other block of the cycle serves
+# coherently from that pin. Mirrors the EM540 power-anchor rationale using the
+# Fronius equivalent power registers (Ac power value plus the three per-phase AC
+# power starts, confirmed from _TS65A_STATIC_REGISTERS). This is a protocol
+# property of the served map, not a user tunable.
+_SERIAL_PACING_ANCHORS: frozenset[int] = frozenset({40097, 40099, 40101, 40103})
+
 # Static register layout for the Fronius Smart Meter TS 65A-3 SunSpec model.
 # Addresses are 0-based Modbus protocol addresses (register number - 1).
 # Each tuple is (address, values_list).
@@ -344,6 +355,7 @@ class Ts65aSlaveBridge(MeterDataListener):
             self._serial_pacing_max_wait_s,
             reg_start_address=self._reg_start_address,
             wire_budget=self._serial_wire_budget(),
+            anchors=_SERIAL_PACING_ANCHORS,
         )
         return serial_server
 
