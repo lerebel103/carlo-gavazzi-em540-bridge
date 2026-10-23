@@ -1606,6 +1606,63 @@ class TestStaleFrameDetection(unittest.TestCase):
             with patch.object(master._condition, "notify"):
                 return asyncio.run(master.acquire_data())
 
+    def _run_tick_at(self, master, client, regs, now_mono, wall_clock):
+        """Drive one tick with BOTH clocks controlled.
+
+        ``now_mono`` drives the monotonic stale/freshness logic; ``wall_clock``
+        is the epoch stamped onto the frame by MeterData.update_from_frame (and
+        therefore the value DailyExtrema uses for its local-day rollover check).
+        """
+        client.read_holding_registers = AsyncMock(side_effect=self._tick_responses(regs))
+        with patch("app.carlo_gavazzi.em540_master.time.monotonic", return_value=now_mono):
+            with patch("app.carlo_gavazzi.meter_data.time.time", return_value=wall_clock):
+                with patch.object(master._condition, "notify"):
+                    return asyncio.run(master.acquire_data())
+
+    def test_withheld_stale_frame_does_not_seed_next_day_extrema(self):
+        # Finding 1: a frozen/duplicate frame that the stale-frame gate WITHHOLDS
+        # must not be folded into DailyExtrema. Previously the extrema fold ran
+        # BEFORE the stale gate, so a frame withheld across local midnight could
+        # seed the new day's min/max with the stuck reading. The fold now runs
+        # only AFTER the gate clears the frame for publication.
+        from app.carlo_gavazzi.em540_master import _local_next_day_start
+
+        master, client = self._build(stale_frame_detection_max_stale_s=1.0)
+        listener = MagicMock(spec=MeterDataListener)
+        listener.read_failed = AsyncMock()
+        listener.new_data = AsyncMock()
+        master.add_listener(listener)
+
+        # Anchor a local-midnight boundary (DST-aware, timezone-independent).
+        base = 1_700_000_000.0
+        midnight = _local_next_day_start(base)
+        regs = self._realistic_current(10000)  # L1 current ~10 A
+
+        # Day N: a good frame publishes and folds ~10 A into day N's extrema.
+        self.assertTrue(self._run_tick_at(master, client, regs, 100.0, midnight - 2.0))
+        self.assertAlmostEqual(master.daily_extrema.snapshot(now=midnight - 2.0)["current_l1_max"], 10.0, places=2)
+
+        # Still day N: an identical frame starts the stall but stays within the
+        # 1.0s window, so it is still published (same day, no harm).
+        self.assertTrue(self._run_tick_at(master, client, regs, 100.08, midnight - 1.0))
+
+        # Day N+1: the same frozen frame crosses max_stale_s AND the local-midnight
+        # boundary. It trips the breaker and is WITHHELD (returns False).
+        front_before = master._front_data
+        self.assertFalse(self._run_tick_at(master, client, regs, 101.2, midnight + 1.0))
+
+        # The breaker tripped and the frame was withheld (last-good retained).
+        listener.read_failed.assert_awaited_once()
+        self.assertEqual(master._stats.stale_frame_breaker_open, 1)
+        self.assertIs(master._front_data, front_before)
+
+        # The withheld frozen reading must NOT have seeded day N+1's extrema:
+        # evaluated in the new day's window, every extremum reads as unset.
+        new_day_snapshot = master.daily_extrema.snapshot(now=midnight + 1.0)
+        self.assertIsNone(new_day_snapshot["current_l1_max"])
+        self.assertIsNone(new_day_snapshot["current_l1_min"])
+        self.assertIsNone(new_day_snapshot["power_max"])
+
     def test_duplicate_frames_counted_stale(self):
         master, client = self._build()
         regs = self._realistic()

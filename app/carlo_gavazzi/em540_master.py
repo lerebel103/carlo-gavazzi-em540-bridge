@@ -955,18 +955,10 @@ class Em540Master:
                     self._count_read_failure()
 
         if is_ok:
-            # Fold this frame into daily extrema BEFORE the buffer swap. This is
-            # the only point that observes every upstream frame; downstream
-            # consumers are subsampled and would miss intermediate peaks. The
-            # primary block (power/voltage/current) is always read above, so
-            # these quantities are valid on every successful frame regardless of
-            # the energy-read publish gate below.
-            self._daily_extrema.update(self._back_data, self._back_data.timestamp)
-
             # Freshness watchdog heartbeat: record the monotonic time of this
-            # successful frame. Single lock-free float store on the tick path
-            # (same cost profile as the extrema update above). The watchdog
-            # thread reads this to decide whether acquisition has wedged.
+            # successful frame. Single lock-free float store on the tick path.
+            # The watchdog thread reads this to decide whether acquisition has
+            # wedged.
             now_mono = time.monotonic()
 
             # Upstream stale/duplicate-frame safeguard. Reduce this accepted frame
@@ -1011,6 +1003,18 @@ class Em540Master:
                     # Fresh/changed composite (or idle): the stall is cleared, so
                     # resume normal operation by closing the stale-frame breaker.
                     self._set_stale_frame_breaker_open(0)
+
+            # Fold this frame into daily extrema only AFTER the stale-frame gate
+            # above has cleared it for publication (a withheld/duplicate frame
+            # returns False before reaching here, so a frozen reading can no
+            # longer seed the next day's min/max across the midnight rollover),
+            # but still BEFORE the buffer swap / seq advance below. This is the
+            # only point that observes every PUBLISHED frame; downstream
+            # consumers are subsampled and would miss intermediate peaks. The
+            # primary block (power/voltage/current) is always read above, so
+            # these quantities are valid on every published frame regardless of
+            # the energy-read publish gate below.
+            self._daily_extrema.update(self._back_data, self._back_data.timestamp)
 
             self._last_frame_monotonic = now_mono
             # Fix #1: an accepted frame is the single reset point for the
