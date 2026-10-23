@@ -271,19 +271,23 @@ class HABridge(MeterDataListener):
                 if self._stop_event.is_set():
                     return
 
+                # Wall-clock freshness watchdog: evaluate the LATEST snapshot
+                # UNDER the condition lock (Finding 3). Capturing self._front_snapshot
+                # and releasing the lock before evaluating let a concurrent fresh
+                # new_data() — which sets _data_available True and swaps in a current
+                # snapshot — be overridden by an offline flip derived from the older
+                # captured copy; because _evaluate_freshness early-returns while
+                # offline, availability could then stay stuck offline until the NEXT
+                # frame. Evaluating the current front snapshot while still holding the
+                # lock makes recovery always win: a fresh frame swapped in before this
+                # point is what the watchdog sees, so it does not trip.
+                self._evaluate_freshness_locked(self._front_snapshot, time.time())
+
                 snapshot = self._front_snapshot
                 snapshot_pending = self._snapshot_pending
                 availability_dirty = self._availability_dirty
+                data_available = self._data_available
                 self._snapshot_pending = False
-                self._availability_dirty = False
-
-            # Wall-clock freshness watchdog: evaluate BEFORE the publish gate so a
-            # stale front snapshot transitions the bridge offline and suppresses
-            # publishing this iteration. Re-reads self._availability_dirty because
-            # the watchdog may have just set it via _set_data_available(False).
-            self._evaluate_freshness(snapshot, time.time())
-            if self._availability_dirty:
-                availability_dirty = True
                 self._availability_dirty = False
 
             if availability_dirty:
@@ -293,14 +297,13 @@ class HABridge(MeterDataListener):
                 self._diagnostics.new_data(snapshot)
                 self.sensors.update(snapshot)
 
-            # Only publish sensor data when upstream data is available
-            if snapshot.timestamp > 0 and self._data_available:
-                now = time.monotonic()
+            now = time.monotonic()
 
+            # Publish MEASUREMENT sensor values only when upstream data is
+            # available (never publish frozen readings as fresh).
+            if snapshot.timestamp > 0 and data_available:
                 if self._next_sensor_publish_monotonic == 0:
                     self._next_sensor_publish_monotonic = now
-                if self._next_diagnostics_publish_monotonic == 0:
-                    self._next_diagnostics_publish_monotonic = now
 
                 if now >= self._next_sensor_publish_monotonic:
                     topic, payload = self.sensors.mqtt_data()
@@ -316,6 +319,19 @@ class HABridge(MeterDataListener):
                         now,
                     )
 
+            # Publish health/breaker DIAGNOSTICS independently of measurement
+            # availability (Finding 4). The master sets stale_frame_breaker_open=1
+            # immediately before read_failed() flips the bridge offline, so gating
+            # diagnostics on _data_available hid the breaker-open sensor exactly
+            # during a sustained trip — invisible when it matters most. Diagnostics
+            # carry only health/connection stats pulled fresh in mqtt_data(), never
+            # frozen measurement readings, so publishing them while offline does not
+            # leak stale measurements. Still gated on the first frame having arrived
+            # (timestamp > 0) so nothing publishes before startup completes.
+            if snapshot.timestamp > 0:
+                if self._next_diagnostics_publish_monotonic == 0:
+                    self._next_diagnostics_publish_monotonic = now
+
                 if now >= self._next_diagnostics_publish_monotonic:
                     topic, payload = self._diagnostics.mqtt_data()
                     try:
@@ -329,11 +345,19 @@ class HABridge(MeterDataListener):
                     )
 
     def _next_due_monotonic(self, now: float) -> float | None:
-        if not self._data_available or self._front_snapshot.timestamp <= 0:
+        # Diagnostics publish independently of measurement availability (Finding
+        # 4), so once the first frame has arrived the loop must keep waking on the
+        # diagnostics cadence even while offline — otherwise a sustained trip would
+        # stop re-publishing the breaker-open sensor. Before the first frame
+        # (timestamp <= 0) nothing is due.
+        if self._front_snapshot.timestamp <= 0:
             return None
 
-        sensor_due = self._next_sensor_publish_monotonic or now
         diagnostics_due = self._next_diagnostics_publish_monotonic or now
+        if not self._data_available:
+            return diagnostics_due
+
+        sensor_due = self._next_sensor_publish_monotonic or now
         return min(sensor_due, diagnostics_due)
 
     def _sensor_update_interval(self) -> float:
@@ -348,8 +372,8 @@ class HABridge(MeterDataListener):
         skipped_intervals = int((now - deadline) // interval) + 1
         return deadline + skipped_intervals * interval
 
-    def _evaluate_freshness(self, snapshot: _HASnapshot, now: float) -> None:
-        """HA/MQTT wall-clock freshness watchdog.
+    def _evaluate_freshness_locked(self, snapshot: _HASnapshot, now: float) -> None:
+        """HA/MQTT wall-clock freshness watchdog. MUST be called holding _condition.
 
         Transitions the bridge offline (via the same _set_data_available(False)
         path read_failed() uses) when the newest snapshot's wall-clock age exceeds
@@ -358,14 +382,25 @@ class HABridge(MeterDataListener):
         notify thread/loop — it adds no work to the master tick loop or listener
         notification path.
 
+        Finding 3: the caller passes self._front_snapshot while holding _condition
+        rather than a copy captured earlier and evaluated after releasing the lock.
+        That ordering guarantees a concurrent fresh new_data() (which swaps a current
+        snapshot into _front_snapshot and sets _data_available True under the same
+        lock) always wins: either new_data() ran before this call (so we evaluate the
+        fresh snapshot and do not trip) or it runs after (so our offline decision was
+        correct for the data that existed, and new_data() immediately restores
+        availability). A stale captured copy can no longer flip a just-recovered
+        bridge back offline. _set_data_available re-acquires _condition, which is an
+        RLock (threading.Condition default), so the nested acquisition is safe.
+
         Notes / accepted limitations:
         - `now` and snapshot.timestamp are both wall-clock (time.time()), matching
           MeterData.update_from_frame. A wall-clock step/adjustment is an accepted
           limitation (the frame timestamp is wall-clock by design), identical to
           the downstream PduHelper breaker tradeoff.
-        - Detection latency is bounded by the loop wake cadence (the MQTT
-          update_interval publish deadline), so staleness is caught at worst one
-          update_interval late.
+        - Detection latency is bounded by the loop wake cadence (the diagnostics /
+          MQTT update_interval publish deadline), so staleness is caught at worst
+          one interval late.
         - The snapshot.timestamp > 0 guard preserves pre-first-frame semantics:
           before any frame is received the watchdog never trips, exactly as today.
         - ha_max_stale_s <= 0 disables the watchdog (mirrors health_max_stale_s).
