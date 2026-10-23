@@ -148,6 +148,62 @@ class SlaveSerialConfig:
     # serial.timeout when serial and pacing are both enabled.
     pacing_enabled: bool = True
     pacing_max_wait_s: float = 0.12
+    # The downstream serial CLIENT's read timeout (milliseconds) — the real wire
+    # deadline the frame latch must respect, NOT this bridge's own adapter
+    # ``timeout`` above. A latched read spends time waiting for a fresh frame AND
+    # then serializing the response over the serial line; at 9600 8N1 a worst-case
+    # response takes well over 100ms to clock out (10 bits/byte / 9600 baud per
+    # byte). So the effective latch wait is clamped below
+    # ``client_read_timeout_ms - serialization_time - turnaround_margin`` and
+    # validation rejects a pacing cap that cannot fit the response inside this
+    # deadline. Default 200ms matches a typical downstream serial client read
+    # timeout; raise it only if the real client tolerates longer reads.
+    client_read_timeout_ms: int = 200
+
+
+# Fixed small margin (seconds) added to the serialization time to cover the
+# request Tx, serial line turnaround, and scheduling jitter when computing the
+# available latch-wait budget. Conservative; keeps the effective cap safely below
+# the client read deadline.
+_SERIAL_TURNAROUND_MARGIN_S: float = 0.02
+
+# Smallest meaningful served response size (registers) used for the CONFIG-LEVEL
+# viability check. The actual latch wait is budgeted PER REQUEST at runtime from
+# the request's own register count (see app.utils.serial_pacing.SerialWireBudget),
+# so a large read is automatically clamped to fit its longer response inside the
+# client deadline. Config validation only needs to confirm there is usable latch
+# budget for at least a minimal read; a 2-register read is the smallest a client
+# would meaningfully poll. (At 9600 baud a wide 90-register response takes ~190ms
+# to serialize, which alone approaches a 200ms client deadline — per-request
+# clamping handles that at runtime rather than forbidding the whole config.)
+_SERIAL_MIN_RESPONSE_REGISTERS: int = 2
+
+
+def serial_bits_per_byte(bytesize: int, parity: str, stopbits: float) -> float:
+    """Return the number of bits on the wire per transmitted byte.
+
+    1 start bit + data bits + parity bit (0 for 'N', else 1) + stop bits.
+    For 8N1 this is 1 + 8 + 0 + 1 = 10.
+    """
+    parity_bits = 0 if parity == "N" else 1
+    return 1 + bytesize + parity_bits + stopbits
+
+
+def serial_serialization_seconds(
+    baudrate: int,
+    bytesize: int,
+    parity: str,
+    stopbits: float,
+    worst_resp_registers: int,
+) -> float:
+    """Worst-case on-wire serialization time (seconds) for a served response.
+
+    RTU framing for an FC3/FC4 response is 1 addr + 1 func + 1 bytecount + N*2
+    data bytes + 2 CRC = ``worst_resp_registers * 2 + 5`` bytes.
+    """
+    byte_time_s = serial_bits_per_byte(bytesize, parity, stopbits) / baudrate
+    worst_resp_bytes = worst_resp_registers * 2 + 5
+    return worst_resp_bytes * byte_time_s
 
 
 @dataclass
@@ -558,11 +614,20 @@ class ConfigManager:
         would silently break the bounded asyncio.wait_for). A value <= 0 disables
         latching and is accepted regardless of enabled state.
 
+        ``client_read_timeout_ms`` (the downstream serial client's wire read
+        deadline) must likewise be a finite, non-bool number > 0.
+
         When the serial adapter is enabled AND pacing is enabled
-        (pacing_max_wait_s > 0 and pacing_enabled), pacing_max_wait_s MUST be
-        strictly less than serial.timeout — the safety margin below the serial
-        client response timeout — otherwise a latched read could outlast the
-        client's own timeout.
+        (pacing_max_wait_s > 0 and pacing_enabled):
+          - pacing_max_wait_s MUST be strictly less than serial.timeout — the
+            safety margin below the serial client response timeout; AND
+          - the latch wait plus the worst-case on-wire response serialization
+            time plus a turnaround margin MUST stay strictly below the client
+            read deadline (client_read_timeout_ms), computed from the serial line
+            settings (8N1 = 10 bits/byte) and a worst-case served response size.
+            A config whose effective wait cannot fit the response inside the
+            client deadline is REJECTED (explicit misconfiguration) rather than
+            silently clamped.
         """
         value = serial.pacing_max_wait_s
         if isinstance(value, bool) or not isinstance(value, (int, float)):
@@ -573,12 +638,43 @@ class ConfigManager:
         if not isinstance(serial.pacing_enabled, bool):
             raise ConfigError(f"{name}.pacing_enabled must be a boolean (true/false), got {serial.pacing_enabled!r}")
 
-        # Only enforce the margin-below-timeout when latching is actually active.
+        crt = serial.client_read_timeout_ms
+        if isinstance(crt, bool) or not isinstance(crt, (int, float)):
+            raise ConfigError(f"{name}.client_read_timeout_ms must be a number, got {crt!r}")
+        if not math.isfinite(crt):
+            raise ConfigError(f"{name}.client_read_timeout_ms must be finite, got {crt}")
+        if crt <= 0:
+            raise ConfigError(f"{name}.client_read_timeout_ms must be > 0, got {crt}")
+
+        # Only enforce the margin-below-timeout + wire-budget checks when latching
+        # is actually active.
         if serial.enabled and serial.pacing_enabled and value > 0:
             if value >= serial.timeout:
                 raise ConfigError(
                     f"{name}.pacing_max_wait_s must be strictly less than {name}.timeout "
                     f"(the serial client response timeout), got pacing_max_wait_s={value} timeout={serial.timeout}"
+                )
+
+            # Viability floor: even a minimal read must leave room to serialize
+            # its response before the client deadline. Larger reads are clamped
+            # per-request at runtime (SerialWireBudget), so this only rejects a
+            # config with no usable latch budget at all.
+            serialization_s = serial_serialization_seconds(
+                serial.baudrate,
+                serial.bytesize,
+                serial.parity,
+                serial.stopbits,
+                _SERIAL_MIN_RESPONSE_REGISTERS,
+            )
+            deadline_s = crt / 1000.0
+            if value + serialization_s + _SERIAL_TURNAROUND_MARGIN_S >= deadline_s:
+                raise ConfigError(
+                    f"{name}.pacing_max_wait_s={value}s plus minimal response serialization "
+                    f"({serialization_s * 1000:.1f}ms at {serial.baudrate} baud, {serial.bytesize}"
+                    f"{serial.parity}{serial.stopbits} framing, {_SERIAL_MIN_RESPONSE_REGISTERS}-register "
+                    f"response) plus {_SERIAL_TURNAROUND_MARGIN_S * 1000:.0f}ms turnaround margin would meet or "
+                    f"exceed the {name}.client_read_timeout_ms={crt}ms client read deadline, leaving no latch "
+                    f"budget even for a minimal read; lower pacing_max_wait_s or raise client_read_timeout_ms"
                 )
 
     def _validate_serial_config(self, name: str, serial: SlaveSerialConfig) -> None:

@@ -455,7 +455,11 @@ class TestEm540Slave(unittest.TestCase):
         self.assertEqual(len(scheduled), 1)
         fn, args = scheduled[0]
         self.assertEqual(fn, slave._serial_gate.publish)
-        self.assertEqual(args, (1,))
+        # publish now carries BOTH the generation AND an immutable register
+        # snapshot (Finding 1): (generation, snapshot_tuple).
+        self.assertEqual(args[0], 1)
+        self.assertIsInstance(args[1], tuple)
+        self.assertEqual(len(args[1]), len(slave._registers))
 
     def test_new_data_does_not_schedule_publish_when_serial_disabled(self):
         frame, meter_data = self._successful_frame()

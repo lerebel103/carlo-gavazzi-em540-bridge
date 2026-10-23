@@ -11,6 +11,7 @@ This test exercises:
 from __future__ import annotations
 
 import logging
+import struct
 import tempfile
 import time
 from pathlib import Path
@@ -47,17 +48,73 @@ from .test_data import (
 logger = logging.getLogger("integration")
 
 
+# Energy-block offset (in registers, within the 0x0500 block) used to carry a
+# per-tick monotonic MARKER through the full path to the serial client. The
+# energy block is served to downstream clients verbatim (it is cumulative, not
+# smoothed) and is NOT bounds-checked by upstream frame validation, so stamping a
+# monotonic counter here survives end-to-end without being rejected or averaged
+# away. The counter is encoded as an INT64 (4 registers) exactly as
+# make_em540_source_frame encodes energy values (encode_int64_le).
+_MARKER_ENERGY_REG_OFFSET = 0  # first INT64 slot of the 0x0500 energy block
+_MARKER_BLOCK_ADDRESS = 0x0500
+_MARKER_REG_COUNT = 4
+
+
+def _decode_marker_int64_le(registers: list[int]) -> int:
+    """Decode the 4-register INT64 marker (little-endian word order).
+
+    Mirrors test_data.encode_int64_le, which stores [w3, w2, w1, w0].
+    """
+    w3, w2, w1, w0 = registers[0], registers[1], registers[2], registers[3]
+    packed = struct.pack(">4H", w0, w1, w2, w3)
+    return struct.unpack(">q", packed)[0]
+
+
 class Em540UpstreamSimulator:
     """Simulates a real EM540 meter over a virtual serial port.
 
     This server receives Modbus RTU requests and serves a register map
     that reflects the state of a simulated meter.
+
+    ``publish_next()`` stamps a strictly-monotonic per-tick MARKER into the energy
+    block (see _MARKER_* constants) and refreshes the served registers, so a
+    downstream reader can prove each fresh serial read observes a NEWER frame
+    (Finding 3). The marker is independent of the seed-derived field variation and
+    guarantees a distinct, increasing value every tick.
     """
 
     def __init__(self, frame_seed: int = 100) -> None:
         self.server = ModbusRtuServer("upstream-em540", slave_id=1)
         self.frame = make_em540_source_frame(seed=frame_seed)
+        self._marker: int = 0
+        self._stamp_marker()
         self._update_registers()
+
+    def _stamp_marker(self) -> None:
+        """Write the current monotonic marker into the energy block INT64 slot."""
+        from .test_data import encode_int64_le
+
+        energy = self.frame.dynamic_reg_map[_MARKER_BLOCK_ADDRESS].values
+        offset = _MARKER_ENERGY_REG_OFFSET
+        energy[offset : offset + _MARKER_REG_COUNT] = encode_int64_le(self._marker)
+        self.frame.remap_registers()
+
+    def publish_next(self) -> int:
+        """Advance to the next monotonic marker and refresh served registers.
+
+        Returns the newly-published marker value. The rest of the frame is held
+        constant so the ONLY thing changing is the marker, isolating the proof
+        that each fresh serial read tracks a new upstream tick.
+        """
+        self._marker += 1
+        self._stamp_marker()
+        self._update_registers()
+        return self._marker
+
+    @property
+    def marker(self) -> int:
+        """The currently-published monotonic marker."""
+        return self._marker
 
     def _update_registers(self) -> None:
         """Refresh the server's register map from the current frame.
@@ -604,37 +661,59 @@ def _poll_serial_read_latencies(client, address: int, count: int, reads: int) ->
     return latencies
 
 
-@pytest.mark.integration
-def test_serial_frame_latching_defers_reads_to_upstream_rate() -> None:
-    """Serial frame-latching: downstream serial reads are latched to the upstream
-    refresh rate (no duplicate frames at the client's raw poll rate).
+def _poll_serial_markers(client, upstream, *, reads: int, max_attempts: int) -> list[tuple[float, int]]:
+    """Poll the serial client in a tight loop, advancing the upstream each attempt.
 
-    Genuine end-to-end over the PTY serial harness:
-      1. Upstream EM540 registers held CONSTANT; the service still publishes a new
-         frame into the downstream registers once per `update_interval` tick, so
-         "fresh frame" == "new service tick" (the generation bumps every tick
-         regardless of register content).
-      2. A downstream serial client polls in a tight loop.
+    Returns a list of ``(latency_s, marker)`` for each SUCCESSFUL marker read. The
+    upstream publishes a NEW monotonic marker before every poll attempt, so the
+    service has a fresh frame available to latch onto. The marker is decoded from
+    the energy block (served verbatim, not smoothed), so the returned value is the
+    exact frame the serial read observed.
 
-    Assertions (per the task):
-      (1) NO duplicate-at-line-rate: with latching ON, each successful serial read
-          has a non-trivial latency floor (it waits for the next tick) — the mean
-          per-read latency is well above a trivial floor and near `update_interval`.
-      (2) Each read is deferred until a fresh frame — bounded, never below a small
-          floor on average.
-      (3) Worst-case served read latency < 200ms (the real serial client READ
-          TIMEOUT), and < pacing_max_wait_s + a margin.
+    This is the heart of the Finding-3 proof: with latching ON each successful
+    read must observe a STRICTLY NEWER marker (the latch releases on the next
+    fresh frame and never re-serves the previous one), and the number of distinct
+    markers tracks the number of upstream ticks consumed.
+    """
+    samples: list[tuple[float, int]] = []
+    attempts = 0
+    while len(samples) < reads and attempts < max_attempts:
+        attempts += 1
+        upstream.publish_next()
+        start = time.monotonic()
+        try:
+            result = client.read_holding_registers(_MARKER_BLOCK_ADDRESS, count=_MARKER_REG_COUNT, device_id=1)
+        except (ModbusException, OSError, ConnectionError):
+            continue
+        elapsed = time.monotonic() - start
+        if result.isError():
+            continue
+        marker = _decode_marker_int64_le(list(result.registers))
+        samples.append((elapsed, marker))
+    return samples
 
-    Coverage notes (PTY harness limitations): PTY serial timing carries jitter, so
-    assertion (1) is made on the MEAN inter-read latency (robust to per-read
-    outliers) rather than every single read; the strict < 200ms bound is asserted
-    on the worst-case single read. The negative control (latching disabled → fast
-    back-to-back reads) is covered by the deterministic unit tests
-    (tests/utils/serial_pacing_test.py: pacing disabled never blocks) rather than a
-    second heavy service spin-up here.
+
+def _count_duplicate_markers(markers: list[int]) -> int:
+    """Count consecutive-duplicate markers (a read that returned the SAME frame
+    as the immediately-preceding successful read)."""
+    duplicates = 0
+    for prev, cur in zip(markers, markers[1:]):
+        if cur == prev:
+            duplicates += 1
+    return duplicates
+
+
+def _run_marker_latching_scenario(*, pacing_enabled: bool, pacing_max_wait_s: float):
+    """Spin up the full service over the PTY harness and collect marker samples
+    from the EM540 serial client while a fresh upstream marker is published before
+    every poll.
+
+    Returns ``(samples, update_interval, pacing_max_wait_s)`` where ``samples`` is
+    the list of ``(latency_s, marker)`` tuples. Shared by the positive test and
+    the latching-disabled negative control so the ONLY difference between them is
+    ``pacing_enabled`` — making the control a true A/B of the mechanism.
     """
     update_interval = 0.1
-    pacing_max_wait_s = 0.12
 
     with tempfile.TemporaryDirectory() as tmp_dir:
         tmp_path = Path(tmp_dir)
@@ -660,7 +739,7 @@ def test_serial_frame_latching_defers_reads_to_upstream_rate() -> None:
                 em540_serial_port=em540_serial.left_path,
                 ts65a_serial_port=ts65a_serial.left_path,
                 update_interval=update_interval,
-                serial_pacing_enabled=True,
+                serial_pacing_enabled=pacing_enabled,
                 serial_pacing_max_wait_s=pacing_max_wait_s,
                 serial_timeout=0.5,
             )
@@ -685,53 +764,161 @@ def test_serial_frame_latching_defers_reads_to_upstream_rate() -> None:
                 # so the latch — not the stale breaker — governs the serial reads.
                 wait_for_downstream_data(clients.em540_tcp, address=0x0000, timeout=120.0)
 
-                for label, client, address in (
-                    ("EM540", clients.em540_serial, 0x0000),
-                    ("TS65A", clients.ts65a_serial, 40071),
-                ):
-                    # Warm up one read so the per-serial-line cursor is initialised
-                    # and the breaker is confirmed closed for this path.
-                    wait_for_condition(
-                        lambda c=client, a=address: _poll_serial_read_latencies(c, a, 2, 1) != [],
-                        timeout=30.0,
-                        message=f"{label} serial path did not serve a live read before latency sampling"
-                        + service.diagnostics(),
-                    )
+                # Warm up one marker read so the per-serial-line cursor is
+                # initialised and the breaker is confirmed closed for this path.
+                wait_for_condition(
+                    lambda: _poll_serial_markers(clients.em540_serial, upstream, reads=1, max_attempts=10) != [],
+                    timeout=30.0,
+                    message="EM540 serial path did not serve a live marker read before sampling"
+                    + service.diagnostics(),
+                )
 
-                    latencies = _poll_serial_read_latencies(client, address, count=2, reads=12)
-                    assert len(latencies) >= 8, (
-                        f"{label} serial: too few successful reads to assess latching "
-                        f"(got {len(latencies)}){service.diagnostics()}"
-                    )
-
-                    worst = max(latencies)
-                    mean = sum(latencies) / len(latencies)
-
-                    # (3) worst-case served latency < 200ms client timeout and within
-                    # the configured cap plus a transport/jitter margin.
-                    assert worst < 0.2, f"{label} serial worst-case read {worst * 1000:.1f}ms exceeded 200ms"
-                    assert worst < pacing_max_wait_s + 0.08, (
-                        f"{label} serial worst-case read {worst * 1000:.1f}ms exceeded "
-                        f"pacing cap + margin ({(pacing_max_wait_s + 0.08) * 1000:.0f}ms)"
-                    )
-
-                    # (1)/(2) latching engaged: a tight-loop client cannot outrun the
-                    # upstream tick — the mean per-read latency sits near one update
-                    # interval, well above a trivial (non-blocking) floor. Without
-                    # latching these reads would resolve near-instantly (sub-ms to a
-                    # few ms) and return duplicate frames.
-                    trivial_floor = 0.01
-                    assert mean > trivial_floor, (
-                        f"{label} serial mean read latency {mean * 1000:.1f}ms indicates no latching "
-                        f"(reads resolved faster than the trivial {trivial_floor * 1000:.0f}ms floor)"
-                    )
+                samples = _poll_serial_markers(clients.em540_serial, upstream, reads=12, max_attempts=60)
 
                 service.assert_running()
                 clients.disconnect_all()
-
+                return samples, update_interval, pacing_max_wait_s
             finally:
                 service.stop()
         finally:
             upstream.stop()
             em540_serial.close()
             ts65a_serial.close()
+
+
+@pytest.mark.integration
+def test_serial_frame_latching_serves_one_fresh_frame_per_upstream_tick() -> None:
+    """Serial frame-latching: each successful serial read returns a STRICTLY NEWER
+    upstream frame — one response per publication, no duplicates at the client's
+    raw poll rate.
+
+    Genuine end-to-end over the PTY serial harness. The upstream stamps a
+    monotonic MARKER into the energy block and advances it before every poll; the
+    serial read decodes the marker from its response, so the test checks the
+    CONTENTS each read observed — not just timing.
+
+    Positive assertions (the Finding-3 proof):
+      (1) Each successful read returns a marker strictly GREATER than the previous
+          successful read's marker (the latch releases on the next fresh frame and
+          never re-serves the one already consumed) — ZERO duplicate markers.
+      (2) The number of distinct markers equals the number of successful reads
+          (one fresh frame consumed per read) and tracks the upstream ticks.
+      (3) Secondary bound: worst-case served read latency < 200ms (the real serial
+          client READ TIMEOUT) and within the pacing cap plus a transport margin.
+    """
+    pacing_max_wait_s = 0.12
+    samples, _update_interval, cap = _run_marker_latching_scenario(
+        pacing_enabled=True, pacing_max_wait_s=pacing_max_wait_s
+    )
+
+    assert len(samples) >= 8, f"too few successful marker reads to assess latching (got {len(samples)})"
+
+    latencies = [s[0] for s in samples]
+    markers = [s[1] for s in samples]
+
+    # (1) No duplicate markers: with latching ON a read never re-serves the frame
+    # the previous read already consumed.
+    duplicates = _count_duplicate_markers(markers)
+    assert duplicates == 0, f"latching ON must yield NO duplicate markers, got {duplicates} in {markers}"
+
+    # (1b) Strictly increasing: each read observed a newer upstream frame.
+    for prev, cur in zip(markers, markers[1:]):
+        assert cur > prev, f"each serial read must return a strictly newer marker; saw {prev} -> {cur} in {markers}"
+
+    # (2) Distinct markers == successful reads: one fresh frame consumed per read.
+    assert len(set(markers)) == len(markers), f"every successful read must observe a distinct frame: {markers}"
+
+    # (3) Worst-case latency within the real client read deadline + margin.
+    worst = max(latencies)
+    assert worst < 0.2, f"serial worst-case read {worst * 1000:.1f}ms exceeded 200ms"
+    assert worst < cap + 0.08, (
+        f"serial worst-case read {worst * 1000:.1f}ms exceeded pacing cap + margin ({(cap + 0.08) * 1000:.0f}ms)"
+    )
+
+
+@pytest.mark.integration
+def test_serial_frame_latching_disabled_yields_duplicate_markers_negative_control() -> None:
+    """NEGATIVE CONTROL (a) — end-to-end: with latching DISABLED
+    (pacing_enabled=False), a tight-loop serial client OUTRUNS the upstream and
+    receives DUPLICATE frames (the same marker more than once). This MUST fail if
+    the duplicate detector is broken, proving the positive test's no-duplicate
+    assertion is meaningful rather than vacuous.
+
+    Identical to the positive scenario except ``pacing_enabled=False``, so the
+    only variable is the latch itself.
+    """
+    samples, _update_interval, _cap = _run_marker_latching_scenario(pacing_enabled=False, pacing_max_wait_s=0.12)
+
+    assert len(samples) >= 8, f"too few successful marker reads for the negative control (got {len(samples)})"
+
+    markers = [s[1] for s in samples]
+
+    # With latching OFF the client reads faster than the upstream publishes, so at
+    # least one read returns the SAME marker as the preceding read. If this does
+    # NOT happen the mechanism/harness is not actually exercising the race the
+    # positive test guards against.
+    duplicates = _count_duplicate_markers(markers)
+    assert duplicates > 0, (
+        "latching DISABLED must produce at least one duplicate marker (client outrunning upstream); "
+        f"saw none in {markers} — the no-duplicate proof would be vacuous"
+    )
+
+
+@pytest.mark.integration
+def test_serial_frame_latching_wake_suppressed_stalls_or_duplicates_negative_control() -> None:
+    """NEGATIVE CONTROL (b) — proxy boundary: if the gate wake never arrives (the
+    listener-thread ``call_soon_threadsafe(gate.publish, ...)`` hop is suppressed),
+    a latched read falls to the bounded-wait TIMEOUT and serves a STALE/duplicate
+    frame instead of a fresh one. This proves the wake is load-bearing.
+
+    This control is exercised at the proxy boundary (deterministic, no flakiness)
+    rather than end-to-end because suppressing the wake end-to-end would require a
+    production-only test seam in the hot listener path (AGENTS.md forbids adding
+    blocking/behavioural hooks there). The positive no-duplicate proof and control
+    (a) remain fully end-to-end over the PTY harness; this control closes the
+    remaining "what if the wake is lost" gap without perturbing production code.
+    """
+    import asyncio
+
+    from app.utils.serial_pacing import FrameGate, SerialPacingContext
+
+    class _Core:
+        def __init__(self):
+            self.sentinel = [111, 222, 333, 444]
+
+        async def async_getValues(self, device_id, func_code, address, count=1):
+            return self.sentinel
+
+        async def async_setValues(self, *a):
+            return None
+
+        def device_ids(self):
+            return [1]
+
+    class _Helper:
+        circuit_open = False
+
+    async def scenario():
+        core = _Core()
+        gate = FrameGate()
+        # A fresh frame exists (gen 1) and the line has already consumed it.
+        gate.publish(1, (900, 901, 902, 903))
+        await asyncio.sleep(0)
+        ctx = SerialPacingContext(core, gate, _Helper(), max_wait_s=0.02, reg_start_address=0)
+        ctx._last_served_gen = 1
+
+        first = await asyncio.wait_for(ctx.async_getValues(1, 3, 0, 4), timeout=1.0)
+
+        # The wake for the NEXT frame is suppressed: the register state advances but
+        # publish() is never called, so no newer generation is announced. The read
+        # must time out and re-serve the SAME (now stale) frame — a duplicate.
+        second = await asyncio.wait_for(ctx.async_getValues(1, 3, 0, 4), timeout=1.0)
+        return first, second
+
+    first, second = asyncio.run(scenario())
+
+    # Without the wake the second read duplicates the first (stale/duplicate),
+    # which is exactly the failure the end-to-end wake is designed to prevent.
+    assert first == second == [900, 901, 902, 903], (
+        f"suppressed wake must cause a stale/duplicate serve, got first={first} second={second}"
+    )

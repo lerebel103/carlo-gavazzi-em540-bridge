@@ -16,7 +16,7 @@ from app.fronius.ts65a_data import Ts65aMeterData
 from app.fronius.ts65a_slave_stats import Ts65aSlaveStats
 from app.utils.idle_connection_reaper import IdleConnectionReaper
 from app.utils.pdu_helper import PduHelper
-from app.utils.serial_pacing import FrameGate, SerialPacingContext
+from app.utils.serial_pacing import FrameGate, SerialPacingContext, SerialWireBudget
 
 logger = logging.getLogger("ts65a-slave")
 
@@ -286,16 +286,30 @@ class Ts65aSlaveBridge(MeterDataListener):
         return self._pdu_helper.on_pdu(flag, pdu)
 
     def _effective_serial_pacing_max_wait_s(self) -> float:
-        """Resolve the serial frame-latching cap from config.
+        """Resolve the configured serial frame-latching cap from config.
 
         Returns 0.0 (disabled, pass-through) when pacing is disabled via
         ``pacing_enabled=False`` or a non-positive ``pacing_max_wait_s``;
-        otherwise the configured ``pacing_max_wait_s``.
+        otherwise the configured ``pacing_max_wait_s``. The per-request wire
+        budget that bounds this cap to fit the serial client's read deadline is
+        applied inside ``SerialPacingContext`` via the ``SerialWireBudget`` built
+        in ``_serial_wire_budget`` (Finding 2).
         """
         serial_cfg = self._config.serial
         if not getattr(serial_cfg, "pacing_enabled", True):
             return 0.0
         return max(0.0, getattr(serial_cfg, "pacing_max_wait_s", 0.0))
+
+    def _serial_wire_budget(self) -> SerialWireBudget:
+        """Build the per-request serialization budget from the serial line settings."""
+        serial_cfg = self._config.serial
+        return SerialWireBudget(
+            baudrate=serial_cfg.baudrate,
+            bytesize=serial_cfg.bytesize,
+            parity=serial_cfg.parity,
+            stopbits=serial_cfg.stopbits,
+            client_read_timeout_ms=getattr(serial_cfg, "client_read_timeout_ms", 200),
+        )
 
     def _build_serial_server(self) -> ModbusSerialServer:
         """Construct the downstream serial server.
@@ -328,6 +342,8 @@ class Ts65aSlaveBridge(MeterDataListener):
             self._serial_gate,
             self._pdu_helper,
             self._serial_pacing_max_wait_s,
+            reg_start_address=self._reg_start_address,
+            wire_budget=self._serial_wire_budget(),
         )
         return serial_server
 
@@ -500,7 +516,16 @@ class Ts65aSlaveBridge(MeterDataListener):
             self._frame_generation += 1
             loop = self._server_loop
             if loop is not None and self._config.serial.enabled and self._serial_gate is not None:
-                loop.call_soon_threadsafe(self._serial_gate.publish, self._frame_generation)
+                # Finding 1: publish the generation TOGETHER with an immutable
+                # snapshot of the exact register image just committed, so the
+                # serial proxy returns the bytes that correspond to the generation
+                # it records as served (no torn/duplicate frame across this hop).
+                # Listener-thread work stays non-blocking: a single tuple() copy of
+                # the register list under the existing lock + an int bump + a
+                # call_soon_threadsafe hop. No await, no new blocking.
+                with self._reg_lock:
+                    snapshot = tuple(self._registers)
+                loop.call_soon_threadsafe(self._serial_gate.publish, self._frame_generation, snapshot)
         else:
             self._pdu_helper.upstream_failed()
         self._sync_pdu_stats()
