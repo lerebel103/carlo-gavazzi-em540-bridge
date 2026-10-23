@@ -74,23 +74,45 @@ Notes:
   receive duplicate frames (a serial client can poll faster than the meter refreshes). Each bridge
   keeps a monotonic `self._frame_generation` counter, bumped in `new_data` ONLY on the successful-write
   branch (next to `data_received`); after the bump it wakes the serial read via
-  `self._server_loop.call_soon_threadsafe(gate.publish, generation)` (non-blocking listener-thread
-  work only). A shared async context proxy (`app/utils/serial_pacing.py` — `FrameGate` +
+  `self._server_loop.call_soon_threadsafe(gate.publish, generation, snapshot)` (non-blocking
+  listener-thread work only). A shared async context proxy (`app/utils/serial_pacing.py` — `FrameGate` +
   `SerialPacingContext`, IDENTICAL for both bridges) is installed ONLY on `serial_server.context`;
   TCP and RTU-over-TCP keep the plain shared `SimCore` and are byte-for-byte unaffected (serial-only
-  scoping is structural, not a runtime guard). The proxy's `async_getValues` is stale-breaker-first
-  (returns `ExcCodes.DEVICE_BUSY` immediately when the tier-1 breaker is open — never blocks a doomed
-  request), then bounded-waits on the gate for a generation newer than the one this serial line was
-  last served (`asyncio.wait_for(..., pacing_max_wait_s)`), then on timeout serves the current frame
-  (one possible duplicate on jitter) unless the breaker opened during the wait (fail-closed). Writes
-  (`async_setValues`) are a straight pass-through (never gated). The gate's asyncio primitive is
-  created on the dedicated server loop (in `_build_serial_server`) so it binds to the right loop, and
-  the serial await yields that loop so co-resident TCP/RTU servers are never starved. A single
-  per-serial-server last-served cursor suffices (serial is single-request, half-duplex). Configurable
-  per bridge via `*_slave.serial.pacing_max_wait_s` (default 0.12s; `<= 0` or `pacing_enabled: false`
-  disables latching) which MUST be strictly less than `serial.timeout` (validated). This preserves the
-  staleness ladder (the latch sits before the datastore read and defers to tier 1) and does not touch
-  the 0x000B overlay or the production parse/overlay path.
+  scoping is structural, not a runtime guard).
+- Pacing is **ANCHOR-BASED**, because real serial clients split one polling cycle into MULTIPLE
+  separate reads (power block, then voltage/current, then energy). Each bridge supplies a set of
+  ANCHOR register start addresses (0-based) via the `anchors` constructor arg — the POWER registers a
+  real client polls EVERY cycle:
+  - EM540 (`em540_slave_bridge._SERIAL_PACING_ANCHORS`): `{0x0028 (system power), 0x0012 (per-phase
+    power block start)}`, confirmed from Victron dbus-cgwacs `Em540Commands` (system + per-phase power
+    read every cycle at interval 0; voltage/current, energy and frequency staggered).
+  - TS65A (`ts65a_slave_bridge._SERIAL_PACING_ANCHORS`): `{40097, 40099, 40101, 40103}` (Ac power
+    value + per-phase AC power starts), the Fronius equivalent power registers.
+  These are a protocol property of the served map, not user tunables. A read is an anchor read when
+  any anchor address falls in `range(address, address + count)` (overlap on the start address is
+  sufficient).
+- On each gated read: an ANCHOR read starts a new polling cycle — it bounded-waits for a generation
+  STRICTLY NEWER than the currently PINNED generation, then PINS that `(generation, snapshot)` pair
+  and serves from it (this is what paces the sweep to the upstream rate, one pin step per sweep). A
+  NON-anchor read is a follow-on in the same cycle — it serves IMMEDIATELY and coherently from the
+  pinned pair with NO wait, so every block of a sweep comes from the SAME frame (no cross-frame tear,
+  and the sweep rate is NOT divided by the number of blocks as a per-read cursor would do). The
+  first-ever read before any pin exists behaves like today's first read (wait once for a fresh frame
+  and pin it), so startup is covered.
+- The proxy's `async_getValues` remains stale-breaker-first (returns `ExcCodes.DEVICE_BUSY`
+  immediately when the tier-1 breaker is open — never blocks a doomed request); the anchor bounded
+  wait uses `asyncio.wait_for(..., effective_wait_s)` where `effective_wait_s = min(pacing_max_wait_s,
+  per-request SerialWireBudget)`; on timeout it serves the current frame (one possible duplicate on
+  jitter) unless the breaker opened during the wait (fail-closed). The `(generation, snapshot)` pair
+  is published together and sampled as one unit, so the pinned generation always matches the bytes
+  returned. Writes (`async_setValues`) are a straight pass-through (never gated). The gate's asyncio
+  primitive is created on the dedicated server loop (in `_build_serial_server`) so it binds to the
+  right loop, and the serial await yields that loop so co-resident TCP/RTU servers are never starved.
+  A single per-serial-server pin suffices (serial is single-request, half-duplex). Configurable per
+  bridge via `*_slave.serial.pacing_max_wait_s` (default 0.12s; `<= 0` or `pacing_enabled: false`
+  disables latching, pure pass-through) which MUST be strictly less than `serial.timeout` (validated).
+  This preserves the staleness ladder (the latch sits before the datastore read and defers to tier 1)
+  and does not touch the 0x000B overlay or the production parse/overlay path.
 
 ## Register Layout Invariants (validated against production)
 
