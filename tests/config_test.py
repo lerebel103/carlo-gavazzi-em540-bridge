@@ -598,6 +598,27 @@ def test_ha_max_stale_s_non_positive_disables_and_loads(tmp_path, value):
     assert state.mqtt.ha_max_stale_s == value
 
 
+@pytest.mark.parametrize(
+    "value",
+    [
+        float("nan"),  # non-finite: silently defeats the watchdog if unvalidated
+        float("inf"),
+        float("-inf"),
+        True,  # bool (int subclass) must be rejected explicitly
+        False,
+        "soon",  # non-numeric: raises an uncaught TypeError on the notify thread
+    ],
+)
+def test_ha_max_stale_s_invalid_raises(tmp_path, value):
+    # Finding 2: ha_max_stale_s must be a finite, non-bool number. NaN/inf would
+    # silently defeat the HA freshness watchdog; a non-numeric/bool value would
+    # raise an uncaught TypeError on the MQTT notify thread. All must fail fast
+    # with a ConfigError naming the field.
+    path = _make_config(tmp_path, {"mqtt.ha_max_stale_s": value})
+    with pytest.raises(ConfigError, match="ha_max_stale_s"):
+        ConfigManager(path).load()
+
+
 # ---------------------------------------------------------------------------
 # Persistence tests (Task 2.4)
 # ---------------------------------------------------------------------------

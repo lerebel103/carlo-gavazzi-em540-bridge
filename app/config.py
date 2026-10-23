@@ -421,6 +421,30 @@ class ConfigManager:
         # finite number > 0 (bool rejected explicitly: it is an int subclass).
         self._validate_stale_frame_detection(state.em540_master.stale_frame_detection)
 
+        # 10. MQTT — ha_max_stale_s must be a finite number (bool rejected
+        # explicitly: it is an int subclass). Non-positive values are ALLOWED
+        # (<= 0 disables the HA freshness watchdog, mirroring health_max_stale_s),
+        # so this is NOT a > 0 check. An unvalidated NaN/inf would silently defeat
+        # the watchdog and a non-numeric value would raise an uncaught TypeError on
+        # the MQTT notify thread.
+        self._validate_mqtt(state.mqtt)
+
+    def _validate_mqtt(self, mqtt: MqttConfig) -> None:
+        name = "mqtt.ha_max_stale_s"
+        value = mqtt.ha_max_stale_s
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ConfigError(f"{name} must be a number, got {value!r}")
+        # Must be representable as a finite float: the HA bridge compares
+        # time.time() - snapshot.timestamp against this value on the notify
+        # thread, so NaN/inf must be rejected here rather than silently defeating
+        # the watchdog. Non-positive values are intentionally allowed (disabled).
+        try:
+            as_float = float(value)
+        except (OverflowError, ValueError) as exc:
+            raise ConfigError(f"{name} must be a finite number, got {value!r}") from exc
+        if not math.isfinite(as_float):
+            raise ConfigError(f"{name} must be finite, got {value}")
+
     def _validate_frame_validation(self, fv: FrameValidationConfig) -> None:
         for name, value in (
             ("em540_master.frame_validation.enabled", fv.enabled),
