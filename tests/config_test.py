@@ -456,6 +456,105 @@ def test_nested_serial_config_must_be_mapping(tmp_path, section, value):
         ConfigManager(path).load()
 
 
+# -- serial frame-latching (pacing_max_wait_s) validation --
+
+
+@pytest.mark.parametrize("section", ["em540_slave", "ts65a_slave"])
+def test_pacing_max_wait_s_defaults_to_012(tmp_path, section):
+    # Unspecified pacing settings default to pacing_enabled=True, 0.12s.
+    path = _make_config(tmp_path, {f"{section}.serial.enabled": True})
+    state = ConfigManager(path).load()
+    serial = getattr(state, section).serial
+    assert serial.pacing_max_wait_s == 0.12
+    assert serial.pacing_enabled is True
+
+
+@pytest.mark.parametrize("section", ["em540_slave", "ts65a_slave"])
+@pytest.mark.parametrize("bad_value", [float("nan"), float("inf"), True, False, "x"])
+def test_pacing_max_wait_s_rejects_non_finite_bool_or_non_numeric(tmp_path, section, bad_value):
+    # The finiteness/type check runs regardless of enabled state.
+    path = _make_config(
+        tmp_path,
+        {f"{section}.serial.enabled": False, f"{section}.serial.pacing_max_wait_s": bad_value},
+    )
+    with pytest.raises(ConfigError, match=rf"{section}\.serial\.pacing_max_wait_s"):
+        ConfigManager(path).load()
+
+
+@pytest.mark.parametrize("section", ["em540_slave", "ts65a_slave"])
+@pytest.mark.parametrize("bad_value", [0.5, 0.6])
+def test_pacing_max_wait_s_rejected_when_ge_serial_timeout(tmp_path, section, bad_value):
+    # serial enabled + pacing enabled: must be strictly less than serial.timeout (0.5).
+    path = _make_config(
+        tmp_path,
+        {
+            f"{section}.serial.enabled": True,
+            f"{section}.serial.timeout": 0.5,
+            f"{section}.serial.pacing_max_wait_s": bad_value,
+        },
+    )
+    with pytest.raises(ConfigError, match=rf"{section}\.serial\.pacing_max_wait_s"):
+        ConfigManager(path).load()
+
+
+@pytest.mark.parametrize("section", ["em540_slave", "ts65a_slave"])
+def test_pacing_max_wait_s_accepted_when_lt_serial_timeout(tmp_path, section):
+    path = _make_config(
+        tmp_path,
+        {
+            f"{section}.serial.enabled": True,
+            f"{section}.serial.timeout": 0.5,
+            f"{section}.serial.pacing_max_wait_s": 0.12,
+        },
+    )
+    state = ConfigManager(path).load()
+    assert getattr(state, section).serial.pacing_max_wait_s == 0.12
+
+
+@pytest.mark.parametrize("section", ["em540_slave", "ts65a_slave"])
+@pytest.mark.parametrize("value", [0, -1, -0.5])
+def test_pacing_max_wait_s_non_positive_accepted_disables_latching(tmp_path, section, value):
+    # <= 0 disables latching and is accepted even when serial is enabled, so the
+    # strict-less-than-timeout check must not fire.
+    path = _make_config(
+        tmp_path,
+        {
+            f"{section}.serial.enabled": True,
+            f"{section}.serial.timeout": 0.5,
+            f"{section}.serial.pacing_max_wait_s": value,
+        },
+    )
+    state = ConfigManager(path).load()
+    assert getattr(state, section).serial.pacing_max_wait_s == value
+
+
+@pytest.mark.parametrize("section", ["em540_slave", "ts65a_slave"])
+def test_pacing_enabled_false_accepts_value_ge_timeout(tmp_path, section):
+    # With pacing_enabled=False the strict-less-than-timeout check is skipped
+    # (latching disabled), so a value >= timeout is accepted.
+    path = _make_config(
+        tmp_path,
+        {
+            f"{section}.serial.enabled": True,
+            f"{section}.serial.timeout": 0.5,
+            f"{section}.serial.pacing_enabled": False,
+            f"{section}.serial.pacing_max_wait_s": 0.5,
+        },
+    )
+    state = ConfigManager(path).load()
+    assert getattr(state, section).serial.pacing_enabled is False
+
+
+@pytest.mark.parametrize("section", ["em540_slave", "ts65a_slave"])
+def test_pacing_enabled_rejects_non_bool(tmp_path, section):
+    path = _make_config(
+        tmp_path,
+        {f"{section}.serial.enabled": True, f"{section}.serial.pacing_enabled": "yes"},
+    )
+    with pytest.raises(ConfigError, match=rf"{section}\.serial\.pacing_enabled"):
+        ConfigManager(path).load()
+
+
 # -- serial device reachability --
 #
 # These tests exercise the real _check_serial_device_reachable() implementation

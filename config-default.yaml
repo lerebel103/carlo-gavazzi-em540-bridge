@@ -159,6 +159,21 @@ em540_slave:
     stopbits: 1
     timeout: 0.5
     handle_local_echo: false
+    # Serial-only frame-latching. A downstream serial client can poll faster than
+    # the upstream meter refreshes, which would otherwise return DUPLICATE frames.
+    # When enabled, a serial read blocks until a NEW upstream frame has landed in
+    # the downstream registers (latching the serial client to the upstream refresh
+    # rate), then releases immediately — minimum end-to-end latency, no duplicates.
+    # TCP and RTU-over-TCP clients are unaffected.
+    pacing_enabled: true
+    # Maximum seconds a serial read blocks waiting for a fresh frame. Default 0.12s
+    # ~= 1.5x the ~80ms (12.5Hz) upstream period and MUST stay well below the real
+    # downstream serial client READ TIMEOUT of 200ms (and below this bridge's
+    # serial.timeout above and the 0.5s downstream breaker update_timeout). A value
+    # <= 0 disables latching (today's behaviour, duplicate frames possible).
+    # Validation rejects pacing_max_wait_s >= serial.timeout when serial and pacing
+    # are both enabled.
+    pacing_max_wait_s: 0.12
 
 ts65a_slave:
   # The TS65A slave data model can be served over TCP and/or an optional
@@ -192,6 +207,21 @@ ts65a_slave:
     stopbits: 1
     timeout: 0.5
     handle_local_echo: false
+    # Serial-only frame-latching. A downstream serial client can poll faster than
+    # the upstream meter refreshes, which would otherwise return DUPLICATE frames.
+    # When enabled, a serial read blocks until a NEW upstream frame has landed in
+    # the downstream registers (latching the serial client to the upstream refresh
+    # rate), then releases immediately — minimum end-to-end latency, no duplicates.
+    # TCP clients are unaffected.
+    pacing_enabled: true
+    # Maximum seconds a serial read blocks waiting for a fresh frame. Default 0.12s
+    # ~= 1.5x the ~80ms (12.5Hz) upstream period and MUST stay well below the real
+    # downstream serial client READ TIMEOUT of 200ms (and below this bridge's
+    # serial.timeout above and the 0.5s downstream breaker update_timeout). A value
+    # <= 0 disables latching (today's behaviour, duplicate frames possible).
+    # Validation rejects pacing_max_wait_s >= serial.timeout when serial and pacing
+    # are both enabled.
+    pacing_max_wait_s: 0.12
 
 mqtt:
   # Whether to enable MQTT integration from the top level.

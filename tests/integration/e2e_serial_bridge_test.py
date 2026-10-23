@@ -576,3 +576,162 @@ def test_end_to_end_serial_and_tcp_clients_observe_expected_data() -> None:
             upstream.stop()
             em540_serial.close()
             ts65a_serial.close()
+
+
+def _poll_serial_read_latencies(client, address: int, count: int, reads: int) -> list[float]:
+    """Issue `reads` back-to-back serial reads and return per-read durations (s).
+
+    The client polls in the tightest possible loop (no inter-read sleep), so any
+    non-trivial per-read duration is attributable to the bridge deferring the
+    response until a fresh frame lands (frame-latching), not to client pacing.
+    A failed/exception read is skipped (not timed) so transient PTY hiccups under
+    CI do not pollute the latency sample.
+    """
+    latencies: list[float] = []
+    attempts = 0
+    max_attempts = reads * 4
+    while len(latencies) < reads and attempts < max_attempts:
+        attempts += 1
+        start = time.monotonic()
+        try:
+            result = client.read_holding_registers(address, count=count, device_id=1)
+        except (ModbusException, OSError, ConnectionError):
+            continue
+        elapsed = time.monotonic() - start
+        if result.isError():
+            continue
+        latencies.append(elapsed)
+    return latencies
+
+
+@pytest.mark.integration
+def test_serial_frame_latching_defers_reads_to_upstream_rate() -> None:
+    """Serial frame-latching: downstream serial reads are latched to the upstream
+    refresh rate (no duplicate frames at the client's raw poll rate).
+
+    Genuine end-to-end over the PTY serial harness:
+      1. Upstream EM540 registers held CONSTANT; the service still publishes a new
+         frame into the downstream registers once per `update_interval` tick, so
+         "fresh frame" == "new service tick" (the generation bumps every tick
+         regardless of register content).
+      2. A downstream serial client polls in a tight loop.
+
+    Assertions (per the task):
+      (1) NO duplicate-at-line-rate: with latching ON, each successful serial read
+          has a non-trivial latency floor (it waits for the next tick) — the mean
+          per-read latency is well above a trivial floor and near `update_interval`.
+      (2) Each read is deferred until a fresh frame — bounded, never below a small
+          floor on average.
+      (3) Worst-case served read latency < 200ms (the real serial client READ
+          TIMEOUT), and < pacing_max_wait_s + a margin.
+
+    Coverage notes (PTY harness limitations): PTY serial timing carries jitter, so
+    assertion (1) is made on the MEAN inter-read latency (robust to per-read
+    outliers) rather than every single read; the strict < 200ms bound is asserted
+    on the worst-case single read. The negative control (latching disabled → fast
+    back-to-back reads) is covered by the deterministic unit tests
+    (tests/utils/serial_pacing_test.py: pacing disabled never blocks) rather than a
+    second heavy service spin-up here.
+    """
+    update_interval = 0.1
+    pacing_max_wait_s = 0.12
+
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        tmp_path = Path(tmp_dir)
+
+        em540_tcp_port = find_free_port()
+        em540_rtu_port = find_free_port()
+        ts65a_tcp_port = find_free_port()
+
+        em540_serial = SerialCable("latch-em540")
+        ts65a_serial = SerialCable("latch-ts65a")
+
+        upstream = Em540UpstreamSimulator(frame_seed=100)
+        upstream.start()
+
+        try:
+            config_path = tmp_path / "config.yaml"
+            generate_config(
+                config_path,
+                upstream.port,
+                em540_tcp_port,
+                em540_rtu_port,
+                ts65a_tcp_port,
+                em540_serial_port=em540_serial.left_path,
+                ts65a_serial_port=ts65a_serial.left_path,
+                update_interval=update_interval,
+                serial_pacing_enabled=True,
+                serial_pacing_max_wait_s=pacing_max_wait_s,
+                serial_timeout=0.5,
+            )
+
+            service = ServiceProcess(config_path)
+            service.start()
+
+            try:
+                wait_for_port(em540_tcp_port, timeout=20.0)
+                wait_for_port(ts65a_tcp_port, timeout=20.0)
+
+                clients = DownstreamClients(
+                    em540_tcp_port,
+                    em540_rtu_port,
+                    ts65a_tcp_port,
+                    em540_serial.right_path,
+                    ts65a_serial.right_path,
+                )
+                clients.connect_all()
+
+                # Wait until the downstream is serving live data (breaker closed),
+                # so the latch — not the stale breaker — governs the serial reads.
+                wait_for_downstream_data(clients.em540_tcp, address=0x0000, timeout=120.0)
+
+                for label, client, address in (
+                    ("EM540", clients.em540_serial, 0x0000),
+                    ("TS65A", clients.ts65a_serial, 40071),
+                ):
+                    # Warm up one read so the per-serial-line cursor is initialised
+                    # and the breaker is confirmed closed for this path.
+                    wait_for_condition(
+                        lambda c=client, a=address: _poll_serial_read_latencies(c, a, 2, 1) != [],
+                        timeout=30.0,
+                        message=f"{label} serial path did not serve a live read before latency sampling"
+                        + service.diagnostics(),
+                    )
+
+                    latencies = _poll_serial_read_latencies(client, address, count=2, reads=12)
+                    assert len(latencies) >= 8, (
+                        f"{label} serial: too few successful reads to assess latching "
+                        f"(got {len(latencies)}){service.diagnostics()}"
+                    )
+
+                    worst = max(latencies)
+                    mean = sum(latencies) / len(latencies)
+
+                    # (3) worst-case served latency < 200ms client timeout and within
+                    # the configured cap plus a transport/jitter margin.
+                    assert worst < 0.2, f"{label} serial worst-case read {worst * 1000:.1f}ms exceeded 200ms"
+                    assert worst < pacing_max_wait_s + 0.08, (
+                        f"{label} serial worst-case read {worst * 1000:.1f}ms exceeded "
+                        f"pacing cap + margin ({(pacing_max_wait_s + 0.08) * 1000:.0f}ms)"
+                    )
+
+                    # (1)/(2) latching engaged: a tight-loop client cannot outrun the
+                    # upstream tick — the mean per-read latency sits near one update
+                    # interval, well above a trivial (non-blocking) floor. Without
+                    # latching these reads would resolve near-instantly (sub-ms to a
+                    # few ms) and return duplicate frames.
+                    trivial_floor = 0.01
+                    assert mean > trivial_floor, (
+                        f"{label} serial mean read latency {mean * 1000:.1f}ms indicates no latching "
+                        f"(reads resolved faster than the trivial {trivial_floor * 1000:.0f}ms floor)"
+                    )
+
+                service.assert_running()
+                clients.disconnect_all()
+
+            finally:
+                service.stop()
+        finally:
+            upstream.stop()
+            em540_serial.close()
+            ts65a_serial.close()

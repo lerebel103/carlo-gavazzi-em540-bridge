@@ -70,6 +70,27 @@ Notes:
   requests arrive within `serial_idle_timeout`, and connect/disconnect counters increment on activity
   edges evaluated at diagnostics cadence. TCP and RTU-over-TCP channels still use real transport
   connect/disconnect events.
+- Downstream SERIAL reads are frame-latched to the upstream refresh rate so serial clients never
+  receive duplicate frames (a serial client can poll faster than the meter refreshes). Each bridge
+  keeps a monotonic `self._frame_generation` counter, bumped in `new_data` ONLY on the successful-write
+  branch (next to `data_received`); after the bump it wakes the serial read via
+  `self._server_loop.call_soon_threadsafe(gate.publish, generation)` (non-blocking listener-thread
+  work only). A shared async context proxy (`app/utils/serial_pacing.py` — `FrameGate` +
+  `SerialPacingContext`, IDENTICAL for both bridges) is installed ONLY on `serial_server.context`;
+  TCP and RTU-over-TCP keep the plain shared `SimCore` and are byte-for-byte unaffected (serial-only
+  scoping is structural, not a runtime guard). The proxy's `async_getValues` is stale-breaker-first
+  (returns `ExcCodes.DEVICE_BUSY` immediately when the tier-1 breaker is open — never blocks a doomed
+  request), then bounded-waits on the gate for a generation newer than the one this serial line was
+  last served (`asyncio.wait_for(..., pacing_max_wait_s)`), then on timeout serves the current frame
+  (one possible duplicate on jitter) unless the breaker opened during the wait (fail-closed). Writes
+  (`async_setValues`) are a straight pass-through (never gated). The gate's asyncio primitive is
+  created on the dedicated server loop (in `_build_serial_server`) so it binds to the right loop, and
+  the serial await yields that loop so co-resident TCP/RTU servers are never starved. A single
+  per-serial-server last-served cursor suffices (serial is single-request, half-duplex). Configurable
+  per bridge via `*_slave.serial.pacing_max_wait_s` (default 0.12s; `<= 0` or `pacing_enabled: false`
+  disables latching) which MUST be strictly less than `serial.timeout` (validated). This preserves the
+  staleness ladder (the latch sits before the datastore read and defers to tier 1) and does not touch
+  the 0x000B overlay or the production parse/overlay path.
 
 ## Register Layout Invariants (validated against production)
 

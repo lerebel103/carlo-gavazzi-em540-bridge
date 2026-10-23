@@ -137,6 +137,17 @@ class SlaveSerialConfig:
     stopbits: float = 1
     timeout: float = 0.5
     handle_local_echo: bool = False
+    # Serial-only frame-latching. A serial read blocks at most this many seconds
+    # waiting for a fresh upstream frame before releasing, so serial clients
+    # latch to the upstream refresh rate instead of receiving duplicate frames.
+    # Default 0.12s ~= 1.5x the ~80ms (12.5Hz) upstream period and must stay well
+    # below the real downstream serial client READ TIMEOUT of 200ms (and below
+    # this bridge's serial.timeout and the 0.5s downstream breaker
+    # update_timeout). A value <= 0 disables latching (today's behaviour,
+    # duplicate frames possible). Validation rejects pacing_max_wait_s >=
+    # serial.timeout when serial and pacing are both enabled.
+    pacing_enabled: bool = True
+    pacing_max_wait_s: float = 0.12
 
 
 @dataclass
@@ -382,6 +393,12 @@ class ConfigManager:
             self._check_serial_device_reachable("ts65a_slave.serial.port", state.ts65a_slave.serial.port)
             self._validate_serial_idle_timeout("ts65a_slave.serial_idle_timeout", state.ts65a_slave.serial_idle_timeout)
 
+        # Serial frame-latching cap. The finiteness/type check runs regardless of
+        # enabled state; the strict-less-than-serial-timeout check only applies
+        # when the serial adapter and pacing are both enabled.
+        self._validate_serial_pacing("em540_slave.serial", state.em540_slave.serial)
+        self._validate_serial_pacing("ts65a_slave.serial", state.ts65a_slave.serial)
+
         # 5. grid_feed_in_hard_limit  (<= 0)
         if state.ts65a_slave.grid_feed_in_hard_limit > 0:
             raise ConfigError(
@@ -532,6 +549,37 @@ class ConfigManager:
             raise ConfigError(f"{name} must be finite when serial is enabled, got {value}")
         if value <= 0:
             raise ConfigError(f"{name} must be > 0 when serial is enabled, got {value}")
+
+    def _validate_serial_pacing(self, name: str, serial: SlaveSerialConfig) -> None:
+        """Validate the serial frame-latching cap pacing_max_wait_s.
+
+        pacing_max_wait_s must always be a finite, non-bool number (bool is an
+        int subclass and is rejected explicitly; NaN/inf and non-numeric values
+        would silently break the bounded asyncio.wait_for). A value <= 0 disables
+        latching and is accepted regardless of enabled state.
+
+        When the serial adapter is enabled AND pacing is enabled
+        (pacing_max_wait_s > 0 and pacing_enabled), pacing_max_wait_s MUST be
+        strictly less than serial.timeout — the safety margin below the serial
+        client response timeout — otherwise a latched read could outlast the
+        client's own timeout.
+        """
+        value = serial.pacing_max_wait_s
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ConfigError(f"{name}.pacing_max_wait_s must be a number, got {value!r}")
+        if not math.isfinite(value):
+            raise ConfigError(f"{name}.pacing_max_wait_s must be finite, got {value}")
+
+        if not isinstance(serial.pacing_enabled, bool):
+            raise ConfigError(f"{name}.pacing_enabled must be a boolean (true/false), got {serial.pacing_enabled!r}")
+
+        # Only enforce the margin-below-timeout when latching is actually active.
+        if serial.enabled and serial.pacing_enabled and value > 0:
+            if value >= serial.timeout:
+                raise ConfigError(
+                    f"{name}.pacing_max_wait_s must be strictly less than {name}.timeout "
+                    f"(the serial client response timeout), got pacing_max_wait_s={value} timeout={serial.timeout}"
+                )
 
     def _validate_serial_config(self, name: str, serial: SlaveSerialConfig) -> None:
         if not serial.enabled:
