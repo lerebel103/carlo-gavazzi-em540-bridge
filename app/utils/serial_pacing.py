@@ -60,6 +60,34 @@ from pymodbus.constants import ExcCodes
 
 from app.utils.pdu_helper import PduHelper
 
+# Register-read function codes the snapshot fast-path applies to: FC3 (read
+# holding registers) and FC4 (read input registers). Any other function code
+# (FC1 read coils, FC2 read discrete inputs, etc.) carries bit addressing and
+# different datastore semantics, so it is NOT served from the register snapshot
+# and falls through to the real core (see async_getValues, Finding B1).
+_REGISTER_READ_FUNC_CODES: frozenset[int] = frozenset({3, 4})
+
+
+def valid_register_addresses(sim_runtime, block_key: str) -> frozenset[int]:
+    """Return the set of DEFINED register addresses for a SimRuntime block.
+
+    The pymodbus SimRuntime block is ``(start_address, register_count, registers,
+    flags)``. An address is only a real register when its ``flags`` entry is not
+    marked ``DataType.INVALID`` (the low nibble of the flag byte is the type; a
+    value of ``DataType.INVALID`` == 1 means "no register here"). The backing
+    register array can be contiguous across map gaps (gap addresses hold 0), so
+    the flags — not the array length — are the authority on validity (Finding B2).
+
+    Imported lazily so the module has no hard pymodbus-simulator-internals
+    dependency at import time for the unit-tested pacing logic itself.
+    """
+    from pymodbus.simulator.simutils import DataType, SimUtils
+
+    start_address, _count, _registers, flags = sim_runtime.block[block_key]
+    return frozenset(
+        start_address + i for i, flag in enumerate(flags) if (flag & SimUtils.RunTimeFlag_TYPE) != DataType.INVALID
+    )
+
 
 @dataclass(frozen=True)
 class SerialWireBudget:
@@ -207,14 +235,24 @@ class SerialPacingContext:
     strictly-newer generation; a non-anchor read serves coherently from the
     existing pin without waiting.
 
-    The ``anchors`` set holds the 0-based Modbus protocol START addresses of this
-    bridge's per-cycle heartbeat reads (the POWER registers the real client polls
-    every cycle). A read is an ANCHOR read when any configured anchor address
-    falls in ``range(address, address + count)`` — overlap on the start address is
+    The ``anchors`` set holds the served START addresses of this bridge's
+    per-cycle heartbeat reads (the POWER registers the real client polls every
+    cycle), expressed in the same address space the bridge serves and the client
+    requests. A read is an ANCHOR read when any configured anchor address falls in
+    ``range(address, address + count)`` — overlap on the start address is
     sufficient.
 
     If ``max_wait_s <= 0`` latching is disabled and ``async_getValues`` is a pure
     pass-through (today's behaviour, duplicate frames possible).
+
+    The snapshot fast-path applies ONLY to register reads (FC3 read-holding, FC4
+    read-input). Bit reads (FC1 read-coils, FC2 read-discrete-inputs) and any
+    other func code fall through to the real core so they keep their correct
+    datastore semantics/exception (Finding B1) — the proxy replaces the whole
+    serial context, so those requests reach it too. A register read into an
+    address the datastore does not define falls through to the core as well, so
+    it raises the correct ILLEGAL_ADDRESS rather than serving snapshot zeros for
+    a map gap (Finding B2).
 
     Finding 1 — atomic generation-stamped serial snapshot
     ------------------------------------------------------
@@ -244,6 +282,7 @@ class SerialPacingContext:
         reg_start_address: int = 0,
         wire_budget: SerialWireBudget | None = None,
         anchors: Iterable[int] | None = None,
+        valid_addresses: Iterable[int] | None = None,
     ) -> None:
         self._core = core
         self._gate = gate
@@ -252,6 +291,18 @@ class SerialPacingContext:
         # Base Modbus protocol address of the served register block, used to map a
         # requested address onto an index into the published snapshot tuple.
         self._reg_start_address = reg_start_address
+        # Addresses the real datastore actually DEFINES (Finding B2). The snapshot
+        # tuple is a flat copy of the backing register array and carries no
+        # validity flags, so a window spanning an UNDEFINED gap (e.g. a TS65A read
+        # at 49999) would be served real-looking zeros where the core raises
+        # ILLEGAL_ADDRESS. When this set is supplied, a snapshot slice is only
+        # served if EVERY requested address is defined; otherwise the read falls
+        # through to the real core so it raises the correct ILLEGAL_ADDRESS. When
+        # None (unit tests / no map supplied) validity is deferred to the core via
+        # the existing bounds check only.
+        self._valid_addresses: frozenset[int] | None = (
+            frozenset(valid_addresses) if valid_addresses is not None else None
+        )
         # Per-request serialization budget (Finding 2). When set, the effective
         # latch wait for a read is min(max_wait_s, budget_for_this_count) so the
         # response still fits the serial client's read deadline. When None (e.g.
@@ -300,6 +351,14 @@ class SerialPacingContext:
         end = offset + count
         if offset < 0 or end > len(snapshot):
             return None
+        # Finding B2: the snapshot carries register values but no address-validity
+        # flags. If any requested address is NOT defined by the real datastore,
+        # return None so the caller falls through to the core and it raises the
+        # correct ILLEGAL_ADDRESS instead of serving snapshot zeros for a gap.
+        if self._valid_addresses is not None and not all(
+            addr in self._valid_addresses for addr in range(address, address + count)
+        ):
+            return None
         return list(snapshot[offset:end])
 
     def _is_anchor_read(self, address: int, count: int) -> bool:
@@ -322,6 +381,16 @@ class SerialPacingContext:
 
         # (b) DISABLED: latching off — pure pass-through, no wait.
         if self._max_wait_s <= 0:
+            return await self._core.async_getValues(device_id, func_code, address, count)
+
+        # (b2) NON-REGISTER READ (Finding B1): the proxy replaces the serial
+        # server's ENTIRE context, so bit reads (FC1 read-coils / FC2
+        # read-discrete-inputs) and any non-register func code also reach here.
+        # The snapshot fast-path treats addresses/counts as REGISTER
+        # addresses/counts and cannot reproduce bit-read semantics. Serve those
+        # from the real core so they keep their correct behaviour/exception;
+        # only FC3/FC4 register reads are paced from the snapshot.
+        if func_code not in _REGISTER_READ_FUNC_CODES:
             return await self._core.async_getValues(device_id, func_code, address, count)
 
         is_anchor = self._is_anchor_read(address, count)

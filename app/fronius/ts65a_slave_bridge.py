@@ -16,7 +16,12 @@ from app.fronius.ts65a_data import Ts65aMeterData
 from app.fronius.ts65a_slave_stats import Ts65aSlaveStats
 from app.utils.idle_connection_reaper import IdleConnectionReaper
 from app.utils.pdu_helper import PduHelper
-from app.utils.serial_pacing import FrameGate, SerialPacingContext, SerialWireBudget
+from app.utils.serial_pacing import (
+    FrameGate,
+    SerialPacingContext,
+    SerialWireBudget,
+    valid_register_addresses,
+)
 
 logger = logging.getLogger("ts65a-slave")
 
@@ -34,15 +39,18 @@ _COMPAT_ZERO_REGISTER = 50000
 _STRUCT_FLOAT32 = struct.Struct(">f")
 _STRUCT_2H = struct.Struct(">2H")
 
-# Serial frame-latching ANCHOR registers (0-based Modbus protocol addresses in
-# the served Fronius SunSpec map). These are the AC POWER FLOAT32 values a real
-# Fronius client reads every polling cycle, so they are the per-cycle heartbeat
-# the serial latch paces off: an anchor-overlapping read starts a new cycle (wait
-# for a fresh upstream frame and pin it); every other block of the cycle serves
-# coherently from that pin. Mirrors the EM540 power-anchor rationale using the
-# Fronius equivalent power registers (Ac power value plus the three per-phase AC
-# power starts, confirmed from _TS65A_STATIC_REGISTERS). This is a protocol
-# property of the served map, not a user tunable.
+# Serial frame-latching ANCHOR registers. These are the SunSpec holding-register
+# NUMBERS for AC power / per-phase AC power as served in _TS65A_STATIC_REGISTERS
+# (Ac power value 40097 plus the three per-phase AC power starts 40099/40101/
+# 40103) — the FLOAT32 power values a real Fronius client reads every polling
+# cycle. (Unlike the EM540 map, this proprietary TS65A layout is keyed directly
+# by those SunSpec register numbers, so the anchor values ARE the served
+# addresses — they are not register_number-1 protocol offsets.) They are the
+# per-cycle heartbeat the serial latch paces off: an anchor-overlapping read
+# starts a new cycle (wait for a fresh upstream frame and pin it); every other
+# block of the cycle serves coherently from that pin. Mirrors the EM540
+# power-anchor rationale using the Fronius equivalent power registers. This is a
+# protocol property of the served map, not a user tunable.
 _SERIAL_PACING_ANCHORS: frozenset[int] = frozenset({40097, 40099, 40101, 40103})
 
 # Static register layout for the Fronius Smart Meter TS 65A-3 SunSpec model.
@@ -260,6 +268,11 @@ class Ts65aSlaveBridge(MeterDataListener):
             raise RuntimeError(f"SimRuntime has no register block (available keys: {list(sim_runtime.block.keys())})")
         self._reg_start_address: int = sim_runtime.block[block_key][0]
         self._registers: list[int] = sim_runtime.block[block_key][2]
+        # Addresses the datastore actually defines, for the serial pacing proxy's
+        # ILLEGAL_ADDRESS fidelity (Finding B2). The TS65A map is sparse (e.g.
+        # 50000 is served but 49999 is an undefined gap), so a paced read into a
+        # gap must fall through to the core instead of serving snapshot zeros.
+        self._valid_addresses: frozenset[int] = valid_register_addresses(sim_runtime, block_key)
         self._reg_lock: Lock = Lock()
 
         # Idle connection reaper — close connections with no PDU activity
@@ -356,6 +369,7 @@ class Ts65aSlaveBridge(MeterDataListener):
             reg_start_address=self._reg_start_address,
             wire_budget=self._serial_wire_budget(),
             anchors=_SERIAL_PACING_ANCHORS,
+            valid_addresses=self._valid_addresses,
         )
         return serial_server
 

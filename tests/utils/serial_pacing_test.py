@@ -41,10 +41,10 @@ class _FakeCore:
     writes) reach the core now; the gated read path returns a snapshot slice.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, result=None) -> None:
         self.get_calls: list[tuple] = []
         self.set_calls: list[tuple] = []
-        self.sentinel = [1, 2, 3]
+        self.sentinel = [1, 2, 3] if result is None else result
 
     def device_ids(self) -> list[int]:
         return [1, 7]
@@ -69,12 +69,19 @@ def _snapshot(gen: int, length: int = 8) -> tuple[int, ...]:
 
 
 class TestSerialPacing(unittest.TestCase):
-    def _make(self, *, circuit_open=False, max_wait_s=0.12, wire_budget=None, anchors=None):
+    def _make(self, *, circuit_open=False, max_wait_s=0.12, wire_budget=None, anchors=None, valid_addresses=None):
         core = _FakeCore()
         helper = _FakePduHelper(circuit_open=circuit_open)
         gate = FrameGate()
         ctx = SerialPacingContext(
-            core, gate, helper, max_wait_s, reg_start_address=0, wire_budget=wire_budget, anchors=anchors
+            core,
+            gate,
+            helper,
+            max_wait_s,
+            reg_start_address=0,
+            wire_budget=wire_budget,
+            anchors=anchors,
+            valid_addresses=valid_addresses,
         )
         return core, helper, gate, ctx
 
@@ -455,6 +462,94 @@ class TestSerialPacing(unittest.TestCase):
             self.assertEqual(result, [4 * 100 + i for i in range(90)])
             self.assertEqual(ctx._pinned_generation, 4)
             self.assertEqual(core.get_calls, [])
+
+        asyncio.run(scenario())
+
+    # -- Finding B1: bit reads (FC1/FC2) fall through to the real core ---------
+
+    def test_bit_read_func_codes_fall_through_to_core_not_snapshot(self):
+        """FC1 (read coils) and FC2 (read discrete inputs) reach the proxy because
+        it replaces the whole serial context. The snapshot fast-path must NOT
+        handle them (it would return raw register words); they fall through to the
+        real core so the datastore's bit-read semantics/exception are preserved."""
+
+        async def scenario():
+            core, _helper, gate, ctx = self._make(anchors={0})
+            # A fresh frame exists and would satisfy a register read at this window.
+            gate.publish(1, _snapshot(1))
+            await asyncio.sleep(0)
+
+            for func_code in (1, 2):
+                core.get_calls.clear()
+                result = await asyncio.wait_for(ctx.async_getValues(1, func_code, 0, 2), timeout=0.2)
+                # Served by the core, NOT a snapshot slice.
+                self.assertEqual(result, core.sentinel)
+                self.assertEqual(core.get_calls, [(1, func_code, 0, 2)])
+
+        asyncio.run(scenario())
+
+    def test_register_read_func_codes_still_use_snapshot_fast_path(self):
+        """FC3 (read holding) and FC4 (read input) remain paced from the snapshot
+        — the B1 fix must not disturb register reads."""
+
+        async def scenario():
+            for func_code in (3, 4):
+                core, _helper, gate, ctx = self._make(anchors={0})
+                gate.publish(2, _snapshot(2))
+                await asyncio.sleep(0)
+                result = await asyncio.wait_for(ctx.async_getValues(1, func_code, 0, 2), timeout=0.2)
+                self.assertEqual(result, [200, 201], "register read must serve the snapshot slice")
+                self.assertEqual(core.get_calls, [], "register read must not touch the live core")
+
+        asyncio.run(scenario())
+
+    # -- Finding B2: undefined-gap reads defer ILLEGAL_ADDRESS to the core ------
+
+    def test_paced_read_into_undefined_gap_falls_through_to_core(self):
+        """A paced register read whose window covers an address the datastore does
+        NOT define must fall through to the core so it raises ILLEGAL_ADDRESS,
+        instead of serving snapshot zeros for a map gap (reviewer's TS65A 49999
+        example)."""
+
+        async def scenario():
+            # Datastore defines addresses 0..3 and 6..7, with 4 and 5 as a gap.
+            core = _FakeCore(result=ExcCodes.ILLEGAL_ADDRESS)
+            helper = _FakePduHelper(circuit_open=False)
+            gate = FrameGate()
+            ctx = SerialPacingContext(
+                core,
+                gate,
+                helper,
+                0.12,
+                reg_start_address=0,
+                anchors={0},
+                valid_addresses={0, 1, 2, 3, 6, 7},
+            )
+            gate.publish(1, _snapshot(1, length=8))
+            await asyncio.sleep(0)
+
+            # Window [3, 5) touches the undefined gap at 4 -> fall through to core,
+            # which returns the same ILLEGAL_ADDRESS an unpaced read would.
+            result = await asyncio.wait_for(ctx.async_getValues(1, 3, 3, 2), timeout=0.2)
+            self.assertIs(result, ExcCodes.ILLEGAL_ADDRESS)
+            self.assertEqual(core.get_calls, [(1, 3, 3, 2)])
+
+        asyncio.run(scenario())
+
+    def test_paced_read_within_defined_range_still_served_from_snapshot(self):
+        """A valid paced read (all addresses defined) is still served atomically
+        from the pinned snapshot — the B2 fix must not force a live-core read for
+        valid windows (which would break the atomic generation/snapshot guarantee)."""
+
+        async def scenario():
+            core, _helper, gate, ctx = self._make(anchors={0}, valid_addresses={0, 1, 2, 3, 6, 7})
+            gate.publish(5, _snapshot(5, length=8))
+            await asyncio.sleep(0)
+
+            # Window [0, 4) is entirely within the defined range -> snapshot slice.
+            result = await asyncio.wait_for(ctx.async_getValues(1, 3, 0, 4), timeout=0.2)
+            self.assertEqual(result, [500, 501, 502, 503])
+            self.assertEqual(core.get_calls, [], "valid paced read must stay atomic (no live-core read)")
 
         asyncio.run(scenario())
 

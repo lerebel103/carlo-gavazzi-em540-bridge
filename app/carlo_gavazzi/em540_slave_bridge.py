@@ -15,7 +15,12 @@ from app.carlo_gavazzi.em540_slave_stats import EM540SlaveStats
 from app.carlo_gavazzi.meter_data import MeterData
 from app.utils.idle_connection_reaper import IdleConnectionReaper
 from app.utils.pdu_helper import PduHelper
-from app.utils.serial_pacing import FrameGate, SerialPacingContext, SerialWireBudget
+from app.utils.serial_pacing import (
+    FrameGate,
+    SerialPacingContext,
+    SerialWireBudget,
+    valid_register_addresses,
+)
 
 REG_OFFSET = 0  # SimDevice uses raw 0-based Modbus protocol addresses directly
 
@@ -200,6 +205,11 @@ class Em540Slave(MeterDataListener):
             raise RuntimeError(f"SimRuntime has no register block (available keys: {list(sim_runtime.block.keys())})")
         self._reg_start_address: int = sim_runtime.block[block_key][0]
         self._registers: list[int] = sim_runtime.block[block_key][2]
+        # Addresses the datastore actually defines, for the serial pacing proxy's
+        # ILLEGAL_ADDRESS fidelity (Finding B2). Computed once from the block's
+        # validity flags; a paced read into an undefined gap falls through to the
+        # core instead of serving snapshot zeros.
+        self._valid_addresses: frozenset[int] = valid_register_addresses(sim_runtime, block_key)
         self._reg_lock: Lock = Lock()
 
         # Idle connection reapers — close connections with no PDU activity
@@ -310,6 +320,7 @@ class Em540Slave(MeterDataListener):
             reg_start_address=self._reg_start_address,
             wire_budget=self._serial_wire_budget(),
             anchors=_SERIAL_PACING_ANCHORS,
+            valid_addresses=self._valid_addresses,
         )
         return serial_server
 
