@@ -368,6 +368,17 @@ class SerialPacingContext:
         # read) waits once for a fresh frame and pins it.
         self._pinned_generation: int = 0
         self._pinned_snapshot: tuple[int, ...] | None = None
+        # Whether a PRIMARY cycle-start anchor read has ever advanced the pin for
+        # this client. A client that drives pacing via the primary anchor sets
+        # this True on its first cycle start, and its follow-on reads then stay
+        # coherent with the pinned frame for the rest of each cycle. A client that
+        # NEVER reads the primary cycle-start anchor (non-anchor-only) leaves this
+        # False; its reads get a bounded refresh to the latest available
+        # generation so it is not frozen on one frame forever (COMMIT 2 /
+        # pin-age bound). The bound is upstream generation AVAILABILITY — the
+        # refresh only jumps to a generation the gate has already published, never
+        # a configured wall-clock cadence.
+        self._cycle_start_seen: bool = False
 
     def _effective_wait_s(self, count: int) -> float:
         """Effective latch wait for a ``count``-register read.
@@ -463,15 +474,39 @@ class SerialPacingContext:
         # cannot cover the window (odd / out-of-range read) fall through to the
         # live core so it behaves exactly as before.
         if not is_cycle_start and have_pin:
+            # (c1) PIN-AGE BOUND (COMMIT 2): a client that NEVER reads the primary
+            # cycle-start anchor would otherwise be frozen on the frame its first
+            # read happened to pin. For such a non-anchor-only client (one that has
+            # never advanced the pin via the primary anchor), refresh the pin to
+            # the LATEST ALREADY-PUBLISHED generation when a strictly-newer one is
+            # available — bounded purely by upstream generation availability (NOT a
+            # configured wall-clock cadence, and with no wait: the refresh only
+            # jumps to a frame the gate has already announced). A client that DOES
+            # drive the pin via the primary anchor keeps whole-cycle coherence: its
+            # follow-on reads never refresh here, so every block of a cycle comes
+            # from the one pinned frame.
+            if not self._cycle_start_seen:
+                latest_generation, latest_snapshot = self._gate.current_frame()
+                if latest_generation > self._pinned_generation and latest_snapshot is not None:
+                    self._pinned_generation = latest_generation
+                    self._pinned_snapshot = latest_snapshot
             sliced = self._slice_snapshot(self._pinned_snapshot, address, count)
             if sliced is not None:
                 return sliced
             return await self._core.async_getValues(device_id, func_code, address, count)
 
         # (d) CYCLE-START (primary anchor) READ, or first-ever read before any pin
-        # exists: start of a new polling cycle. Bounded-wait for a generation
-        # strictly newer than the currently PINNED generation, then pin and serve
-        # from that pair (the single pin advance for this cycle). The
+        # exists: start of a new polling cycle. A genuine cycle-start read marks
+        # this client as primary-anchor-driven so its follow-on reads stay
+        # coherent (and never take the pin-age refresh above). A first-ever read
+        # that is NOT a cycle start (a non-anchor-only client's opening read) does
+        # NOT set the flag, so that client keeps getting the pin-age refresh.
+        if is_cycle_start:
+            self._cycle_start_seen = True
+
+        # Bounded-wait for a generation strictly newer than the currently PINNED
+        # generation, then pin and serve from that pair (the single pin advance
+        # for this cycle). The
         # timeout is the per-request effective wait (Finding 2): min(configured
         # cap, the budget that leaves room to serialize this read's response
         # before the client's read deadline). Returns immediately if a newer

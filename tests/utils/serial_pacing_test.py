@@ -702,6 +702,10 @@ class TestSerialPacing(unittest.TestCase):
             ctx._primary_anchor = 0x0028
 
             # Pin gen 6; newer generations exist but must be ignored by follow-ons.
+            # This client drives pacing via the primary anchor (cycle-start seen),
+            # so its follow-on reads stay coherent and never take the pin-age
+            # refresh — mark it as such.
+            ctx._cycle_start_seen = True
             gate.publish(6, _snapshot(6, length=0x0200))
             await asyncio.sleep(0)
             ctx._pinned_generation = 6
@@ -718,6 +722,75 @@ class TestSerialPacing(unittest.TestCase):
             self.assertEqual(energy, [600 + 0x0100, 600 + 0x0101, 600 + 0x0102, 600 + 0x0103])
             self.assertEqual(ctx._pinned_generation, 6, "no follow-on read may advance the pin")
             self.assertEqual(core.get_calls, [], "follow-on reads never touch the live core")
+
+        asyncio.run(scenario())
+
+    # -- Pin-age bound for non-anchor-only clients (COMMIT 2) ----------------
+
+    def test_non_anchor_only_client_gets_bounded_refresh_as_generations_advance(self):
+        """A client that NEVER reads the primary cycle-start anchor is not frozen
+        on one frame: its follow-on reads refresh the pin to the LATEST
+        already-published generation as upstream generations advance (bounded by
+        availability, no wall-clock clamp), while still serving coherently within
+        a single frame."""
+
+        async def scenario():
+            # Primary anchor is 0x0028; this client only ever reads 0x0000/0x0100.
+            core, _helper, gate, ctx = self._make(anchors={0x0028, 0x0012}, max_wait_s=0.12)
+            ctx._primary_anchor = 0x0028
+
+            # First-ever (non-anchor) read pins the first available frame.
+            gate.publish(1, _snapshot(1, length=0x0200))
+            t_first = asyncio.ensure_future(ctx.async_getValues(1, 3, 0x0000, 2))
+            await asyncio.sleep(0)
+            r_first = await asyncio.wait_for(t_first, timeout=1.0)
+            self.assertEqual(ctx._pinned_generation, 1)
+            self.assertEqual(r_first, [100 + 0, 100 + 1])
+            self.assertFalse(ctx._cycle_start_seen, "a non-anchor read must not mark the client primary-driven")
+
+            # Upstream advances; a later non-anchor read must track the NEW
+            # generation (pin-age bound), not stay frozen on gen 1.
+            gate.publish(2, _snapshot(2, length=0x0200))
+            await asyncio.sleep(0)
+            r_second = await asyncio.wait_for(ctx.async_getValues(1, 3, 0x0000, 2), timeout=0.01)
+            self.assertEqual(ctx._pinned_generation, 2, "non-anchor-only client must refresh to the latest generation")
+            self.assertEqual(r_second, [200 + 0, 200 + 1])
+
+            # Within a frame the client is still coherent: two blocks read with no
+            # new generation between them come from the SAME (gen 2) frame.
+            block_a = await asyncio.wait_for(ctx.async_getValues(1, 3, 0x0000, 2), timeout=0.01)
+            block_b = await asyncio.wait_for(ctx.async_getValues(1, 3, 0x0100, 2), timeout=0.01)
+            self.assertEqual(block_a, [200 + 0, 200 + 1])
+            self.assertEqual(block_b, [200 + 0x0100, 200 + 0x0101])
+            self.assertEqual(ctx._pinned_generation, 2, "no new generation -> pin unchanged within the frame")
+            self.assertEqual(core.get_calls, [], "bounded refresh never touches the live core")
+
+        asyncio.run(scenario())
+
+    def test_primary_anchor_client_keeps_whole_cycle_coherence_despite_pin_age_bound(self):
+        """The pin-age bound must NOT affect a client that drives pacing via the
+        primary anchor: once a cycle-start read is seen, follow-on reads stay
+        coherent with the pinned frame even when newer generations are available."""
+
+        async def scenario():
+            core, _helper, gate, ctx = self._make(anchors={0x0028, 0x0012}, max_wait_s=0.12)
+            ctx._primary_anchor = 0x0028
+
+            # Primary-anchor read pins gen 1 and marks the client primary-driven.
+            gate.publish(1, _snapshot(1, length=0x0200))
+            power = await asyncio.wait_for(ctx.async_getValues(1, 3, 0x0028, 2), timeout=1.0)
+            self.assertEqual(ctx._pinned_generation, 1)
+            self.assertTrue(ctx._cycle_start_seen)
+            self.assertEqual(power, [100 + 0x0028, 100 + 0x0029])
+
+            # Newer frames land mid-cycle; follow-on reads must NOT refresh.
+            gate.publish(2, _snapshot(2, length=0x0200))
+            gate.publish(3, _snapshot(3, length=0x0200))
+            await asyncio.sleep(0)
+            energy = await asyncio.wait_for(ctx.async_getValues(1, 3, 0x0100, 2), timeout=0.01)
+            self.assertEqual(ctx._pinned_generation, 1, "primary-driven follow-on must not take the pin-age refresh")
+            self.assertEqual(energy, [100 + 0x0100, 100 + 0x0101])
+            self.assertEqual(core.get_calls, [])
 
         asyncio.run(scenario())
 
