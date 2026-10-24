@@ -1407,6 +1407,14 @@ def test_serial_client_observes_smooth_12_5hz_cadence_under_live_upstream() -> N
     upstream should observe a rock-solid ~12.5Hz fresh-frame stream with minimal
     jitter.
 
+    CI-GATING cadence regression test: this runs in CI via the `integration` job
+    (make test-integration). It guards against a regression in the serial wake
+    path re-introducing the jerky/uneven client cadence the user reported. It is a
+    SINGLE ~10s window (NOT the 15x verification loop, which is a manual FEAT-001
+    proof recorded in verification.md); the thresholds below are median/p95-robust
+    so one host-scheduling outlier does not flake CI while a systematically uneven
+    stream still fails.
+
     Unlike the lock-step latching/sweep tests, the upstream here is driven by a
     BACKGROUND publisher at a fixed 80ms period while the client polls the POWER
     anchor in the tightest possible loop. We then measure the CLIENT-PERCEIVED
@@ -1540,4 +1548,513 @@ def test_serial_client_observes_smooth_12_5hz_cadence_under_live_upstream() -> N
     assert metrics["p95_ms"] < 170.0, (
         f"p95 fresh-frame gap {metrics['p95_ms']:.2f} ms exceeds 170 ms (2x period) — recurring stall; "
         f"max={metrics['max_ms']:.1f}ms deltas(ms)={[round(d, 1) for d in metrics['deltas_ms'][:40]]}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# TS65A client-observed cadence / coherence measurement (PR #44 diagnostic)
+# ---------------------------------------------------------------------------
+#
+# The TS65A bridge uses the SAME shared FrameGate/SerialPacingContext as the
+# EM540 bridge (serial-only, structural), so the fixed synchronous wake is
+# exercised identically; the difference is WHAT it serves. The TS65A bridge
+# derives its OWN served frame from the upstream EM540 frame: it maps the EM540
+# system power into the SunSpec AC power FLOAT32 at register 40097 (the primary
+# cycle-start anchor) and TIME-SMOOTHS it (2.5s window, config_gen default).
+#
+# Measuring "distinct frames" on TS65A therefore cannot key off a raw monotonic
+# INT marker the way the EM540 test does — the served value is a smoothed FLOAT32.
+# Two facts make a float-change measurement sound here:
+#   * The upstream _SteadyMarkerPublisher stamps a STRICTLY MONOTONIC counter into
+#     the EM540 system power every tick, so the smoothed mean at 40097 is itself
+#     strictly INCREASING per distinct upstream frame (the sliding-window mean of
+#     a monotonically rising input rises every step). So a CHANGE in the decoded
+#     float marks a genuinely new upstream generation — not smoothing noise.
+#   * The per-step change in the smoothed mean is ~0.1 W (one Watt*10 raw unit),
+#     which at these power magnitudes is far larger than FLOAT32 quantisation, so
+#     consecutive distinct frames do not collapse to the same float bits. (If they
+#     ever did, we would UNDER-count distinct frames and the measured rate would
+#     read LOW, which fails conservatively rather than hiding a stall — it can
+#     never manufacture a smooth result from a jerky stream.)
+# So distinct decoded-float arrivals at 40097 are the TS65A analog of the EM540
+# distinct-marker arrivals, and _distinct_frame_arrivals/_summarize_cadence reuse
+# unchanged (the "marker" slot simply carries the float).
+#
+# For whole-cycle COHERENCE we additionally exploit that the upstream monotonic
+# marker also flows UNSMOOTHED through to a TS65A register: the EM540 energy
+# INT64 at 0x0500[0] maps to kwh_plus_total -> TS65A wh_plus_total, served as a
+# FLOAT32 at 40137 (a NON-anchor block). For small integer markers that float is
+# exact, so a multi-block sweep (anchor 40097 then non-anchor 40137) can prove
+# every block of one client cycle came from the SAME pinned upstream generation.
+
+# TS65A SunSpec register that carries the smoothed AC power FLOAT32 and is the
+# primary serial-pacing cycle-start anchor (ts65a_slave_bridge 40097).
+_TS65A_POWER_ANCHOR_ADDRESS = 40097
+_TS65A_POWER_REG_COUNT = 2  # one FLOAT32
+# TS65A SunSpec register carrying wh_plus_total (Total Watt Hours imported) as a
+# FLOAT32. The upstream monotonic marker (EM540 energy 0x0500[0] -> kwh_plus_total)
+# arrives here UNSMOOTHED, so it is the coherence witness for a TS65A sweep. It is
+# NOT a pacing anchor, so a read of it must serve coherently from the current pin.
+_TS65A_ENERGY_MARKER_ADDRESS = 40137
+_TS65A_ENERGY_REG_COUNT = 2  # one FLOAT32
+# A non-anchor float block read first in a sweep's follow-on position: AC current
+# total at 40071 (count 2, FLOAT32). Non-anchor -> must serve from the pin.
+_TS65A_CURRENT_BLOCK_ADDRESS = 40071
+_TS65A_CURRENT_REG_COUNT = 2
+
+
+def _decode_float32_be(registers: list[int]) -> float:
+    """Decode a 2-register big-endian IEEE-754 FLOAT32 (TS65A SunSpec word order).
+
+    Mirrors test_data.encode_ts65a_dynamic_values, which packs each float with
+    struct.pack('>f', ...) then unpacks '>2H' (hi, lo).
+    """
+    return struct.unpack(">f", struct.pack(">2H", registers[0], registers[1]))[0]
+
+
+def _measure_ts65a_read_cadence(client, *, window_s: float) -> list[tuple[float, float]]:
+    """Read the TS65A POWER ANCHOR FLOAT32 (40097) in the tightest possible loop.
+
+    Returns ``(receive_monotonic_s, power_float)`` for every SUCCESSFUL read
+    (failed/exception reads skipped so a transient PTY hiccup does not pollute the
+    sample). The decoded smoothed power is strictly increasing per distinct
+    upstream frame (see module comment above), so _distinct_frame_arrivals keys
+    off the CHANGING float exactly as it keys off the EM540 int marker.
+    """
+    samples: list[tuple[float, float]] = []
+    deadline = time.monotonic() + window_s
+    while time.monotonic() < deadline:
+        try:
+            result = client.read_holding_registers(
+                _TS65A_POWER_ANCHOR_ADDRESS, count=_TS65A_POWER_REG_COUNT, device_id=1
+            )
+        except (ModbusException, OSError, ConnectionError):
+            continue
+        received = time.monotonic()
+        if result.isError():
+            continue
+        power = _decode_float32_be(list(result.registers))
+        samples.append((received, power))
+    return samples
+
+
+def _log_ts65a_cadence_report(metrics: dict) -> None:
+    """Emit the measured TS65A cadence metrics so the numbers survive in output."""
+    deltas = metrics["deltas_ms"]
+    histogram = _histogram_ms(deltas)
+    report = (
+        "\n=== TS65A serial client-observed cadence (AC power anchor 40097, tight loop) ===\n"
+        f"upstream target        : {_CADENCE_RATE_HZ:.2f} Hz ({_CADENCE_PERIOD_S * 1000:.0f} ms period)\n"
+        f"measurement window     : {metrics['elapsed_s']:.2f} s (after {_CADENCE_WARMUP_S:.1f}s warmup discard)\n"
+        f"total reads            : {metrics['total_reads']}\n"
+        f"distinct frames        : {metrics['distinct_markers']}\n"
+        f"duplicate reads        : {metrics['duplicate_reads']} "
+        f"(consecutive: {metrics['consecutive_duplicate_reads']})\n"
+        f"delivery (median-based): {metrics['median_rate_hz']:.2f} Hz  <-- robust central cadence\n"
+        f"delivery (mean-based)  : {metrics['mean_rate_hz']:.2f} Hz\n"
+        f"inter-arrival mean     : {metrics['mean_ms']:.2f} ms\n"
+        f"inter-arrival median   : {metrics['median_ms']:.2f} ms\n"
+        f"inter-arrival stdev    : {metrics['stdev_ms']:.2f} ms  <-- JITTER\n"
+        f"inter-arrival min/max  : {metrics['min_ms']:.2f} / {metrics['max_ms']:.2f} ms\n"
+        f"inter-arrival p95      : {metrics['p95_ms']:.2f} ms\n"
+        f"first ~40 deltas (ms)  : {[round(d, 1) for d in deltas[:40]]}\n"
+        f"delta histogram (ms)   :\n{histogram}\n"
+        "================================================================================\n"
+    )
+    print(report)
+    logger.info(report)
+
+
+@pytest.mark.integration
+def test_ts65a_serial_client_observes_smooth_12_5hz_cadence_under_live_upstream() -> None:
+    """MEASUREMENT: a tight-loop TS65A serial client under a steady, LIVE ~12.5Hz
+    upstream should observe a rock-solid ~12.5Hz fresh-frame stream with minimal
+    jitter — the TS65A analog of the EM540 cadence test.
+
+    CI-GATING cadence regression test: runs in CI via the `integration` job (make
+    test-integration). The TS65A bridge shares the SAME FrameGate wake as EM540,
+    so this guards the same regression from the Fronius consumer's perspective.
+    The upstream is driven by a BACKGROUND publisher at a fixed 80ms period; the
+    client reads the SunSpec AC power anchor FLOAT32 (40097) in the tightest
+    possible loop; we measure the CLIENT-PERCEIVED cadence of DISTINCT decoded
+    power values (fresh frames) and its jitter.
+
+    Thresholds MIRROR the EM540 cadence test exactly (median 11.5-13.5 Hz, jitter
+    stdev < 18 ms, p95 < 170 ms). TS65A smoothing does NOT warrant a looser band:
+    the smoothed mean of a monotonic input still advances once per upstream frame,
+    so the delivered-frame cadence tracks the SAME 12.5 Hz upstream with the SAME
+    wake path — only the served value type differs. A single ~10s window (NOT a
+    15x loop) keeps the integration job time bounded.
+    """
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        tmp_path = Path(tmp_dir)
+
+        em540_tcp_port = find_free_port()
+        em540_rtu_port = find_free_port()
+        ts65a_tcp_port = find_free_port()
+
+        em540_serial = SerialCable("ts65a-cadence-em540")
+        ts65a_serial = SerialCable("ts65a-cadence-ts65a")
+
+        upstream = Em540UpstreamSimulator(frame_seed=100)
+        upstream.start()
+
+        try:
+            config_path = tmp_path / "config.yaml"
+            generate_config(
+                config_path,
+                upstream.port,
+                em540_tcp_port,
+                em540_rtu_port,
+                ts65a_tcp_port,
+                em540_serial_port=em540_serial.left_path,
+                ts65a_serial_port=ts65a_serial.left_path,
+                # Service master polls upstream at 80ms so the downstream frame
+                # generation advances at ~12.5Hz end-to-end.
+                update_interval=_CADENCE_PERIOD_S,
+                serial_pacing_enabled=True,
+                serial_pacing_max_wait_s=0.12,
+                serial_timeout=0.5,
+                stale_frame_detection_enabled=True,
+            )
+
+            service = ServiceProcess(config_path)
+            service.start()
+
+            # Drive the upstream at a steady 12.5Hz, independent of the client.
+            publisher = _SteadyMarkerPublisher(upstream, _CADENCE_PERIOD_S)
+            publisher.start()
+
+            try:
+                wait_for_port(em540_tcp_port, timeout=20.0)
+                wait_for_port(ts65a_tcp_port, timeout=20.0)
+
+                clients = DownstreamClients(
+                    em540_tcp_port,
+                    em540_rtu_port,
+                    ts65a_tcp_port,
+                    em540_serial.right_path,
+                    ts65a_serial.right_path,
+                )
+                clients.connect_all()
+
+                # Wait until the downstream TS65A is serving live data (breaker
+                # closed) — poll the TCP client's dynamic block for non-zero data.
+                wait_for_downstream_data(clients.ts65a_tcp, address=40071, timeout=120.0)
+
+                # Confirm the TS65A serial path is live before the timed window.
+                wait_for_condition(
+                    lambda: _measure_ts65a_read_cadence(clients.ts65a_serial, window_s=0.5) != [],
+                    timeout=30.0,
+                    message="TS65A serial path did not serve a live read before the cadence window"
+                    + service.diagnostics(),
+                )
+
+                raw_samples = _measure_ts65a_read_cadence(clients.ts65a_serial, window_s=_CADENCE_WINDOW_S)
+                upstream_ticks = publisher.publish_count
+
+                service.assert_running()
+                clients.disconnect_all()
+            finally:
+                publisher.stop()
+                service.stop()
+        finally:
+            upstream.stop()
+            em540_serial.close()
+            ts65a_serial.close()
+
+    # Drop the service/harness startup ramp from the FRONT of the window.
+    samples = _drop_warmup(raw_samples, _CADENCE_WARMUP_S)
+
+    assert len(samples) >= 50, f"too few successful TS65A reads to assess cadence (got {len(samples)})"
+
+    metrics = _summarize_cadence(samples)
+    _log_ts65a_cadence_report(metrics)
+
+    assert metrics["distinct_markers"] >= 20, (
+        f"too few distinct TS65A frames delivered to assess cadence (got {metrics['distinct_markers']})"
+    )
+
+    # (1) Fresh-frame delivery tracks the 12.5Hz upstream (median-based, robust to
+    # a lone boundary/scheduling stall). Same band as the EM540 cadence test.
+    assert 11.5 <= metrics["median_rate_hz"] <= 13.5, (
+        f"TS65A fresh-frame delivery (median-based) {metrics['median_rate_hz']:.2f} Hz outside 11.5-13.5 Hz "
+        f"(upstream {_CADENCE_RATE_HZ:.2f} Hz) — cadence does not track upstream"
+    )
+
+    # (2) Smoothness: inter-distinct-frame jitter. Same 18 ms bound as EM540.
+    assert metrics["stdev_ms"] < 18.0, (
+        f"TS65A inter-arrival jitter {metrics['stdev_ms']:.2f} ms exceeds 18 ms — stream is not smooth; "
+        f"median={metrics['median_ms']:.1f}ms p95={metrics['p95_ms']:.1f}ms "
+        f"deltas(ms)={[round(d, 1) for d in metrics['deltas_ms'][:40]]}"
+    )
+
+    # (3) No SYSTEMATIC long stalls: p95 inter-arrival under ~2x the 80ms period.
+    assert metrics["p95_ms"] < 170.0, (
+        f"TS65A p95 fresh-frame gap {metrics['p95_ms']:.2f} ms exceeds 170 ms (2x period) — recurring stall; "
+        f"max={metrics['max_ms']:.1f}ms deltas(ms)={[round(d, 1) for d in metrics['deltas_ms'][:40]]}"
+    )
+
+    # (4) BOTH-BRIDGE COHERENCE — serve rate never exceeds upstream. The number of
+    # DISTINCT frames the client perceived cannot exceed the number of upstream
+    # ticks the publisher produced in the same window: the latch advances the pin
+    # AT MOST ONCE per upstream frame, so it can never fabricate frames the
+    # upstream did not produce. A small +2 margin absorbs the warmup-boundary
+    # tick accounting (publish_count spans the WHOLE run incl. warmup, distinct is
+    # counted post-warmup, so distinct is already conservative vs the full count).
+    assert metrics["distinct_markers"] <= upstream_ticks + 2, (
+        f"TS65A served {metrics['distinct_markers']} distinct frames but upstream only produced "
+        f"{upstream_ticks} ticks — serve rate exceeded upstream (pin advanced >1 per frame)"
+    )
+
+
+def _poll_ts65a_sweeps(client, upstream, *, sweeps: int, max_attempts: int) -> list[dict]:
+    """Poll the TS65A serial client with a FRONIUS-LIKE multi-block sweep per cycle.
+
+    Each sweep performs THREE separate reads, in a Fronius-like order:
+      1. the POWER anchor FLOAT32 (40097) — the serial-pacing PRIMARY cycle-start
+         anchor; it starts a new cycle and pins a fresh frame;
+      2. the AC current total FLOAT32 (40071) — a NON-anchor follow-on read;
+      3. the wh_plus_total FLOAT32 (40137) — another NON-anchor follow-on read
+         that carries the UPSTREAM monotonic marker unsmoothed (the coherence
+         witness).
+
+    A NEW upstream marker is published before every sweep, so with anchor pacing
+    each sweep's anchor read advances to the next frame. Returns one dict per
+    SUCCESSFUL sweep: ``{"power": float, "current": float, "marker": int}`` where
+    ``marker`` is the exact integer decoded from 40137. A sweep where any read
+    errors/raises is skipped entirely so a transient PTY hiccup never produces a
+    torn (half-read) sweep sample.
+    """
+    samples: list[dict] = []
+    attempts = 0
+    while len(samples) < sweeps and attempts < max_attempts:
+        attempts += 1
+        upstream.publish_next()
+        try:
+            power_res = client.read_holding_registers(
+                _TS65A_POWER_ANCHOR_ADDRESS, count=_TS65A_POWER_REG_COUNT, device_id=1
+            )
+            current_res = client.read_holding_registers(
+                _TS65A_CURRENT_BLOCK_ADDRESS, count=_TS65A_CURRENT_REG_COUNT, device_id=1
+            )
+            energy_res = client.read_holding_registers(
+                _TS65A_ENERGY_MARKER_ADDRESS, count=_TS65A_ENERGY_REG_COUNT, device_id=1
+            )
+        except (ModbusException, OSError, ConnectionError):
+            continue
+        if power_res.isError() or current_res.isError() or energy_res.isError():
+            continue
+        samples.append(
+            {
+                "power": _decode_float32_be(list(power_res.registers)),
+                "current": _decode_float32_be(list(current_res.registers)),
+                # wh_plus_total == upstream marker (exact for small integers).
+                "marker": int(round(_decode_float32_be(list(energy_res.registers)))),
+            }
+        )
+    return samples
+
+
+@pytest.mark.integration
+def test_ts65a_serial_anchor_pacing_multi_block_sweep_is_coherent_and_tracks_upstream() -> None:
+    """Anchor-based TS65A serial pacing, end-to-end over the PTY harness with a
+    Fronius-like MULTI-BLOCK sweep (power anchor 40097, then current 40071, then
+    the wh_plus_total marker 40137 as SEPARATE reads within one cycle):
+
+      (1) COHERENCE / <= 1 PIN ADVANCE PER FRAME: across sweeps the marker (read
+          from the NON-anchor 40137 follow-on) advances AT MOST ONCE per sweep and
+          is strictly monotonic — proving the whole sweep is served from the ONE
+          generation pinned by the anchor read, with no cross-frame tear and no
+          more than one pin advance per upstream frame.
+      (2) TRACKS UPSTREAM: the marker advances once per sweep and tracks the
+          upstream tick rate — distinct markers == number of sweeps, NOT divided
+          by the three-block sweep length (a per-read cursor would have).
+      (3) NO DUPLICATES: no sweep repeats the previous sweep's marker at the
+          client's raw poll rate.
+
+    This is the TS65A analog of
+    test_serial_anchor_pacing_multi_block_sweep_is_coherent_and_tracks_upstream and
+    closes the both-bridge coherence requirement for the Fronius consumer.
+    """
+    update_interval = 0.1
+
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        tmp_path = Path(tmp_dir)
+
+        em540_tcp_port = find_free_port()
+        em540_rtu_port = find_free_port()
+        ts65a_tcp_port = find_free_port()
+
+        em540_serial = SerialCable("ts65a-sweep-em540")
+        ts65a_serial = SerialCable("ts65a-sweep-ts65a")
+
+        upstream = Em540UpstreamSimulator(frame_seed=100)
+        upstream.start()
+
+        try:
+            config_path = tmp_path / "config.yaml"
+            generate_config(
+                config_path,
+                upstream.port,
+                em540_tcp_port,
+                em540_rtu_port,
+                ts65a_tcp_port,
+                em540_serial_port=em540_serial.left_path,
+                ts65a_serial_port=ts65a_serial.left_path,
+                update_interval=update_interval,
+                serial_pacing_enabled=True,
+                serial_pacing_max_wait_s=0.12,
+                serial_timeout=0.5,
+                stale_frame_detection_enabled=True,
+            )
+
+            service = ServiceProcess(config_path)
+            service.start()
+
+            try:
+                wait_for_port(em540_tcp_port, timeout=20.0)
+                wait_for_port(ts65a_tcp_port, timeout=20.0)
+
+                clients = DownstreamClients(
+                    em540_tcp_port,
+                    em540_rtu_port,
+                    ts65a_tcp_port,
+                    em540_serial.right_path,
+                    ts65a_serial.right_path,
+                )
+                clients.connect_all()
+
+                wait_for_downstream_data(clients.ts65a_tcp, address=40071, timeout=120.0)
+
+                # Warm up one full sweep so the pin is established and the breaker
+                # is confirmed closed for this path before sampling.
+                wait_for_condition(
+                    lambda: _poll_ts65a_sweeps(clients.ts65a_serial, upstream, sweeps=1, max_attempts=10) != [],
+                    timeout=30.0,
+                    message="TS65A serial path did not serve a live sweep before sampling" + service.diagnostics(),
+                )
+
+                samples = _poll_ts65a_sweeps(clients.ts65a_serial, upstream, sweeps=12, max_attempts=72)
+
+                service.assert_running()
+                clients.disconnect_all()
+            finally:
+                service.stop()
+        finally:
+            upstream.stop()
+            em540_serial.close()
+            ts65a_serial.close()
+
+    assert len(samples) >= 8, f"too few successful TS65A sweeps to assess anchor pacing (got {len(samples)})"
+
+    sweep_markers = [s["marker"] for s in samples]
+
+    # (3) No duplicate sweep markers: with anchor pacing each sweep pins a fresh
+    # frame and never re-serves the one the previous sweep consumed. Because the
+    # marker (40137) is a NON-anchor follow-on read, a duplicate here would mean
+    # the follow-on was served from a STALE pin — i.e. a torn/incoherent sweep.
+    duplicates = _count_duplicate_markers(sweep_markers)
+    assert duplicates == 0, (
+        f"TS65A anchor pacing must yield NO duplicate sweep markers, got {duplicates} in {sweep_markers}"
+    )
+
+    # (1)+(2) Strictly increasing and one step per sweep: the follow-on marker
+    # tracks the upstream tick rate (one pin advance per sweep), proving whole-cycle
+    # coherence and <= 1 pin advance per upstream frame.
+    for prev, cur in zip(sweep_markers, sweep_markers[1:]):
+        assert cur > prev, (
+            f"each TS65A sweep must observe a strictly newer frame; saw {prev} -> {cur} in {sweep_markers}"
+        )
+    assert len(set(sweep_markers)) == len(sweep_markers), (
+        f"every TS65A sweep must observe a distinct frame (rate tracks upstream, not /blocks): {sweep_markers}"
+    )
+
+
+@pytest.mark.integration
+def test_ts65a_serial_anchor_pacing_disabled_sweep_duplicates_negative_control() -> None:
+    """NEGATIVE CONTROL — end-to-end: with pacing DISABLED a tight-loop TS65A
+    multi-block sweep is no longer paced to the upstream, so across sweeps the
+    client re-reads the SAME marker (duplicate, outrunning upstream). This proves
+    the positive no-duplicate / tracks-upstream assertions are non-vacuous.
+
+    Identical to the positive TS65A sweep except ``serial_pacing_enabled=False``.
+    """
+    update_interval = 0.1
+
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        tmp_path = Path(tmp_dir)
+
+        em540_tcp_port = find_free_port()
+        em540_rtu_port = find_free_port()
+        ts65a_tcp_port = find_free_port()
+
+        em540_serial = SerialCable("ts65a-sweep-neg-em540")
+        ts65a_serial = SerialCable("ts65a-sweep-neg-ts65a")
+
+        upstream = Em540UpstreamSimulator(frame_seed=100)
+        upstream.start()
+
+        try:
+            config_path = tmp_path / "config.yaml"
+            generate_config(
+                config_path,
+                upstream.port,
+                em540_tcp_port,
+                em540_rtu_port,
+                ts65a_tcp_port,
+                em540_serial_port=em540_serial.left_path,
+                ts65a_serial_port=ts65a_serial.left_path,
+                update_interval=update_interval,
+                serial_pacing_enabled=False,
+                serial_pacing_max_wait_s=0.12,
+                serial_timeout=0.5,
+                stale_frame_detection_enabled=True,
+            )
+
+            service = ServiceProcess(config_path)
+            service.start()
+
+            try:
+                wait_for_port(em540_tcp_port, timeout=20.0)
+                wait_for_port(ts65a_tcp_port, timeout=20.0)
+
+                clients = DownstreamClients(
+                    em540_tcp_port,
+                    em540_rtu_port,
+                    ts65a_tcp_port,
+                    em540_serial.right_path,
+                    ts65a_serial.right_path,
+                )
+                clients.connect_all()
+
+                wait_for_downstream_data(clients.ts65a_tcp, address=40071, timeout=120.0)
+
+                wait_for_condition(
+                    lambda: _poll_ts65a_sweeps(clients.ts65a_serial, upstream, sweeps=1, max_attempts=10) != [],
+                    timeout=30.0,
+                    message="TS65A serial path did not serve a live sweep before sampling" + service.diagnostics(),
+                )
+
+                samples = _poll_ts65a_sweeps(clients.ts65a_serial, upstream, sweeps=12, max_attempts=72)
+
+                service.assert_running()
+                clients.disconnect_all()
+            finally:
+                service.stop()
+        finally:
+            upstream.stop()
+            em540_serial.close()
+            ts65a_serial.close()
+
+    assert len(samples) >= 8, f"too few successful TS65A sweeps for the negative control (got {len(samples)})"
+
+    sweep_markers = [s["marker"] for s in samples]
+
+    # With pacing OFF the client reads faster than the upstream publishes, so at
+    # least one sweep repeats the preceding sweep's marker.
+    duplicates = _count_duplicate_markers(sweep_markers)
+    assert duplicates > 0, (
+        "TS65A pacing DISABLED must produce at least one duplicate sweep marker (client outrunning upstream); "
+        f"saw none in {sweep_markers} — the no-duplicate proof would be vacuous"
     )
