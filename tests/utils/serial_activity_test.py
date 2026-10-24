@@ -76,3 +76,14 @@ def test_boundary_at_exactly_idle_timeout_is_active():
     # now - last == idle_timeout exactly -> still active (<=).
     t.evaluate(idle_timeout=5.0, now=105.0)
     assert t.active is True
+
+
+def test_total_requests_counts_every_recorded_request():
+    t = SerialActivityTracker()
+    assert t.total_requests == 0
+
+    for i in range(7):
+        t.record_request(now=100.0 + i)
+
+    # Cumulative and monotonic — the diagnostics layer derives Hz from the delta.
+    assert t.total_requests == 7

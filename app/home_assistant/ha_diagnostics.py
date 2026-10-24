@@ -23,6 +23,15 @@ class HADiagnostics:
         self._last_mqtt_rate_timestamp = 0.0
         self._last_mqtt_counter = 0
         self._mqtt_counter = 0
+        # Windowed serial read-rate state, one per bridge. Mirrors the upstream
+        # 'Acq Rate' delta-count/delta-time pattern: the cumulative request count
+        # is sourced from each bridge's SerialActivityTracker.total_requests (bumped
+        # on the serial server loop in record_request — no tick-loop work), and the
+        # Hz value is recomputed once per DIAGNOSTICS_INTERVAL in mqtt_data().
+        self._last_em540_serial_rate_timestamp = 0.0
+        self._last_em540_serial_counter = 0
+        self._last_ts65a_serial_rate_timestamp = 0.0
+        self._last_ts65a_serial_counter = 0
 
         self._start_time = time.time()
         self._data_counter = 0
@@ -276,6 +285,19 @@ class HADiagnostics:
             enabled_by_default=True,
             display_name="TS65A Serial Disconnects",
         )
+        # Rate at which the downstream TS65A SERIAL client issues read requests,
+        # in Hz. Same windowed pattern as the EM540 serial read-rate / upstream
+        # 'Acq Rate' sensors. 0.0 when serial is disabled.
+        self.ts65a_serial_read_rate = Sensor(
+            "TS65A Serial Read Rate",
+            "Hz",
+            "frequency",
+            "measurement",
+            self.state_topic,
+            precision=2,
+            entity_category="diagnostic",
+            enabled_by_default=True,
+        )
         self.ts65a_power_over_feed_in_limit_count = Sensor(
             "Overfeed Limit Count",
             None,
@@ -413,6 +435,21 @@ class HADiagnostics:
             entity_category="diagnostic",
             enabled_by_default=True,
             display_name="EM540 Serial Disconnects",
+        )
+        # Rate at which the downstream EM540 SERIAL client issues read requests,
+        # in Hz. Mirrors the upstream 'Acq Rate' sensor so a user can SEE the
+        # serial client's poll rate (e.g. a Victron fastloop) and confirm the
+        # frame-latch is pacing it. 0.0 when serial is disabled (no requests
+        # recorded, so the windowed delta stays zero).
+        self.em540_serial_read_rate = Sensor(
+            "EM540 Serial Read Rate",
+            "Hz",
+            "frequency",
+            "measurement",
+            self.state_topic,
+            precision=2,
+            entity_category="diagnostic",
+            enabled_by_default=True,
         )
         self.em540_circuit_breaker_open = Sensor(
             "EM540 Circuit Breaker Open",
@@ -559,6 +596,7 @@ class HADiagnostics:
             self.em540_serial_client_active,
             self.em540_serial_connect_count,
             self.em540_serial_disconnect_count,
+            self.em540_serial_read_rate,
             self.em540_circuit_breaker_open,
             self.em540_circuit_breaker_open_count,
             self.em540_stale_data_age_ms,
@@ -569,6 +607,7 @@ class HADiagnostics:
             self.ts65a_serial_client_active,
             self.ts65a_serial_connect_count,
             self.ts65a_serial_disconnect_count,
+            self.ts65a_serial_read_rate,
             self.ts65a_power_over_feed_in_limit_count,
             self.ts65a_power_over_feed_limit_max_duration,
             self.ts65a_circuit_breaker_open,
@@ -619,6 +658,39 @@ class HADiagnostics:
             # upstream outage). None serializes to JSON null, which the sensor
             # value_template renders as unknown/unavailable in Home Assistant.
             sensor.update_value(snapshot.get(key))
+
+    def _update_serial_read_rate(
+        self,
+        sensor: Sensor,
+        total_requests: int,
+        last_timestamp_attr: str,
+        last_counter_attr: str,
+        now: float | None = None,
+    ) -> None:
+        """Recompute a serial read-rate (Hz) from a cumulative request count.
+
+        Same windowed delta-count/delta-time pattern as the upstream 'Acq Rate'
+        sensor: the rate is (delta count / delta time) measured over at least
+        DIAGNOSTICS_INTERVAL. ``total_requests`` is the bridge's
+        SerialActivityTracker.total_requests (bumped on the serial server loop,
+        read lock-free here). When serial is disabled no requests are recorded so
+        the delta stays zero and the sensor reads 0.0.
+        """
+        now = time.monotonic() if now is None else now
+        last_timestamp = getattr(self, last_timestamp_attr)
+        if last_timestamp == 0.0:
+            setattr(self, last_timestamp_attr, now)
+            setattr(self, last_counter_attr, total_requests)
+            sensor.update_value(0.0)
+            return
+
+        elapsed = now - last_timestamp
+        if elapsed > DIAGNOSTICS_INTERVAL:
+            last_counter = getattr(self, last_counter_attr)
+            rate = (total_requests - last_counter) / elapsed
+            sensor.update_value(rate)
+            setattr(self, last_timestamp_attr, now)
+            setattr(self, last_counter_attr, total_requests)
 
     def record_mqtt_publish(self, published_at: float | None = None):
         now = time.monotonic() if published_at is None else published_at
@@ -676,6 +748,12 @@ class HADiagnostics:
             self.em540_serial_client_active.update_value(1 if self._em540_slave_stats.serial.active else 0)
             self.em540_serial_connect_count.update_value(self._em540_slave_stats.serial.connect_count)
             self.em540_serial_disconnect_count.update_value(self._em540_slave_stats.serial.disconnect_count)
+            self._update_serial_read_rate(
+                self.em540_serial_read_rate,
+                self._em540_slave_stats.serial.total_requests,
+                "_last_em540_serial_rate_timestamp",
+                "_last_em540_serial_counter",
+            )
         if self._em540_master_stats is not None:
             self.read_failed_count.update_value(self._em540_master_stats.read_failed_total)
             self.invalid_frame_count.update_value(self._em540_master_stats.invalid_frame_total)
@@ -707,6 +785,12 @@ class HADiagnostics:
             self.ts65a_serial_client_active.update_value(1 if self._ts65a_slave_stats.serial.active else 0)
             self.ts65a_serial_connect_count.update_value(self._ts65a_slave_stats.serial.connect_count)
             self.ts65a_serial_disconnect_count.update_value(self._ts65a_slave_stats.serial.disconnect_count)
+            self._update_serial_read_rate(
+                self.ts65a_serial_read_rate,
+                self._ts65a_slave_stats.serial.total_requests,
+                "_last_ts65a_serial_rate_timestamp",
+                "_last_ts65a_serial_counter",
+            )
 
         sensors = self._all_sensors()
 
