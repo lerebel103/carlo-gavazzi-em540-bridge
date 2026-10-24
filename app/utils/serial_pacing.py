@@ -155,10 +155,30 @@ class FrameGate:
     a read record generation N while returning N+1 content (and then serve N+1
     again as a duplicate).
 
-    The ``asyncio.Condition`` is created LAZILY on first use so it binds to the
-    running server loop (an asyncio primitive binds to the loop at first await,
-    not construction; creating/awaiting on the wrong loop raises
-    "got Future attached to a different loop"). Both :meth:`publish` and
+    SYNCHRONOUS, LOST-WAKEUP-FREE WAKE (set-then-replace Event)
+    ----------------------------------------------------------
+    ``publish`` wakes a parked waiter SYNCHRONOUSLY within the same loop turn. It
+    updates ``current_generation``/``_snapshot`` and then, in the SAME call,
+    ``set()`` s the current :class:`asyncio.Event` and swaps in a FRESH unset Event
+    for the next generation. A waiter that parked on the old Event before the
+    advance is released immediately (its ``wait()`` future is already resolved);
+    the next waiter awaits the fresh Event. There is NO ``asyncio.ensure_future``
+    and NO deferred notify task, so:
+
+      - the wake is not deferred to a later loop turn (no extra scheduling hop /
+        frame of latency), and
+      - there is no lost-wakeup window: because ``current_generation`` is advanced
+        BEFORE (synchronously, same turn) the Event is swapped, a waiter that
+        enters between the fast-path check and parking re-checks the generation on
+        the next loop iteration and takes the fast-path instead of sleeping on a
+        stale Event (see :meth:`wait_for_generation_after`). A ``set()`` that lands
+        with no parked waiter is harmless — the fresh Event the next waiter sees is
+        unset, but that waiter first re-checks the (already advanced) generation.
+
+    The :class:`asyncio.Event` is created LAZILY on first use so it binds to the
+    running server loop (an asyncio primitive binds to the loop at first await, not
+    construction; creating/awaiting on the wrong loop raises "got Future attached
+    to a different loop"). Both :meth:`publish` and
     :meth:`wait_for_generation_after` are only ever invoked on the server loop.
     """
 
@@ -168,13 +188,15 @@ class FrameGate:
         # reader on that same loop always observes a consistent pair.
         self.current_generation: int = 0
         self._snapshot: tuple[int, ...] | None = None
-        self._condition: asyncio.Condition | None = None
+        # The Event the CURRENT generation's waiters park on. Lazily created on
+        # the server loop; set-then-replaced on every advancing publish().
+        self._event: asyncio.Event | None = None
 
-    def _get_condition(self) -> asyncio.Condition:
-        if self._condition is None:
+    def _get_event(self) -> asyncio.Event:
+        if self._event is None:
             # Created on the running (server) loop on first use.
-            self._condition = asyncio.Condition()
-        return self._condition
+            self._event = asyncio.Event()
+        return self._event
 
     def publish(self, generation: int, snapshot: tuple[int, ...]) -> None:
         """Store the latest generation + its register snapshot and wake any awaiter.
@@ -182,22 +204,28 @@ class FrameGate:
         Runs on the server loop (scheduled via ``call_soon_threadsafe``). The
         ``snapshot`` is the IMMUTABLE register image produced on the listener
         thread from the exact bytes that were committed for ``generation`` — the
-        generation and the bytes are one unit. Because a serial server is
-        single-request/half-duplex there is at most one awaiter, so ``notify_all``
-        vs ``notify(1)`` is immaterial.
+        generation and the bytes are one unit.
+
+        The generation/snapshot advance happens FIRST, then the wake: ``set()``
+        the current Event and swap in a fresh unset Event for the next generation.
+        A parked waiter is released SYNCHRONOUSLY (within this same loop turn, no
+        deferred task), and the next waiter awaits the fresh Event. Because the
+        generation is advanced before the Event swap, a waiter racing between its
+        fast-path check and parking cannot lose the wakeup: it re-checks the
+        advanced generation and takes the fast-path. A monotonic guard keeps the
+        generation only ever advancing.
         """
-        if generation > self.current_generation:
-            self.current_generation = generation
-            self._snapshot = snapshot
-        condition = self._get_condition()
-
-        async def _notify() -> None:
-            async with condition:
-                condition.notify_all()
-
-        # publish() is a sync callback invoked on the server loop; schedule the
-        # async notify on that same loop.
-        asyncio.ensure_future(_notify())
+        if generation <= self.current_generation:
+            # Stale / duplicate publish: nothing advanced, so there is nothing to
+            # wake. Do not touch the Event (no spurious set).
+            return
+        self.current_generation = generation
+        self._snapshot = snapshot
+        # Wake synchronously: release everyone parked on the current Event, then
+        # install a fresh unset Event for the next generation's waiters.
+        event = self._get_event()
+        event.set()
+        self._event = asyncio.Event()
 
     def current_frame(self) -> tuple[int, tuple[int, ...] | None]:
         """Sample the stored ``(generation, snapshot)`` pair as a single read.
@@ -212,13 +240,15 @@ class FrameGate:
         """Await until ``current_generation`` is strictly greater than ``generation``.
 
         Returns immediately if a newer generation already exists at entry (client
-        slower than upstream).
+        slower than upstream). Otherwise it parks on the CURRENT Event, then
+        RE-CHECKS the generation in a loop (re-capturing the Event each iteration):
+        a waiter that entered just after an advance takes the fast-path and never
+        blocks, and a spurious/early ``set()`` is absorbed by the re-check — so no
+        wakeup is ever lost.
         """
-        if self.current_generation > generation:
-            return
-        condition = self._get_condition()
-        async with condition:
-            await condition.wait_for(lambda: self.current_generation > generation)
+        while self.current_generation <= generation:
+            event = self._get_event()
+            await event.wait()
 
 
 class SerialPacingContext:

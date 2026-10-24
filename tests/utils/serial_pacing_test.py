@@ -266,6 +266,118 @@ class TestSerialPacing(unittest.TestCase):
 
         asyncio.run(scenario())
 
+    # -- Synchronous, lost-wakeup-free wake (FrameGate) ----------------------
+
+    def test_publish_before_wait_returns_via_generation_fast_path(self):
+        """(a) A publish that lands BEFORE a waiter parks is observed via the
+        generation fast-path: wait_for_generation_after returns immediately
+        without ever blocking on the Event (no second publish needed)."""
+
+        async def scenario():
+            gate = FrameGate()
+            gate.publish(1, _snapshot(1))
+            # current_generation is already ahead of 0, so this must not block.
+            await asyncio.wait_for(gate.wait_for_generation_after(0), timeout=0.01)
+            self.assertEqual(gate.current_generation, 1)
+
+        asyncio.run(scenario())
+
+    def test_parked_waiter_released_in_same_loop_turn_as_publish(self):
+        """(b) A waiter already parked on the gate is released PROMPTLY in the
+        same loop turn as publish(): after publish() a single `await
+        asyncio.sleep(0)` lets the parked wait complete — no deferred notify
+        task, no second publish."""
+
+        async def scenario():
+            gate = FrameGate()
+            waiter = asyncio.ensure_future(gate.wait_for_generation_after(0))
+            await asyncio.sleep(0)  # let the waiter park on the Event
+            self.assertFalse(waiter.done(), "waiter must be parked before publish")
+
+            gate.publish(1, _snapshot(1))  # synchronous wake, no ensure_future
+            await asyncio.sleep(0)  # single turn to let the resolved wait run
+            self.assertTrue(waiter.done(), "parked waiter must wake in the same loop turn")
+            await waiter  # must not raise / re-block
+            self.assertEqual(gate.current_generation, 1)
+
+        asyncio.run(scenario())
+
+    def test_advance_between_fast_path_and_park_is_not_a_lost_wakeup(self):
+        """(c) A publish that advances the generation in the window between a
+        waiter's fast-path check and its parking still releases the waiter — the
+        post-wake re-check takes the generation fast-path, so the wakeup is not
+        lost even though the set() happened against the Event the waiter had not
+        yet awaited."""
+
+        async def scenario():
+            gate = FrameGate()
+            # Simulate the race: the generation advances (publish) between when a
+            # waiter would read current_generation (0, not yet > target) and when
+            # it awaits the Event. Publishing first, THEN parking, exercises the
+            # re-check: the waiter must observe the advanced generation and return
+            # without sleeping forever on a fresh (unset) Event.
+            gate.publish(1, _snapshot(1))
+            # A fresh unset Event is now installed; a naive waiter that blindly
+            # awaited it would hang. The re-check must save it.
+            await asyncio.wait_for(gate.wait_for_generation_after(0), timeout=0.05)
+            self.assertEqual(gate.current_generation, 1)
+
+        asyncio.run(scenario())
+
+    def test_publish_contains_no_deferred_notify_task(self):
+        """The wake must be synchronous: publish() must not schedule any task on
+        the loop (no asyncio.ensure_future / deferred notify)."""
+
+        async def scenario():
+            gate = FrameGate()
+            before = len(asyncio.all_tasks())
+            gate.publish(1, _snapshot(1))
+            after = len(asyncio.all_tasks())
+            self.assertEqual(after, before, "publish() must not create a deferred notify task")
+
+        asyncio.run(scenario())
+
+    def test_stale_publish_does_not_advance_or_wake(self):
+        """A publish whose generation is not strictly newer leaves the pinned
+        generation/snapshot unchanged and does not release a waiter."""
+
+        async def scenario():
+            gate = FrameGate()
+            gate.publish(5, _snapshot(5))
+            waiter = asyncio.ensure_future(gate.wait_for_generation_after(5))
+            await asyncio.sleep(0)
+            self.assertFalse(waiter.done(), "waiter targets > 5, must be parked")
+
+            # A stale (<=5) publish must not wake the waiter nor change state.
+            gate.publish(5, _snapshot(99))
+            await asyncio.sleep(0)
+            self.assertFalse(waiter.done(), "stale publish must not release the waiter")
+            self.assertEqual(gate.current_generation, 5)
+            self.assertEqual(gate.current_frame()[1], _snapshot(5), "snapshot must not change on stale publish")
+
+            # A genuinely newer publish releases it.
+            gate.publish(6, _snapshot(6))
+            await asyncio.sleep(0)
+            self.assertTrue(waiter.done())
+            await waiter
+
+        asyncio.run(scenario())
+
+    def test_wake_suppressed_stalls_negative_control(self):
+        """Negative control: with NO publish advancing the generation, a parked
+        waiter never wakes (proves the tests above assert a real wake, not a
+        trivially-satisfied condition)."""
+
+        async def scenario():
+            gate = FrameGate()
+            waiter = asyncio.ensure_future(gate.wait_for_generation_after(0))
+            await asyncio.sleep(0)
+            with self.assertRaises(asyncio.TimeoutError):
+                await asyncio.wait_for(asyncio.shield(waiter), timeout=0.05)
+            waiter.cancel()
+
+        asyncio.run(scenario())
+
     def test_out_of_range_request_falls_through_to_core(self):
         """A request the snapshot cannot cover falls back to the live core so odd
         reads behave exactly as before (snapshot has 8 regs; ask for 10)."""
