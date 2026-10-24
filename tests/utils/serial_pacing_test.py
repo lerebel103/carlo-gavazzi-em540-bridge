@@ -794,6 +794,56 @@ class TestSerialPacing(unittest.TestCase):
 
         asyncio.run(scenario())
 
+    # -- Unserved device-id delegation (COMMIT 3) ----------------------------
+
+    def test_unserved_device_id_delegates_to_core_and_does_not_advance_pin(self):
+        """A read for an unserved device_id delegates straight to the core (so a
+        discovery scan gets the correct exception) and must NOT advance the pin
+        or wait — even when it overlaps the primary anchor."""
+
+        async def scenario():
+            # Core serves ids {1, 7}; 9 is unserved. 0x0028 is the primary anchor.
+            core, _helper, gate, ctx = self._make(anchors={0x0028}, max_wait_s=0.12)
+            ctx._primary_anchor = 0x0028
+            core.sentinel = ExcCodes.ILLEGAL_ADDRESS
+            # A fresh frame exists and WOULD satisfy a served anchor read.
+            gate.publish(5, _snapshot(5, length=0x0030))
+            await asyncio.sleep(0)
+
+            # Unserved id 9, anchor-overlapping window: must delegate, not pace.
+            result = await asyncio.wait_for(ctx.async_getValues(9, 3, 0x0028, 2), timeout=0.05)
+            self.assertIs(result, ExcCodes.ILLEGAL_ADDRESS, "unserved id must get the core's scan exception")
+            self.assertEqual(core.get_calls, [(9, 3, 0x0028, 2)], "unserved id must be delegated to the core")
+            self.assertEqual(ctx._pinned_generation, 0, "unserved id must not advance the pin")
+            self.assertFalse(ctx._cycle_start_seen, "unserved id must not mark the client primary-driven")
+
+        asyncio.run(scenario())
+
+    def test_served_device_id_still_paces_after_unserved_scan(self):
+        """A served device_id still paces normally (pins a fresh frame) even after
+        unserved discovery-scan reads passed through — scan noise does not disturb
+        the served client's pacing."""
+
+        async def scenario():
+            core, _helper, gate, ctx = self._make(anchors={0x0028}, max_wait_s=0.12)
+            ctx._primary_anchor = 0x0028
+            gate.publish(5, _snapshot(5, length=0x0030))
+            await asyncio.sleep(0)
+
+            # Discovery scan noise for unserved ids first.
+            await asyncio.wait_for(ctx.async_getValues(8, 3, 0x0028, 2), timeout=0.05)
+            await asyncio.wait_for(ctx.async_getValues(9, 3, 0x0028, 2), timeout=0.05)
+            self.assertEqual(ctx._pinned_generation, 0, "scan noise must not advance the pin")
+
+            # The served id (1) paces: its anchor read pins the fresh frame.
+            core.get_calls.clear()
+            result = await asyncio.wait_for(ctx.async_getValues(1, 3, 0x0028, 2), timeout=1.0)
+            self.assertEqual(ctx._pinned_generation, 5, "served id must pace and pin a fresh frame")
+            self.assertEqual(result, [500 + 0x0028, 500 + 0x0029])
+            self.assertEqual(core.get_calls, [], "served gated read must not touch the live core")
+
+        asyncio.run(scenario())
+
     def test_paced_read_within_defined_range_still_served_from_snapshot(self):
         """A valid paced read (all addresses defined) is still served atomically
         from the pinned snapshot — the B2 fix must not force a live-core read for

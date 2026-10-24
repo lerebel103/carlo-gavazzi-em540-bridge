@@ -448,6 +448,17 @@ class SerialPacingContext:
         if self._pdu_helper.circuit_open:
             return ExcCodes.DEVICE_BUSY
 
+        # (a2) UNSERVED DEVICE-ID DELEGATION (COMMIT 3): downstream controllers
+        # (e.g. Fronius inverters) scan a RANGE of Modbus unit ids to discover
+        # devices. A request for an id this bridge does not serve must be answered
+        # by the real core (which returns the correct scan exception) and must
+        # NEVER advance the pacing pin or wait for a frame — otherwise discovery
+        # scan noise would re-pace the served client. Checked BEFORE any wait or
+        # snapshot serve, but AFTER the stale-breaker so a doomed request still
+        # fails closed first. Writes/device_ids() are already plain pass-throughs.
+        if device_id not in self._core.device_ids():
+            return await self._core.async_getValues(device_id, func_code, address, count)
+
         # (b) DISABLED: latching off — pure pass-through, no wait.
         if self._max_wait_s <= 0:
             return await self._core.async_getValues(device_id, func_code, address, count)
