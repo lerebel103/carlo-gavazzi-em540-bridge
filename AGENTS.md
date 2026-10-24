@@ -113,6 +113,21 @@ Notes:
   disables latching, pure pass-through) which MUST be strictly less than `serial.timeout` (validated).
   This preserves the staleness ladder (the latch sits before the datastore read and defers to tier 1)
   and does not touch the 0x000B overlay or the production parse/overlay path.
+- The snapshot fast-path is scoped to **register reads only** (FC3 read-holding, FC4 read-input).
+  The proxy replaces the serial server's WHOLE context, so bit reads (FC1 read-coils, FC2
+  read-discrete-inputs) and any other func code reach it too; those fall through to the real core so
+  they keep correct datastore semantics/exception. A register read whose window touches an address
+  the datastore does NOT define also falls through to the core so it raises the correct
+  `ILLEGAL_ADDRESS` (the flat snapshot tuple carries no validity flags and would otherwise serve
+  zeros for a map gap — e.g. a TS65A read at 49999). The defined-address set is computed once from
+  the SimRuntime block validity flags (`serial_pacing.valid_register_addresses`). Valid register
+  reads are still served atomically from the pinned `(generation, snapshot)` pair — the fallthrough
+  is scoped to the invalid/non-register cases so it never breaks the atomic frame guarantee.
+- Each downstream serial client's observed poll rate is exposed as a Home Assistant diagnostic
+  sensor per bridge ("EM540 Serial Read Rate" / "TS65A Serial Read Rate", Hz, enabled by default),
+  computed in `ha_diagnostics` with the SAME windowed delta-count/delta-time pattern as the upstream
+  "Acq Rate" sensor. The cumulative count is `SerialActivityTracker.total_requests`, bumped on the
+  serial server loop in `record_request` (no tick-loop/listener work added).
 
 ## Register Layout Invariants (validated against production)
 
@@ -195,7 +210,8 @@ and would otherwise keep every wall-clock breaker satisfied), not the only thing
 - `app/home_assistant/ha_bridge.py`: MQTT bridge for Home Assistant
 - `app/home_assistant/ha_diagnostics.py`: diagnostic sensor definitions and publication
 - `app/utils/pdu_helper.py`: stale-data circuit breaker plus served-ID-aware exception logging for downstream Modbus requests
-- `app/utils/serial_activity.py`: `SerialActivityTracker` — infers downstream serial-client presence from request activity
+- `app/utils/serial_activity.py`: `SerialActivityTracker` — infers downstream serial-client presence from request activity; also exposes a monotonic `total_requests` count for the serial read-rate diagnostic
+- `app/utils/serial_pacing.py`: serial-only frame-latching proxy (`FrameGate` + `SerialPacingContext`) and `valid_register_addresses` helper; anchor-based pacing, register-read-only snapshot fast-path
 
 ## Testing Guidance
 
