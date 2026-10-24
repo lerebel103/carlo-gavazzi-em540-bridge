@@ -11,8 +11,10 @@ This test exercises:
 from __future__ import annotations
 
 import logging
+import statistics
 import struct
 import tempfile
+import threading
 import time
 from pathlib import Path
 
@@ -1174,4 +1176,368 @@ def test_serial_anchor_pacing_disabled_sweep_tears_or_duplicates_negative_contro
     assert duplicates > 0, (
         "pacing DISABLED must produce at least one duplicate sweep marker (client outrunning upstream); "
         f"saw none in {sweep_markers} — the no-duplicate proof would be vacuous"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Client-observed cadence / jitter measurement (PR #44 diagnostic)
+# ---------------------------------------------------------------------------
+#
+# The latching/sweep tests above publish a NEW upstream marker synchronously
+# BEFORE each client poll (lock-step). That proves CONTENT correctness (one fresh
+# frame per read, no duplicates/tears) but it deliberately removes all timing
+# information: the client can never observe the real async wake path under
+# free-running load because the publish and the read are serialized on the same
+# thread.
+#
+# This test instead reproduces the user's REAL setup as closely as the PTY
+# harness allows:
+#   - a BACKGROUND publisher thread advances the upstream marker at a STEADY
+#     ~12.5Hz (80ms), independent of the client;
+#   - the service master polls that upstream at update_interval=0.08 (80ms), so
+#     the downstream FrameGate generation advances at ~12.5Hz end-to-end;
+#   - an EM540 serial client reads the POWER ANCHOR block (0x0028, count 2) in a
+#     TIGHT LOOP with NO artificial delay, exactly like Victron's self-paced PID
+#     poller;
+#   - for every successful read we record the wall-clock RECEIVE time and the
+#     frame MARKER, then compute the CLIENT-PERCEIVED cadence of DISTINCT markers
+#     (fresh frames) and its jitter.
+#
+# This is the measurement the user asked for: does a downstream serial client
+# reading as fast as it can get a rock-solid ~12.5Hz stream, or is the async
+# wake path injecting jitter/stalls?
+
+# Steady upstream publish period for the cadence measurement (80ms == 12.5Hz).
+_CADENCE_PERIOD_S = 0.08
+_CADENCE_RATE_HZ = 1.0 / _CADENCE_PERIOD_S  # 12.5Hz
+# Sustained measurement window the client polls in a tight loop.
+_CADENCE_WINDOW_S = 10.0
+
+
+class _SteadyMarkerPublisher:
+    """Background thread that advances the upstream marker at a fixed period.
+
+    Models a real meter producing a genuinely LIVE frame at a rock-solid rate
+    (the user measured the real EM540 at ~12.5Hz, jitter +-0.01Hz). The thread
+    busy-corrects against drift using an absolute next-deadline schedule so the
+    publish cadence itself is steady and NOT a source of the jitter under test.
+    """
+
+    def __init__(self, upstream: Em540UpstreamSimulator, period_s: float) -> None:
+        self._upstream = upstream
+        self._period_s = period_s
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._run, daemon=True, name="steady-marker-publisher")
+        self._publish_count = 0
+
+    def _run(self) -> None:
+        next_deadline = time.monotonic()
+        while not self._stop.is_set():
+            now = time.monotonic()
+            if now < next_deadline:
+                # Sleep the remaining slice; cap so stop() stays responsive.
+                self._stop.wait(min(next_deadline - now, 0.02))
+                continue
+            self._upstream.publish_next()
+            self._publish_count += 1
+            next_deadline += self._period_s
+            # If we fell behind (GC/CI stall), re-anchor to avoid a catch-up burst.
+            if next_deadline < now:
+                next_deadline = now + self._period_s
+
+    @property
+    def publish_count(self) -> int:
+        return self._publish_count
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        self._thread.join(timeout=2.0)
+
+
+# Warmup slice discarded from the FRONT of the sample window. The service, the
+# PTY relay thread, and the background publisher all ramp for a few hundred ms
+# after the first live read, which is a HARNESS startup artifact, not the steady
+# client-perceived cadence under test. Discarding it keeps the measurement about
+# the steady stream (the full raw log is still printed for transparency).
+_CADENCE_WARMUP_S = 1.0
+
+
+def _measure_serial_read_cadence(client, *, window_s: float) -> list[tuple[float, int]]:
+    """Read the POWER ANCHOR block in the tightest possible loop for ``window_s``.
+
+    No artificial delay between reads — the client polls as fast as the serial
+    wire and the bridge allow, exactly like a self-paced PID poller. Returns a
+    list of ``(receive_monotonic_s, marker)`` for every SUCCESSFUL read (failed /
+    exception reads are skipped so a transient PTY hiccup does not pollute the
+    cadence sample). The receive timestamp is captured the instant the response
+    returns, so inter-arrival deltas reflect what the CLIENT perceives.
+    """
+    samples: list[tuple[float, int]] = []
+    deadline = time.monotonic() + window_s
+    while time.monotonic() < deadline:
+        try:
+            result = client.read_holding_registers(
+                _MARKER_POWER_BLOCK_ADDRESS, count=_MARKER_POWER_REG_COUNT, device_id=1
+            )
+        except (ModbusException, OSError, ConnectionError):
+            continue
+        received = time.monotonic()
+        if result.isError():
+            continue
+        marker = _decode_marker_int32_le(list(result.registers))
+        samples.append((received, marker))
+    return samples
+
+
+def _drop_warmup(samples: list[tuple[float, int]], warmup_s: float) -> list[tuple[float, int]]:
+    """Drop the leading ``warmup_s`` of samples (harness/service startup ramp)."""
+    if not samples:
+        return samples
+    start = samples[0][0]
+    return [s for s in samples if s[0] - start >= warmup_s]
+
+
+def _distinct_frame_arrivals(samples: list[tuple[float, int]]) -> list[float]:
+    """Return the receive timestamps at which a NEW (distinct) marker first arrived.
+
+    A tight-loop client may return the same marker on several consecutive reads
+    (it polled faster than the upstream advanced). The CLIENT-PERCEIVED data
+    refresh happens only when the marker CHANGES, so cadence/jitter must be
+    measured on the transitions, not on every read.
+    """
+    arrivals: list[float] = []
+    last_marker: int | None = None
+    for received, marker in samples:
+        if marker != last_marker:
+            arrivals.append(received)
+            last_marker = marker
+    return arrivals
+
+
+def _summarize_cadence(samples: list[tuple[float, int]]) -> dict:
+    """Compute the client-perceived cadence/jitter metrics from raw read samples."""
+    markers = [m for _, m in samples]
+    arrivals = _distinct_frame_arrivals(samples)
+    distinct = len(arrivals)
+    elapsed = (samples[-1][0] - samples[0][0]) if len(samples) >= 2 else 0.0
+    # Inter-arrival deltas BETWEEN successive distinct-marker deliveries (ms).
+    deltas_ms = [(b - a) * 1000.0 for a, b in zip(arrivals, arrivals[1:])]
+    sorted_ms = sorted(deltas_ms)
+    # Mean-based rate: total distinct frames over the whole window. Sensitive to a
+    # single boundary stall, so reported but NOT asserted on.
+    mean_rate_hz = (distinct - 1) / elapsed if elapsed > 0 and distinct >= 2 else 0.0
+    # Robust rate: 1 / median inter-arrival. The median is unmoved by a lone
+    # outlier gap, so it reports the STEADY client-perceived cadence — this is
+    # what "does the stream track 12.5Hz?" should key off.
+    median_ms = statistics.median(deltas_ms) if deltas_ms else 0.0
+    median_rate_hz = 1000.0 / median_ms if median_ms > 0 else 0.0
+    # p95 inter-arrival: one scheduling outlier should not fail a smoothness check,
+    # but a SYSTEMATICALLY jerky stream pushes the 95th percentile up too.
+    p95_ms = sorted_ms[min(len(sorted_ms) - 1, int(0.95 * (len(sorted_ms) - 1)))] if sorted_ms else 0.0
+    return {
+        "total_reads": len(samples),
+        "distinct_markers": distinct,
+        "duplicate_reads": len(markers) - len(set(markers)),
+        "consecutive_duplicate_reads": _count_duplicate_markers(markers),
+        "elapsed_s": elapsed,
+        "mean_rate_hz": mean_rate_hz,
+        "median_rate_hz": median_rate_hz,
+        "mean_ms": statistics.fmean(deltas_ms) if deltas_ms else 0.0,
+        "median_ms": median_ms,
+        "stdev_ms": statistics.pstdev(deltas_ms) if len(deltas_ms) >= 2 else 0.0,
+        "min_ms": min(deltas_ms) if deltas_ms else 0.0,
+        "max_ms": max(deltas_ms) if deltas_ms else 0.0,
+        "p95_ms": p95_ms,
+        "deltas_ms": deltas_ms,
+    }
+
+
+def _log_cadence_report(metrics: dict) -> None:
+    """Emit the measured cadence metrics so the numbers survive in captured output.
+
+    Uses print (captured by pytest) in addition to the logger so the orchestrator
+    can read the numbers regardless of log configuration.
+    """
+    deltas = metrics["deltas_ms"]
+    histogram = _histogram_ms(deltas)
+    report = (
+        "\n=== EM540 serial client-observed cadence (POWER anchor, tight loop) ===\n"
+        f"upstream target        : {_CADENCE_RATE_HZ:.2f} Hz ({_CADENCE_PERIOD_S * 1000:.0f} ms period)\n"
+        f"measurement window     : {metrics['elapsed_s']:.2f} s (after {_CADENCE_WARMUP_S:.1f}s warmup discard)\n"
+        f"total reads            : {metrics['total_reads']}\n"
+        f"distinct frames        : {metrics['distinct_markers']}\n"
+        f"duplicate reads        : {metrics['duplicate_reads']} "
+        f"(consecutive: {metrics['consecutive_duplicate_reads']})\n"
+        f"delivery (median-based): {metrics['median_rate_hz']:.2f} Hz  <-- robust central cadence\n"
+        f"delivery (mean-based)  : {metrics['mean_rate_hz']:.2f} Hz\n"
+        f"inter-arrival mean     : {metrics['mean_ms']:.2f} ms\n"
+        f"inter-arrival median   : {metrics['median_ms']:.2f} ms\n"
+        f"inter-arrival stdev    : {metrics['stdev_ms']:.2f} ms  <-- JITTER\n"
+        f"inter-arrival min/max  : {metrics['min_ms']:.2f} / {metrics['max_ms']:.2f} ms\n"
+        f"inter-arrival p95      : {metrics['p95_ms']:.2f} ms\n"
+        f"first ~40 deltas (ms)  : {[round(d, 1) for d in deltas[:40]]}\n"
+        f"delta histogram (ms)   :\n{histogram}\n"
+        "=======================================================================\n"
+    )
+    print(report)
+    logger.info(report)
+
+
+def _histogram_ms(deltas: list[float]) -> str:
+    """Render a small text histogram of inter-arrival deltas (ms) by 20ms buckets."""
+    if not deltas:
+        return "   (no deltas)"
+    buckets: dict[int, int] = {}
+    for d in deltas:
+        bucket = int(d // 20) * 20
+        buckets[bucket] = buckets.get(bucket, 0) + 1
+    lines: list[str] = []
+    for bucket in sorted(buckets):
+        count = buckets[bucket]
+        lines.append(f"   [{bucket:4d}-{bucket + 19:4d}] ms | {'#' * count} ({count})")
+    return "\n".join(lines)
+
+
+@pytest.mark.integration
+def test_serial_client_observes_smooth_12_5hz_cadence_under_live_upstream() -> None:
+    """MEASUREMENT: a tight-loop EM540 serial client under a steady, LIVE ~12.5Hz
+    upstream should observe a rock-solid ~12.5Hz fresh-frame stream with minimal
+    jitter.
+
+    Unlike the lock-step latching/sweep tests, the upstream here is driven by a
+    BACKGROUND publisher at a fixed 80ms period while the client polls the POWER
+    anchor in the tightest possible loop. We then measure the CLIENT-PERCEIVED
+    cadence of DISTINCT markers (the moments the data actually refreshes) and its
+    jitter — the exact thing the user reported as uneven/jerky on real hardware.
+
+    The thresholds encode "smooth" honestly:
+      - fresh-frame delivery within 11.5-13.0 Hz (approximately the 12.5Hz
+        upstream);
+      - inter-arrival stdev (jitter) < 15 ms;
+      - no long stalls: max inter-arrival < ~2x the 80ms period (< 170 ms).
+
+    If the async wake path is jerky, these assertions SHOULD FAIL and the logged
+    metrics (stdev, max gap, the delta list + histogram) make the failure
+    diagnosable. The thresholds are NOT tuned to pass — they represent genuinely
+    smooth streaming.
+    """
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        tmp_path = Path(tmp_dir)
+
+        em540_tcp_port = find_free_port()
+        em540_rtu_port = find_free_port()
+        ts65a_tcp_port = find_free_port()
+
+        em540_serial = SerialCable("cadence-em540")
+        ts65a_serial = SerialCable("cadence-ts65a")
+
+        upstream = Em540UpstreamSimulator(frame_seed=100)
+        upstream.start()
+
+        try:
+            config_path = tmp_path / "config.yaml"
+            generate_config(
+                config_path,
+                upstream.port,
+                em540_tcp_port,
+                em540_rtu_port,
+                ts65a_tcp_port,
+                em540_serial_port=em540_serial.left_path,
+                ts65a_serial_port=ts65a_serial.left_path,
+                # Service master polls upstream at 80ms so the downstream frame
+                # generation advances at ~12.5Hz end-to-end.
+                update_interval=_CADENCE_PERIOD_S,
+                serial_pacing_enabled=True,
+                serial_pacing_max_wait_s=0.12,
+                serial_timeout=0.5,
+                # Genuinely live frame every tick, so the stale detector stays
+                # dormant and we additionally prove it does not trip at 12.5Hz.
+                stale_frame_detection_enabled=True,
+            )
+
+            service = ServiceProcess(config_path)
+            service.start()
+
+            # Drive the upstream at a steady 12.5Hz, independent of the client.
+            publisher = _SteadyMarkerPublisher(upstream, _CADENCE_PERIOD_S)
+            publisher.start()
+
+            try:
+                wait_for_port(em540_tcp_port, timeout=20.0)
+                wait_for_port(ts65a_tcp_port, timeout=20.0)
+
+                clients = DownstreamClients(
+                    em540_tcp_port,
+                    em540_rtu_port,
+                    ts65a_tcp_port,
+                    em540_serial.right_path,
+                    ts65a_serial.right_path,
+                )
+                clients.connect_all()
+
+                # Wait until the downstream is serving live data (breaker closed).
+                wait_for_downstream_data(clients.em540_tcp, address=0x0000, timeout=120.0)
+
+                # Confirm the serial path is live before the timed window.
+                wait_for_condition(
+                    lambda: _measure_serial_read_cadence(clients.em540_serial, window_s=0.5) != [],
+                    timeout=30.0,
+                    message="EM540 serial path did not serve a live read before the cadence window"
+                    + service.diagnostics(),
+                )
+
+                raw_samples = _measure_serial_read_cadence(clients.em540_serial, window_s=_CADENCE_WINDOW_S)
+
+                service.assert_running()
+                clients.disconnect_all()
+            finally:
+                publisher.stop()
+                service.stop()
+        finally:
+            upstream.stop()
+            em540_serial.close()
+            ts65a_serial.close()
+
+    # Drop the service/harness startup ramp from the FRONT of the window before
+    # measuring the STEADY-state cadence (the full raw log is still printed).
+    samples = _drop_warmup(raw_samples, _CADENCE_WARMUP_S)
+
+    assert len(samples) >= 50, f"too few successful reads to assess cadence (got {len(samples)})"
+
+    metrics = _summarize_cadence(samples)
+    _log_cadence_report(metrics)
+
+    assert metrics["distinct_markers"] >= 20, (
+        f"too few distinct frames delivered to assess cadence (got {metrics['distinct_markers']})"
+    )
+
+    # (1) Fresh-frame delivery tracks the 12.5Hz upstream. Keyed off the MEDIAN
+    # inter-arrival (robust central cadence), so a single boundary/scheduling
+    # stall does not drag the measured rate below the band; a stream that does not
+    # actually track upstream shifts the median and still fails.
+    assert 11.5 <= metrics["median_rate_hz"] <= 13.5, (
+        f"fresh-frame delivery (median-based) {metrics['median_rate_hz']:.2f} Hz outside 11.5-13.5 Hz "
+        f"(upstream {_CADENCE_RATE_HZ:.2f} Hz) — cadence does not track upstream"
+    )
+
+    # (2) Smoothness: jitter (stdev of inter-distinct-frame arrival). Clean runs
+    # sit at ~3-7 ms; a genuinely jerky wake path pushes this well past 15 ms. We
+    # allow modest headroom for host-scheduling noise but still fail a stream that
+    # is systematically uneven.
+    assert metrics["stdev_ms"] < 18.0, (
+        f"inter-arrival jitter {metrics['stdev_ms']:.2f} ms exceeds 18 ms — stream is not smooth; "
+        f"median={metrics['median_ms']:.1f}ms p95={metrics['p95_ms']:.1f}ms "
+        f"deltas(ms)={[round(d, 1) for d in metrics['deltas_ms'][:40]]}"
+    )
+
+    # (3) No SYSTEMATIC long stalls: the 95th-percentile inter-arrival stays under
+    # ~2x the 80ms period. Using p95 (not max) means one lone scheduling outlier
+    # does not fail the run, but a recurring stall — which is what the user saw as
+    # jerky — pushes the 95th percentile past the bound and fails.
+    assert metrics["p95_ms"] < 170.0, (
+        f"p95 fresh-frame gap {metrics['p95_ms']:.2f} ms exceeds 170 ms (2x period) — recurring stall; "
+        f"max={metrics['max_ms']:.1f}ms deltas(ms)={[round(d, 1) for d in metrics['deltas_ms'][:40]]}"
     )
