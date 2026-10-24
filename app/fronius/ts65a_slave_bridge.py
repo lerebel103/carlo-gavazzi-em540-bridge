@@ -51,7 +51,14 @@ _STRUCT_2H = struct.Struct(">2H")
 # block of the cycle serves coherently from that pin. Mirrors the EM540
 # power-anchor rationale using the Fronius equivalent power registers. This is a
 # protocol property of the served map, not a user tunable.
+#
+# Only the SINGLE primary cycle-start anchor advances the pin (at most one
+# advance per client cycle); the secondary per-phase power anchors (40099/40101/
+# 40103) and every other block serve coherently from that pin as follow-on reads.
+# The aggregate AC power value (40097) is the primary anchor because it is the
+# first power read a real Fronius client issues each cycle.
 _SERIAL_PACING_ANCHORS: frozenset[int] = frozenset({40097, 40099, 40101, 40103})
+_SERIAL_PACING_PRIMARY_ANCHOR: int = 40097
 
 # Static register layout for the Fronius Smart Meter TS 65A-3 SunSpec model.
 # Addresses are 0-based Modbus protocol addresses (register number - 1).
@@ -369,6 +376,7 @@ class Ts65aSlaveBridge(MeterDataListener):
             reg_start_address=self._reg_start_address,
             wire_budget=self._serial_wire_budget(),
             anchors=_SERIAL_PACING_ANCHORS,
+            primary_anchor=_SERIAL_PACING_PRIMARY_ANCHOR,
             valid_addresses=self._valid_addresses,
         )
         return serial_server

@@ -648,6 +648,79 @@ class TestSerialPacing(unittest.TestCase):
 
         asyncio.run(scenario())
 
+    # -- Single primary cycle-start anchor (COMMIT 1) ------------------------
+
+    def test_both_power_anchors_in_one_cycle_advance_pin_exactly_once(self):
+        """A cycle that reads BOTH power anchors (primary 0x0028 then secondary
+        0x0012) advances the pin EXACTLY once — on the primary — and both reads
+        return the SAME generation's bytes (whole-cycle coherence)."""
+
+        async def scenario():
+            # Full anchor set recognised, but only 0x0028 is the primary.
+            core, _helper, gate, ctx = self._make(anchors={0x0028, 0x0012}, max_wait_s=0.12)
+            ctx._primary_anchor = 0x0028
+
+            # Pin an initial frame (gen 3) so we can prove the primary advances it.
+            gate.publish(3, _snapshot(3, length=0x0040))
+            await asyncio.sleep(0)
+            ctx._pinned_generation = 3
+            ctx._pinned_snapshot = _snapshot(3, length=0x0040)
+
+            # Primary-anchor read: must block for a strictly-newer generation.
+            t_primary = asyncio.ensure_future(ctx.async_getValues(1, 3, 0x0028, 2))
+            await asyncio.sleep(0)
+            self.assertFalse(t_primary.done(), "primary-anchor read must wait for a newer frame")
+
+            # A newer frame lands; the primary read pins it (the single advance).
+            gate.publish(4, _snapshot(4, length=0x0040))
+            primary = await asyncio.wait_for(t_primary, timeout=1.0)
+            self.assertEqual(ctx._pinned_generation, 4, "primary anchor advances the pin once")
+            self.assertEqual(primary, [4 * 100 + 0x0028, 4 * 100 + 0x0029])
+
+            # A still-newer frame lands mid-cycle; the SECONDARY power anchor read
+            # must NOT observe it — it is a follow-on that serves from the pin.
+            gate.publish(5, _snapshot(5, length=0x0040))
+            await asyncio.sleep(0)
+
+            secondary = await asyncio.wait_for(ctx.async_getValues(1, 3, 0x0012, 2), timeout=0.01)
+            self.assertEqual(ctx._pinned_generation, 4, "secondary power anchor must NOT advance the pin")
+            self.assertEqual(
+                secondary,
+                [4 * 100 + 0x0012, 4 * 100 + 0x0013],
+                "secondary power anchor must serve the SAME generation as the primary (coherent cycle)",
+            )
+            self.assertEqual(core.get_calls, [], "gated reads never touch the live core")
+
+        asyncio.run(scenario())
+
+    def test_secondary_and_non_anchor_reads_serve_from_pin_without_advance(self):
+        """Secondary power + non-anchor reads serve immediately from the pin with
+        NO wait and NO advance, even while newer generations are available."""
+
+        async def scenario():
+            core, _helper, gate, ctx = self._make(anchors={0x0028, 0x0012}, max_wait_s=0.12)
+            ctx._primary_anchor = 0x0028
+
+            # Pin gen 6; newer generations exist but must be ignored by follow-ons.
+            gate.publish(6, _snapshot(6, length=0x0200))
+            await asyncio.sleep(0)
+            ctx._pinned_generation = 6
+            ctx._pinned_snapshot = _snapshot(6, length=0x0200)
+            gate.publish(7, _snapshot(7, length=0x0200))
+            await asyncio.sleep(0)
+
+            # Secondary power anchor (0x0012): follow-on, serves from pin.
+            secondary = await asyncio.wait_for(ctx.async_getValues(1, 3, 0x0012, 2), timeout=0.01)
+            # Non-anchor block (0x0100): follow-on, serves from pin.
+            energy = await asyncio.wait_for(ctx.async_getValues(1, 3, 0x0100, 4), timeout=0.01)
+
+            self.assertEqual(secondary, [600 + 0x0012, 600 + 0x0013])
+            self.assertEqual(energy, [600 + 0x0100, 600 + 0x0101, 600 + 0x0102, 600 + 0x0103])
+            self.assertEqual(ctx._pinned_generation, 6, "no follow-on read may advance the pin")
+            self.assertEqual(core.get_calls, [], "follow-on reads never touch the live core")
+
+        asyncio.run(scenario())
+
     def test_paced_read_within_defined_range_still_served_from_snapshot(self):
         """A valid paced read (all addresses defined) is still served atomically
         from the pinned snapshot — the B2 fix must not force a live-core read for

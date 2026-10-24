@@ -36,7 +36,14 @@ _FC_HOLDING_REGISTER = 3
 # (0x0028) and the per-phase power block (0x0012) on every cycle at interval 0
 # while voltage/current, energy and frequency are staggered. This is a protocol
 # property of the served map, not a user tunable.
+#
+# Only the SINGLE primary cycle-start anchor advances the pin (at most one
+# advance per client cycle); the secondary power anchor (0x0012) and every other
+# block serve coherently from that pin as follow-on reads. The system-power
+# register (0x0028) is the primary anchor because it is the first power read a
+# real client issues each cycle.
 _SERIAL_PACING_ANCHORS: frozenset[int] = frozenset({0x0028, 0x0012})
+_SERIAL_PACING_PRIMARY_ANCHOR: int = 0x0028
 
 # Some downstream EM540 clients issue contiguous bulk reads that span sparse gaps.
 # Populate these compatibility windows with explicit zero placeholders so reads
@@ -320,6 +327,7 @@ class Em540Slave(MeterDataListener):
             reg_start_address=self._reg_start_address,
             wire_budget=self._serial_wire_budget(),
             anchors=_SERIAL_PACING_ANCHORS,
+            primary_anchor=_SERIAL_PACING_PRIMARY_ANCHOR,
             valid_addresses=self._valid_addresses,
         )
         return serial_server

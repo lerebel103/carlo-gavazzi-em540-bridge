@@ -13,18 +13,26 @@ a cursor on EVERY read is wrong for those clients: read 1 gets frame N, read 2
 waits for N+1, read 3 for N+2 — the blocks are torn across frames AND the full
 sweep rate is throttled to one picture per (number-of-blocks) upstream ticks.
 
-So pacing keys off ANCHOR registers instead. Each bridge supplies a set of
-anchor start addresses (its per-cycle heartbeat read — the POWER registers that
-the real client polls every cycle; see the bridge modules for the Victron /
-Fronius rationale). On each gated read:
+So pacing keys off a single cycle-start ANCHOR register instead. Each bridge
+supplies a SINGLE ``primary_anchor`` start address — its per-cycle heartbeat read
+(the system-power register the real client polls FIRST every cycle; see the
+bridge modules for the Victron / Fronius rationale) — plus the full ``anchors``
+set (the complete power-register anchor set the overlap/follow-on logic still
+recognises). On each gated read:
 
-  - If the requested window OVERLAPS an anchor address, it is the start of a new
-    polling cycle: bounded-wait for a generation STRICTLY NEWER than the one
-    currently PINNED, then PIN that (generation, snapshot) pair and serve from
-    it. This paces the sweep to the upstream rate.
-  - If the read does NOT overlap an anchor, it is a follow-on read in the same
-    cycle: serve IMMEDIATELY from the pinned (generation, snapshot) pair with NO
-    wait, so every block of a sweep is coherent with the pinned anchor frame.
+  - If the requested window OVERLAPS the SINGLE primary cycle-start anchor, it is
+    the start of a new polling cycle: bounded-wait for a generation STRICTLY
+    NEWER than the one currently PINNED, then PIN that (generation, snapshot)
+    pair and serve from it. This paces the sweep to the upstream rate and
+    advances the pin AT MOST ONCE per client cycle.
+  - Any other read — a SECONDARY power anchor (EM540 0x0012; TS65A 40099/40101/
+    40103) or a non-anchor block — is a follow-on read in the same cycle: serve
+    IMMEDIATELY from the pinned (generation, snapshot) pair with NO wait and NO
+    re-pin, so every block of a sweep is coherent with the one pinned frame.
+
+A cycle that reads BOTH the primary and the secondary power anchors therefore
+advances the pin EXACTLY once (on the primary) and returns every block from a
+single generation (whole-cycle coherence).
 
 The first-ever read before any pin exists behaves like today's first read: wait
 once for a fresh frame and pin it.
@@ -261,16 +269,20 @@ class SerialPacingContext:
     A single per-instance ``_pinned_generation`` cursor models "which frame is the
     current polling cycle pinned to?" — correct because a serial server is
     single-handler/half-duplex (one awaiter at a time), so no per-connection state
-    is needed. An anchor read advances the pin by bounded-waiting for a
-    strictly-newer generation; a non-anchor read serves coherently from the
-    existing pin without waiting.
+    is needed. A PRIMARY cycle-start anchor read advances the pin by
+    bounded-waiting for a strictly-newer generation; every other read (secondary
+    power anchors and non-anchor blocks) serves coherently from the existing pin
+    without waiting.
 
-    The ``anchors`` set holds the served START addresses of this bridge's
-    per-cycle heartbeat reads (the POWER registers the real client polls every
-    cycle), expressed in the same address space the bridge serves and the client
-    requests. A read is an ANCHOR read when any configured anchor address falls in
-    ``range(address, address + count)`` — overlap on the start address is
-    sufficient.
+    The ``primary_anchor`` is the SINGLE served START address of this bridge's
+    per-cycle heartbeat read (the system-power register the real client polls
+    FIRST every cycle; EM540 0x0028, TS65A 40097). The ``anchors`` set holds the
+    FULL set of power-register anchor start addresses (primary + secondary),
+    expressed in the same address space the bridge serves and the client requests
+    — it is retained so the overlap/follow-on logic recognises the whole power
+    block, but ONLY the primary anchor advances the pin. A read is a PRIMARY
+    anchor read when the primary anchor falls in ``range(address, address +
+    count)`` — overlap on the start address is sufficient.
 
     If ``max_wait_s <= 0`` latching is disabled and ``async_getValues`` is a pure
     pass-through (today's behaviour, duplicate frames possible).
@@ -312,6 +324,7 @@ class SerialPacingContext:
         reg_start_address: int = 0,
         wire_budget: SerialWireBudget | None = None,
         anchors: Iterable[int] | None = None,
+        primary_anchor: int | None = None,
         valid_addresses: Iterable[int] | None = None,
     ) -> None:
         self._core = core
@@ -338,11 +351,17 @@ class SerialPacingContext:
         # response still fits the serial client's read deadline. When None (e.g.
         # in unit tests) the flat max_wait_s is used unchanged.
         self._wire_budget = wire_budget
-        # ANCHOR addresses (0-based Modbus protocol start addresses). An empty set
-        # means no read is ever treated as an anchor, so EVERY gated read waits for
-        # a strictly-newer generation (degenerate per-read latch) — bridges always
-        # supply their power anchors, so this is only the unit-test/no-anchor case.
+        # FULL power-anchor address set (0-based Modbus protocol start addresses).
+        # Retained so the overlap/follow-on logic recognises the whole per-cycle
+        # power block, but it no longer decides pin advances — see _primary_anchor.
         self._anchors: frozenset[int] = frozenset(anchors or ())
+        # The SINGLE primary cycle-start anchor. ONLY a read overlapping this
+        # address advances the pin (at most one advance per client cycle). When
+        # None (unit tests / no primary supplied) the context falls back to
+        # treating ANY anchor in ``anchors`` as a cycle start — the degenerate
+        # per-read latch the earlier anchor model used — so existing no-primary
+        # tests keep their behaviour.
+        self._primary_anchor: int | None = primary_anchor
         # The (generation, snapshot) pair the current polling cycle is pinned to.
         # Pin 0 / None means "no frame pinned yet" (startup), handled like today's
         # first read: the first anchor (or, with no anchors configured, the first
@@ -391,15 +410,24 @@ class SerialPacingContext:
             return None
         return list(snapshot[offset:end])
 
-    def _is_anchor_read(self, address: int, count: int) -> bool:
-        """True when the requested window covers (overlaps) an anchor address.
+    def _is_cycle_start_read(self, address: int, count: int) -> bool:
+        """True when the requested window starts a new polling cycle.
 
-        An anchor is identified by its START address; overlap on the start address
-        is sufficient (``any(a in range(address, address + count))``).
+        A cycle start is a read overlapping the SINGLE primary cycle-start anchor
+        (``_primary_anchor``); overlap on the start address is sufficient
+        (``address <= primary < address + count``). ONLY a cycle-start read
+        advances the pin, so the pin advances AT MOST once per client cycle even
+        when the cycle also reads the secondary power anchors.
+
+        When no primary anchor is configured (unit tests / no-primary case) this
+        falls back to overlapping ANY address in the full ``anchors`` set — the
+        degenerate per-read latch the earlier anchor model used.
         """
+        window_end = address + count
+        if self._primary_anchor is not None:
+            return address <= self._primary_anchor < window_end
         if not self._anchors:
             return False
-        window_end = address + count
         return any(address <= anchor < window_end for anchor in self._anchors)
 
     async def async_getValues(self, device_id, func_code, address, count: int = 1):
@@ -423,25 +451,27 @@ class SerialPacingContext:
         if func_code not in _REGISTER_READ_FUNC_CODES:
             return await self._core.async_getValues(device_id, func_code, address, count)
 
-        is_anchor = self._is_anchor_read(address, count)
+        is_cycle_start = self._is_cycle_start_read(address, count)
         have_pin = self._pinned_generation > 0 and self._pinned_snapshot is not None
 
-        # (c) FOLLOW-ON READ: a non-anchor read in an established cycle serves
-        # IMMEDIATELY and coherently from the pinned (generation, snapshot) pair —
-        # no wait, no pin advance. Every block of the sweep comes from the SAME
-        # frame the anchor pinned, so no cross-frame tear and no sweep-rate
-        # throttling by block count. If the pin cannot cover the window (odd /
-        # out-of-range read) fall through to the live core so it behaves exactly
-        # as before.
-        if not is_anchor and have_pin:
+        # (c) FOLLOW-ON READ: any non-cycle-start read in an established cycle —
+        # a SECONDARY power anchor (EM540 0x0012; TS65A 40099/40101/40103) or a
+        # non-anchor block — serves IMMEDIATELY and coherently from the pinned
+        # (generation, snapshot) pair: no wait, no pin advance. Every block of the
+        # sweep comes from the SAME frame the primary anchor pinned, so no
+        # cross-frame tear and no sweep-rate throttling by block count. If the pin
+        # cannot cover the window (odd / out-of-range read) fall through to the
+        # live core so it behaves exactly as before.
+        if not is_cycle_start and have_pin:
             sliced = self._slice_snapshot(self._pinned_snapshot, address, count)
             if sliced is not None:
                 return sliced
             return await self._core.async_getValues(device_id, func_code, address, count)
 
-        # (d) ANCHOR READ (or first-ever read before any pin exists): start of a
-        # new polling cycle. Bounded-wait for a generation strictly newer than the
-        # currently PINNED generation, then pin and serve from that pair. The
+        # (d) CYCLE-START (primary anchor) READ, or first-ever read before any pin
+        # exists: start of a new polling cycle. Bounded-wait for a generation
+        # strictly newer than the currently PINNED generation, then pin and serve
+        # from that pair (the single pin advance for this cycle). The
         # timeout is the per-request effective wait (Finding 2): min(configured
         # cap, the budget that leaves room to serialize this read's response
         # before the client's read deadline). Returns immediately if a newer
