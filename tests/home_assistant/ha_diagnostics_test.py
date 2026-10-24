@@ -92,7 +92,7 @@ def test_serial_read_rate_sensors_are_declared_enabled_hz_frequency():
     assert payload_obj["ts65a_serial_read_rate"] == 0.0
 
 
-def test_serial_read_rate_is_windowed_from_request_count_over_interval():
+def test_serial_read_rate_is_windowed_from_cycle_count_over_interval():
     from app.fronius.ts65a_slave_stats import Ts65aSlaveStats
 
     diagnostics = HADiagnostics(topic_prefix="test")
@@ -111,12 +111,14 @@ def test_serial_read_rate_is_windowed_from_request_count_over_interval():
     ):
         diagnostics.mqtt_data()
 
-    # 60 EM540 and 30 TS65A requests arrive before the next diagnostics emit,
-    # which lands 6s later (> DIAGNOSTICS_INTERVAL of 5s).
+    # 60 EM540 and 30 TS65A polling CYCLES complete (primary cycle-start pin
+    # advances) before the next diagnostics emit, which lands 6s later (>
+    # DIAGNOSTICS_INTERVAL of 5s). The Hz source is the cycle count, not the raw
+    # inbound-request count.
     for _ in range(60):
-        em_stats.serial.record_request(now=0.0)
+        em_stats.serial.record_cycle_read()
     for _ in range(30):
-        ts_stats.serial.record_request(now=0.0)
+        ts_stats.serial.record_cycle_read()
 
     with (
         patch.dict("sys.modules", {"uptime": SimpleNamespace(uptime=lambda: 1)}),
@@ -127,6 +129,40 @@ def test_serial_read_rate_is_windowed_from_request_count_over_interval():
 
     assert abs(payload_obj["em540_serial_read_rate"] - (60 / 6)) < 1e-9
     assert abs(payload_obj["ts65a_serial_read_rate"] - (30 / 6)) < 1e-9
+
+
+def test_serial_read_rate_ignores_inbound_requests_and_counts_only_cycles():
+    """The Hz read-rate must key off the primary cycle-start pin advance, not
+    every inbound request: a burst of sparse non-anchor follow-on reads
+    (record_request) must NOT bump the rate, while completed cycles
+    (record_cycle_read) do."""
+    diagnostics = HADiagnostics(topic_prefix="test")
+
+    em_stats = EM540SlaveStats()
+    diagnostics.set_em540_slave_stats(em_stats)
+
+    with (
+        patch.dict("sys.modules", {"uptime": SimpleNamespace(uptime=lambda: 1)}),
+        patch("app.home_assistant.ha_diagnostics.time.monotonic", side_effect=[100.0, 100.0]),
+    ):
+        diagnostics.mqtt_data()
+
+    # 50 raw inbound requests (several sparse reads per cycle) but only 10
+    # completed polling cycles over the 5s window.
+    for _ in range(50):
+        em_stats.serial.record_request(now=0.0)
+    for _ in range(10):
+        em_stats.serial.record_cycle_read()
+
+    with (
+        patch.dict("sys.modules", {"uptime": SimpleNamespace(uptime=lambda: 1)}),
+        patch("app.home_assistant.ha_diagnostics.time.monotonic", side_effect=[106.0, 106.0]),
+    ):
+        _, payload = diagnostics.mqtt_data()
+    payload_obj = json.loads(payload)
+
+    # Rate reflects the 10 cycles, NOT the 50 inbound requests.
+    assert abs(payload_obj["em540_serial_read_rate"] - (10 / 6)) < 1e-9
 
 
 def test_transport_display_names_distinguish_tcp_rtu_and_serial():

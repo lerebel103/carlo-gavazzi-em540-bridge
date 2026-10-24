@@ -844,6 +844,74 @@ class TestSerialPacing(unittest.TestCase):
 
         asyncio.run(scenario())
 
+    # -- Hz read-rate counter pinned to primary-anchor pin advance (COMMIT 4) --
+
+    def test_cycle_counter_increments_once_per_primary_anchor_pin_advance(self):
+        """The cycle-start counter (and the on_cycle_advance sink) must tick EXACTLY
+        once per primary cycle-start pin advance to a NEW generation — never on a
+        follow-on/non-anchor read, never on a repeat of the same generation."""
+
+        async def scenario():
+            core = _FakeCore()
+            helper = _FakePduHelper(circuit_open=False)
+            gate = FrameGate()
+            ticks: list[int] = []
+            ctx = SerialPacingContext(
+                core,
+                gate,
+                helper,
+                0.12,
+                reg_start_address=0,
+                anchors={0x0028, 0x0012},
+                primary_anchor=0x0028,
+                on_cycle_advance=lambda: ticks.append(1),
+            )
+
+            # --- Cycle 1: primary anchor pins gen 1 -> exactly one tick ---------
+            gate.publish(1, _snapshot(1, length=0x0200))
+            await asyncio.wait_for(ctx.async_getValues(1, 3, 0x0028, 2), timeout=1.0)
+            self.assertEqual(ctx.cycle_start_advances, 1)
+            self.assertEqual(len(ticks), 1)
+
+            # Follow-on reads in the same cycle (secondary power anchor + energy)
+            # must NOT tick, even though a newer generation is available.
+            gate.publish(2, _snapshot(2, length=0x0200))
+            await asyncio.sleep(0)
+            await asyncio.wait_for(ctx.async_getValues(1, 3, 0x0012, 2), timeout=0.01)
+            await asyncio.wait_for(ctx.async_getValues(1, 3, 0x0100, 2), timeout=0.01)
+            self.assertEqual(ctx.cycle_start_advances, 1, "follow-on reads must not tick the cycle counter")
+            self.assertEqual(len(ticks), 1)
+
+            # --- Cycle 2: next primary anchor advances to gen 2 -> one more tick -
+            await asyncio.wait_for(ctx.async_getValues(1, 3, 0x0028, 2), timeout=1.0)
+            self.assertEqual(ctx.cycle_start_advances, 2)
+            self.assertEqual(len(ticks), 2)
+
+            # A primary read with NO newer generation (jitter) must NOT tick.
+            await asyncio.wait_for(ctx.async_getValues(1, 3, 0x0028, 2), timeout=1.0)
+            self.assertEqual(ctx.cycle_start_advances, 2, "same-generation re-read must not tick")
+            self.assertEqual(len(ticks), 2)
+
+        asyncio.run(scenario())
+
+    def test_cycle_counter_not_bumped_by_unserved_scan_or_bit_reads(self):
+        """Unserved device-id scans and bit reads delegate to the core and must
+        NOT tick the cycle counter."""
+
+        async def scenario():
+            core, _helper, gate, ctx = self._make(anchors={0x0028}, max_wait_s=0.12)
+            ctx._primary_anchor = 0x0028
+            gate.publish(5, _snapshot(5, length=0x0030))
+            await asyncio.sleep(0)
+
+            # Unserved id scan at the anchor address.
+            await asyncio.wait_for(ctx.async_getValues(9, 3, 0x0028, 2), timeout=0.05)
+            # Bit read at the anchor address.
+            await asyncio.wait_for(ctx.async_getValues(1, 1, 0x0028, 2), timeout=0.05)
+            self.assertEqual(ctx.cycle_start_advances, 0, "scan/bit reads must not tick the cycle counter")
+
+        asyncio.run(scenario())
+
     def test_paced_read_within_defined_range_still_served_from_snapshot(self):
         """A valid paced read (all addresses defined) is still served atomically
         from the pinned snapshot — the B2 fix must not force a live-core read for

@@ -329,6 +329,9 @@ class Em540Slave(MeterDataListener):
             anchors=_SERIAL_PACING_ANCHORS,
             primary_anchor=_SERIAL_PACING_PRIMARY_ANCHOR,
             valid_addresses=self._valid_addresses,
+            # Hz 'Serial Read Rate' source: count one tick per primary cycle-start
+            # pin advance (one client polling cycle), not per inbound request.
+            on_cycle_advance=self._stats.serial.record_cycle_read,
         )
         return serial_server
 

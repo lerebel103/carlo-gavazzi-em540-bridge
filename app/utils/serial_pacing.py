@@ -61,7 +61,7 @@ preserved.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 
 from pymodbus.constants import ExcCodes
@@ -326,6 +326,7 @@ class SerialPacingContext:
         anchors: Iterable[int] | None = None,
         primary_anchor: int | None = None,
         valid_addresses: Iterable[int] | None = None,
+        on_cycle_advance: Callable[[], None] | None = None,
     ) -> None:
         self._core = core
         self._gate = gate
@@ -368,6 +369,23 @@ class SerialPacingContext:
         # read) waits once for a fresh frame and pins it.
         self._pinned_generation: int = 0
         self._pinned_snapshot: tuple[int, ...] | None = None
+        # Lock-free single-writer counter of PRIMARY cycle-start pin advances —
+        # incremented ONCE each time a primary cycle-start anchor read advances
+        # the pin to a strictly-NEWER generation (one tick per client polling
+        # cycle). This is the Hz 'Serial Read Rate' source: it tracks the real
+        # per-cycle poll rate, unlike a per-inbound-request count which overcounts
+        # the sparse multi-read cycles a Victron/Fronius client issues. Written
+        # only on the serial server loop (inside async_getValues, which runs
+        # there) and read lock-free by the diagnostics thread — a GIL-atomic int,
+        # so it never blocks the request path.
+        self.cycle_start_advances: int = 0
+        # Optional sink notified ONCE per primary cycle-start pin advance (the Hz
+        # 'Serial Read Rate' event). The bridge wires this to its
+        # SerialActivityTracker.record_cycle_read so the diagnostics layer can
+        # derive the windowed read-rate from the cycle count instead of the raw
+        # inbound-request count. Called only on the serial server loop (inside
+        # async_getValues), so it stays on the lock-free single-writer path.
+        self._on_cycle_advance = on_cycle_advance
         # Whether a PRIMARY cycle-start anchor read has ever advanced the pin for
         # this client. A client that drives pacing via the primary anchor sets
         # this True on its first cycle start, and its follow-on reads then stay
@@ -541,7 +559,18 @@ class SerialPacingContext:
             if self._pdu_helper.circuit_open:
                 return ExcCodes.DEVICE_BUSY
 
-        return await self._pin_and_serve(device_id, func_code, address, count)
+        previous_generation = self._pinned_generation
+        result = await self._pin_and_serve(device_id, func_code, address, count)
+        # Hz 'Serial Read Rate' source: count ONE tick when a PRIMARY cycle-start
+        # anchor read advances the pin to a strictly-newer generation (one per
+        # client polling cycle). Not bumped on a first-ever non-anchor read, a
+        # repeat of the same generation (jitter), or any follow-on read. Written
+        # only here on the serial server loop (lock-free, GIL-atomic int).
+        if is_cycle_start and self._pinned_generation > previous_generation:
+            self.cycle_start_advances += 1
+            if self._on_cycle_advance is not None:
+                self._on_cycle_advance()
+        return result
 
     async def _pin_and_serve(self, device_id, func_code, address, count):
         """Sample the gate's (generation, snapshot) pair, PIN it, and serve.

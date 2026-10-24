@@ -24,10 +24,14 @@ class HADiagnostics:
         self._last_mqtt_counter = 0
         self._mqtt_counter = 0
         # Windowed serial read-rate state, one per bridge. Mirrors the upstream
-        # 'Acq Rate' delta-count/delta-time pattern: the cumulative request count
-        # is sourced from each bridge's SerialActivityTracker.total_requests (bumped
-        # on the serial server loop in record_request — no tick-loop work), and the
-        # Hz value is recomputed once per DIAGNOSTICS_INTERVAL in mqtt_data().
+        # 'Acq Rate' delta-count/delta-time pattern: the cumulative count is
+        # sourced from each bridge's SerialActivityTracker.cycle_read_count — one
+        # tick per PRIMARY cycle-start pin advance (one client polling cycle),
+        # bumped on the serial server loop by the pacing context (no tick-loop
+        # work). The Hz value is recomputed once per DIAGNOSTICS_INTERVAL in
+        # mqtt_data(). Keyed off the power-register cycle-start anchor rather than
+        # every inbound request, so a client's sparse multi-read poll cycle counts
+        # as ONE refresh, not several.
         self._last_em540_serial_rate_timestamp = 0.0
         self._last_em540_serial_counter = 0
         self._last_ts65a_serial_rate_timestamp = 0.0
@@ -285,8 +289,11 @@ class HADiagnostics:
             enabled_by_default=True,
             display_name="TS65A Serial Disconnects",
         )
-        # Rate at which the downstream TS65A SERIAL client issues read requests,
-        # in Hz. Same windowed pattern as the EM540 serial read-rate / upstream
+        # Rate at which the downstream TS65A SERIAL client completes polling
+        # cycles, in Hz. Pinned to the power-register (cycle-start anchor 40097)
+        # pin advances — one tick per refreshed frame delivered — NOT per inbound
+        # request, so a Fronius client's sparse multi-read cycle counts as one
+        # refresh. Same windowed pattern as the EM540 serial read-rate / upstream
         # 'Acq Rate' sensors. 0.0 when serial is disabled.
         self.ts65a_serial_read_rate = Sensor(
             "TS65A Serial Read Rate",
@@ -436,11 +443,14 @@ class HADiagnostics:
             enabled_by_default=True,
             display_name="EM540 Serial Disconnects",
         )
-        # Rate at which the downstream EM540 SERIAL client issues read requests,
-        # in Hz. Mirrors the upstream 'Acq Rate' sensor so a user can SEE the
-        # serial client's poll rate (e.g. a Victron fastloop) and confirm the
-        # frame-latch is pacing it. 0.0 when serial is disabled (no requests
-        # recorded, so the windowed delta stays zero).
+        # Rate at which the downstream EM540 SERIAL client completes polling
+        # cycles, in Hz. Pinned to the power-register (cycle-start anchor 0x0028)
+        # pin advances — one tick per refreshed frame delivered — NOT per inbound
+        # request, so a Victron client's sparse multi-read cycle (power, then
+        # staggered voltage/current/energy) counts as one refresh. Mirrors the
+        # upstream 'Acq Rate' sensor so a user can SEE the serial client's true
+        # refresh rate and confirm the frame-latch is pacing it. 0.0 when serial
+        # is disabled (no cycles recorded, so the windowed delta stays zero).
         self.em540_serial_read_rate = Sensor(
             "EM540 Serial Read Rate",
             "Hz",
@@ -662,35 +672,39 @@ class HADiagnostics:
     def _update_serial_read_rate(
         self,
         sensor: Sensor,
-        total_requests: int,
+        cycle_count: int,
         last_timestamp_attr: str,
         last_counter_attr: str,
         now: float | None = None,
     ) -> None:
-        """Recompute a serial read-rate (Hz) from a cumulative request count.
+        """Recompute a serial read-rate (Hz) from a cumulative cycle count.
 
         Same windowed delta-count/delta-time pattern as the upstream 'Acq Rate'
         sensor: the rate is (delta count / delta time) measured over at least
-        DIAGNOSTICS_INTERVAL. ``total_requests`` is the bridge's
-        SerialActivityTracker.total_requests (bumped on the serial server loop,
-        read lock-free here). When serial is disabled no requests are recorded so
-        the delta stays zero and the sensor reads 0.0.
+        DIAGNOSTICS_INTERVAL. ``cycle_count`` is the bridge's
+        SerialActivityTracker.cycle_read_count — one tick per PRIMARY cycle-start
+        pin advance (one client polling cycle), bumped on the serial server loop
+        by the pacing context and read lock-free here. Keying off the cycle count
+        rather than every inbound request means a client's sparse multi-read poll
+        cycle counts as ONE refresh. When serial is disabled (or pacing never
+        advances the pin) no cycles are recorded so the delta stays zero and the
+        sensor reads 0.0.
         """
         now = time.monotonic() if now is None else now
         last_timestamp = getattr(self, last_timestamp_attr)
         if last_timestamp == 0.0:
             setattr(self, last_timestamp_attr, now)
-            setattr(self, last_counter_attr, total_requests)
+            setattr(self, last_counter_attr, cycle_count)
             sensor.update_value(0.0)
             return
 
         elapsed = now - last_timestamp
         if elapsed > DIAGNOSTICS_INTERVAL:
             last_counter = getattr(self, last_counter_attr)
-            rate = (total_requests - last_counter) / elapsed
+            rate = (cycle_count - last_counter) / elapsed
             sensor.update_value(rate)
             setattr(self, last_timestamp_attr, now)
-            setattr(self, last_counter_attr, total_requests)
+            setattr(self, last_counter_attr, cycle_count)
 
     def record_mqtt_publish(self, published_at: float | None = None):
         now = time.monotonic() if published_at is None else published_at
@@ -750,7 +764,7 @@ class HADiagnostics:
             self.em540_serial_disconnect_count.update_value(self._em540_slave_stats.serial.disconnect_count)
             self._update_serial_read_rate(
                 self.em540_serial_read_rate,
-                self._em540_slave_stats.serial.total_requests,
+                self._em540_slave_stats.serial.cycle_read_count,
                 "_last_em540_serial_rate_timestamp",
                 "_last_em540_serial_counter",
             )
@@ -787,7 +801,7 @@ class HADiagnostics:
             self.ts65a_serial_disconnect_count.update_value(self._ts65a_slave_stats.serial.disconnect_count)
             self._update_serial_read_rate(
                 self.ts65a_serial_read_rate,
-                self._ts65a_slave_stats.serial.total_requests,
+                self._ts65a_slave_stats.serial.cycle_read_count,
                 "_last_ts65a_serial_rate_timestamp",
                 "_last_ts65a_serial_counter",
             )
