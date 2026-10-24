@@ -15,11 +15,28 @@ from app.carlo_gavazzi.em540_slave_stats import EM540SlaveStats
 from app.carlo_gavazzi.meter_data import MeterData
 from app.utils.idle_connection_reaper import IdleConnectionReaper
 from app.utils.pdu_helper import PduHelper
+from app.utils.serial_pacing import (
+    FrameGate,
+    SerialPacingContext,
+    SerialWireBudget,
+    valid_register_addresses,
+)
 
 REG_OFFSET = 0  # SimDevice uses raw 0-based Modbus protocol addresses directly
 
 # Holding register function code used for async_setValues/async_getValues.
 _FC_HOLDING_REGISTER = 3
+
+# Serial frame-latching ANCHOR registers (0-based Modbus protocol addresses in
+# the served EM540 map). These are the POWER registers a real client reads EVERY
+# polling cycle, so they are the per-cycle heartbeat the serial latch paces off:
+# an anchor-overlapping read starts a new cycle (wait for a fresh upstream frame
+# and pin it); every other block of the cycle serves coherently from that pin.
+# Confirmed against Victron dbus-cgwacs (Em540Commands), which reads system power
+# (0x0028) and the per-phase power block (0x0012) on every cycle at interval 0
+# while voltage/current, energy and frequency are staggered. This is a protocol
+# property of the served map, not a user tunable.
+_SERIAL_PACING_ANCHORS: frozenset[int] = frozenset({0x0028, 0x0012})
 
 # Some downstream EM540 clients issue contiguous bulk reads that span sparse gaps.
 # Populate these compatibility windows with explicit zero placeholders so reads
@@ -165,6 +182,16 @@ class Em540Slave(MeterDataListener):
         self._server_loop: asyncio.AbstractEventLoop | None = None
         self._servers: list[ModbusTcpServer | ModbusSerialServer] = [self._rtu_server, self._tcp_server]
 
+        # Serial frame-latching: a per-bridge monotonic generation counter bumped
+        # on each successful write, and a gate that wakes a blocked serial read on
+        # the dedicated server loop. The gate is created in _build_serial_server
+        # (on the server loop) so its asyncio primitive binds to the right loop.
+        # Latching is serial-only and structural (only serial_server.context is the
+        # pacing proxy); TCP/RTU-over-TCP are unaffected.
+        self._frame_generation: int = 0
+        self._serial_gate: FrameGate | None = None
+        self._serial_pacing_max_wait_s: float = self._effective_serial_pacing_max_wait_s()
+
         # Direct access to the SimRuntime register array for lock-based writes.
         # This avoids routing writes through the server event loop (which caused
         # starvation deadlocks when many downstream connections saturated the loop).
@@ -178,6 +205,11 @@ class Em540Slave(MeterDataListener):
             raise RuntimeError(f"SimRuntime has no register block (available keys: {list(sim_runtime.block.keys())})")
         self._reg_start_address: int = sim_runtime.block[block_key][0]
         self._registers: list[int] = sim_runtime.block[block_key][2]
+        # Addresses the datastore actually defines, for the serial pacing proxy's
+        # ILLEGAL_ADDRESS fidelity (Finding B2). Computed once from the block's
+        # validity flags; a paced read into an undefined gap falls through to the
+        # core instead of serving snapshot zeros.
+        self._valid_addresses: frozenset[int] = valid_register_addresses(sim_runtime, block_key)
         self._reg_lock: Lock = Lock()
 
         # Idle connection reapers — close connections with no PDU activity
@@ -228,6 +260,32 @@ class Em540Slave(MeterDataListener):
             self._stats.serial.record_request(time.monotonic())
         return self._pdu_helper.on_pdu(flag, pdu)
 
+    def _effective_serial_pacing_max_wait_s(self) -> float:
+        """Resolve the configured serial frame-latching cap from config.
+
+        Returns 0.0 (disabled, pass-through) when pacing is disabled via
+        ``pacing_enabled=False`` or a non-positive ``pacing_max_wait_s``;
+        otherwise the configured ``pacing_max_wait_s``. The per-request wire
+        budget that bounds this cap to fit the serial client's read deadline is
+        applied inside ``SerialPacingContext`` via the ``SerialWireBudget`` built
+        in ``_serial_wire_budget`` (Finding 2).
+        """
+        serial_cfg = self._config.serial
+        if not getattr(serial_cfg, "pacing_enabled", True):
+            return 0.0
+        return max(0.0, getattr(serial_cfg, "pacing_max_wait_s", 0.0))
+
+    def _serial_wire_budget(self) -> SerialWireBudget:
+        """Build the per-request serialization budget from the serial line settings."""
+        serial_cfg = self._config.serial
+        return SerialWireBudget(
+            baudrate=serial_cfg.baudrate,
+            bytesize=serial_cfg.bytesize,
+            parity=serial_cfg.parity,
+            stopbits=serial_cfg.stopbits,
+            client_read_timeout_ms=getattr(serial_cfg, "client_read_timeout_ms", 200),
+        )
+
     def _build_serial_server(self) -> ModbusSerialServer:
         """Construct the downstream serial server.
 
@@ -249,7 +307,21 @@ class Em540Slave(MeterDataListener):
             trace_pdu=self._serial_trace_pdu,
             trace_connect=self._serial_trace_connect,
         )
-        serial_server.context = self._rtu_server.context
+        # Install the serial-only frame-latching proxy. Created HERE because this
+        # method runs on the dedicated server loop, so the gate's asyncio primitive
+        # binds to that loop. TCP (_tcp_server) and RTU-over-TCP (_rtu_server) keep
+        # the plain shared SimCore context untouched — serial-only is structural.
+        self._serial_gate = FrameGate()
+        serial_server.context = SerialPacingContext(
+            self._rtu_server.context,
+            self._serial_gate,
+            self._pdu_helper,
+            self._serial_pacing_max_wait_s,
+            reg_start_address=self._reg_start_address,
+            wire_budget=self._serial_wire_budget(),
+            anchors=_SERIAL_PACING_ANCHORS,
+            valid_addresses=self._valid_addresses,
+        )
         return serial_server
 
     def add_stats_listener(self, listener: Callable[[EM540SlaveStats], None]) -> None:
@@ -432,6 +504,23 @@ class Em540Slave(MeterDataListener):
         # Also keep it open if any write failed (prevents serving stale/partial data).
         if self._static_synced and write_ok:
             self._pdu_helper.data_received(data.timestamp)
+            # A fresh frame was published to the downstream registers. Bump the
+            # serial frame-latching generation (int increment on the listener
+            # thread) and wake any blocked serial read via a non-blocking hop onto
+            # the server loop. NEVER bumped on the failed/partial-write branch.
+            self._frame_generation += 1
+            loop = self._server_loop
+            if loop is not None and self._config.serial.enabled and self._serial_gate is not None:
+                # Finding 1: publish the generation TOGETHER with an immutable
+                # snapshot of the exact register image just committed, so the
+                # serial proxy returns the bytes that correspond to the generation
+                # it records as served (no torn/duplicate frame across this hop).
+                # Listener-thread work stays non-blocking: a single tuple() copy of
+                # the register list under the existing lock + an int bump + a
+                # call_soon_threadsafe hop. No await, no new blocking.
+                with self._reg_lock:
+                    snapshot = tuple(self._registers)
+                loop.call_soon_threadsafe(self._serial_gate.publish, self._frame_generation, snapshot)
         else:
             self._pdu_helper.upstream_failed()
         self._sync_pdu_stats()

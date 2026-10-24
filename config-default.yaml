@@ -159,6 +159,36 @@ em540_slave:
     stopbits: 1
     timeout: 0.5
     handle_local_echo: false
+    # Serial-only frame-latching (ANCHOR-based). A downstream serial client can
+    # poll faster than the upstream meter refreshes, which would otherwise return
+    # DUPLICATE frames. Pacing keys off the POWER ANCHOR registers the client reads
+    # every polling cycle (EM540: 0x0028 system power, 0x0012 per-phase power — per
+    # Victron dbus-cgwacs). A read covering a power anchor starts a new cycle: it
+    # blocks until a NEW upstream frame lands, then PINS that frame. Other reads in
+    # the same sweep (voltage/current, energy, ...) serve coherently from the
+    # pinned frame with no wait, so every block comes from the same frame and the
+    # sweep rate tracks the upstream rate (not divided by block count). The anchors
+    # are a protocol property of the served map, not a tunable. TCP and
+    # RTU-over-TCP clients are unaffected.
+    pacing_enabled: true
+    # Maximum seconds a serial read blocks waiting for a fresh frame. Default 0.12s
+    # ~= 1.5x the ~80ms (12.5Hz) upstream period and MUST stay well below the real
+    # downstream serial client READ TIMEOUT of 200ms (and below this bridge's
+    # serial.timeout above and the 0.5s downstream breaker update_timeout). A value
+    # <= 0 disables latching (today's behaviour, duplicate frames possible).
+    # Validation rejects pacing_max_wait_s >= serial.timeout when serial and pacing
+    # are both enabled.
+    pacing_max_wait_s: 0.12
+    # The downstream serial CLIENT's read timeout (milliseconds) — the real wire
+    # deadline the frame latch must respect, NOT the adapter `timeout` above.
+    # A latched read first waits for a fresh frame and then clocks the response
+    # out over the serial line; at 9600 8N1 (10 bits/byte) a worst-case response
+    # takes well over 100ms to serialize. The effective latch wait is therefore
+    # clamped below client_read_timeout_ms - serialization_time - turnaround_margin,
+    # and validation rejects a pacing_max_wait_s that cannot fit the response
+    # inside this deadline. Default 200ms matches a typical serial client read
+    # timeout; raise it only if the real client tolerates longer reads.
+    client_read_timeout_ms: 200
 
 ts65a_slave:
   # The TS65A slave data model can be served over TCP and/or an optional
@@ -192,6 +222,35 @@ ts65a_slave:
     stopbits: 1
     timeout: 0.5
     handle_local_echo: false
+    # Serial-only frame-latching (ANCHOR-based). A downstream serial client can
+    # poll faster than the upstream meter refreshes, which would otherwise return
+    # DUPLICATE frames. Pacing keys off the POWER ANCHOR registers the client reads
+    # every polling cycle (TS65A: Ac power 40097 and per-phase AC power 40099 /
+    # 40101 / 40103). A read covering a power anchor starts a new cycle: it blocks
+    # until a NEW upstream frame lands, then PINS that frame. Other reads in the
+    # same sweep serve coherently from the pinned frame with no wait, so every
+    # block comes from the same frame and the sweep rate tracks the upstream rate
+    # (not divided by block count). The anchors are a protocol property of the
+    # served map, not a tunable. TCP clients are unaffected.
+    pacing_enabled: true
+    # Maximum seconds a serial read blocks waiting for a fresh frame. Default 0.12s
+    # ~= 1.5x the ~80ms (12.5Hz) upstream period and MUST stay well below the real
+    # downstream serial client READ TIMEOUT of 200ms (and below this bridge's
+    # serial.timeout above and the 0.5s downstream breaker update_timeout). A value
+    # <= 0 disables latching (today's behaviour, duplicate frames possible).
+    # Validation rejects pacing_max_wait_s >= serial.timeout when serial and pacing
+    # are both enabled.
+    pacing_max_wait_s: 0.12
+    # The downstream serial CLIENT's read timeout (milliseconds) — the real wire
+    # deadline the frame latch must respect, NOT the adapter `timeout` above.
+    # A latched read first waits for a fresh frame and then clocks the response
+    # out over the serial line; at 9600 8N1 (10 bits/byte) a worst-case response
+    # takes well over 100ms to serialize. The effective latch wait is therefore
+    # clamped below client_read_timeout_ms - serialization_time - turnaround_margin,
+    # and validation rejects a pacing_max_wait_s that cannot fit the response
+    # inside this deadline. Default 200ms matches a typical serial client read
+    # timeout; raise it only if the real client tolerates longer reads.
+    client_read_timeout_ms: 200
 
 mqtt:
   # Whether to enable MQTT integration from the top level.

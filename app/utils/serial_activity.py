@@ -14,6 +14,9 @@ class SerialActivityTracker:
       - ``connect_count`` / ``disconnect_count``: incremented on the rising
         (idle -> active) and falling (active -> idle) edges of ``active``, so
         they count observed client sessions over time.
+      - ``total_requests``: a monotonic cumulative count of observed requests,
+        from which the diagnostics layer derives a windowed read-rate (Hz),
+        mirroring the upstream master's 'Acq Rate' sensor.
 
     Concurrency (lock-free, matching the master's snapshot model): ``record_request``
     is called from the serial PDU trace hook on the server thread and must not
@@ -31,14 +34,22 @@ class SerialActivityTracker:
         self.active: bool = False
         self.connect_count: int = 0
         self.disconnect_count: int = 0
+        # Monotonic cumulative count of serial requests observed. Single-writer
+        # on the serial server loop (record_request), read lock-free by the
+        # diagnostics thread to derive a windowed read-rate in Hz — the same
+        # counter/delta pattern the upstream 'Acq Rate' sensor uses. An atomic
+        # int increment under CPython's GIL, so it never blocks the request path.
+        self.total_requests: int = 0
 
     def record_request(self, now: float) -> None:
         """Record that a serial request was observed at monotonic time ``now``.
 
-        Lock-free hot path: a single atomic timestamp publication. See the class
-        docstring for the concurrency model.
+        Lock-free hot path: a single atomic timestamp publication plus a
+        cumulative request-count bump. See the class docstring for the
+        concurrency model.
         """
         self._last_request_monotonic = now
+        self.total_requests += 1
 
     def evaluate(self, idle_timeout: float, now: float) -> None:
         """Recompute ``active`` and update edge counters.

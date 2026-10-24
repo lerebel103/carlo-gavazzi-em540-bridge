@@ -16,6 +16,12 @@ from app.fronius.ts65a_data import Ts65aMeterData
 from app.fronius.ts65a_slave_stats import Ts65aSlaveStats
 from app.utils.idle_connection_reaper import IdleConnectionReaper
 from app.utils.pdu_helper import PduHelper
+from app.utils.serial_pacing import (
+    FrameGate,
+    SerialPacingContext,
+    SerialWireBudget,
+    valid_register_addresses,
+)
 
 logger = logging.getLogger("ts65a-slave")
 
@@ -32,6 +38,20 @@ _COMPAT_ZERO_REGISTER = 50000
 # Pre-compiled struct for FLOAT32 → 2 registers (big-endian)
 _STRUCT_FLOAT32 = struct.Struct(">f")
 _STRUCT_2H = struct.Struct(">2H")
+
+# Serial frame-latching ANCHOR registers. These are the SunSpec holding-register
+# NUMBERS for AC power / per-phase AC power as served in _TS65A_STATIC_REGISTERS
+# (Ac power value 40097 plus the three per-phase AC power starts 40099/40101/
+# 40103) — the FLOAT32 power values a real Fronius client reads every polling
+# cycle. (Unlike the EM540 map, this proprietary TS65A layout is keyed directly
+# by those SunSpec register numbers, so the anchor values ARE the served
+# addresses — they are not register_number-1 protocol offsets.) They are the
+# per-cycle heartbeat the serial latch paces off: an anchor-overlapping read
+# starts a new cycle (wait for a fresh upstream frame and pin it); every other
+# block of the cycle serves coherently from that pin. Mirrors the EM540
+# power-anchor rationale using the Fronius equivalent power registers. This is a
+# protocol property of the served map, not a user tunable.
+_SERIAL_PACING_ANCHORS: frozenset[int] = frozenset({40097, 40099, 40101, 40103})
 
 # Static register layout for the Fronius Smart Meter TS 65A-3 SunSpec model.
 # Addresses are 0-based Modbus protocol addresses (register number - 1).
@@ -228,6 +248,15 @@ class Ts65aSlaveBridge(MeterDataListener):
         self._server_loop: asyncio.AbstractEventLoop | None = None
         self._servers: list[ModbusTcpServer | ModbusSerialServer] = [self._server]
 
+        # Serial frame-latching: identical mechanism to the EM540 bridge. A
+        # per-bridge monotonic generation counter bumped on each successful write,
+        # and a gate (created in _build_serial_server on the server loop) that
+        # wakes a blocked serial read. Serial-only and structural — the TCP server
+        # (_server) context is untouched.
+        self._frame_generation: int = 0
+        self._serial_gate: FrameGate | None = None
+        self._serial_pacing_max_wait_s: float = self._effective_serial_pacing_max_wait_s()
+
         # Direct access to the SimRuntime register array for lock-based writes.
         # This avoids routing writes through the server event loop (which caused
         # starvation deadlocks when many downstream connections saturated the loop).
@@ -239,6 +268,11 @@ class Ts65aSlaveBridge(MeterDataListener):
             raise RuntimeError(f"SimRuntime has no register block (available keys: {list(sim_runtime.block.keys())})")
         self._reg_start_address: int = sim_runtime.block[block_key][0]
         self._registers: list[int] = sim_runtime.block[block_key][2]
+        # Addresses the datastore actually defines, for the serial pacing proxy's
+        # ILLEGAL_ADDRESS fidelity (Finding B2). The TS65A map is sparse (e.g.
+        # 50000 is served but 49999 is an undefined gap), so a paced read into a
+        # gap must fall through to the core instead of serving snapshot zeros.
+        self._valid_addresses: frozenset[int] = valid_register_addresses(sim_runtime, block_key)
         self._reg_lock: Lock = Lock()
 
         # Idle connection reaper — close connections with no PDU activity
@@ -275,6 +309,32 @@ class Ts65aSlaveBridge(MeterDataListener):
             self._stats.serial.record_request(time.monotonic())
         return self._pdu_helper.on_pdu(flag, pdu)
 
+    def _effective_serial_pacing_max_wait_s(self) -> float:
+        """Resolve the configured serial frame-latching cap from config.
+
+        Returns 0.0 (disabled, pass-through) when pacing is disabled via
+        ``pacing_enabled=False`` or a non-positive ``pacing_max_wait_s``;
+        otherwise the configured ``pacing_max_wait_s``. The per-request wire
+        budget that bounds this cap to fit the serial client's read deadline is
+        applied inside ``SerialPacingContext`` via the ``SerialWireBudget`` built
+        in ``_serial_wire_budget`` (Finding 2).
+        """
+        serial_cfg = self._config.serial
+        if not getattr(serial_cfg, "pacing_enabled", True):
+            return 0.0
+        return max(0.0, getattr(serial_cfg, "pacing_max_wait_s", 0.0))
+
+    def _serial_wire_budget(self) -> SerialWireBudget:
+        """Build the per-request serialization budget from the serial line settings."""
+        serial_cfg = self._config.serial
+        return SerialWireBudget(
+            baudrate=serial_cfg.baudrate,
+            bytesize=serial_cfg.bytesize,
+            parity=serial_cfg.parity,
+            stopbits=serial_cfg.stopbits,
+            client_read_timeout_ms=getattr(serial_cfg, "client_read_timeout_ms", 200),
+        )
+
     def _build_serial_server(self) -> ModbusSerialServer:
         """Construct the downstream serial server.
 
@@ -296,7 +356,21 @@ class Ts65aSlaveBridge(MeterDataListener):
             trace_pdu=self._serial_trace_pdu,
             trace_connect=self._serial_trace_connect,
         )
-        serial_server.context = self._server.context
+        # Install the serial-only frame-latching proxy. Created HERE because this
+        # method runs on the dedicated server loop, so the gate's asyncio primitive
+        # binds to that loop. The TCP server (_server) context is untouched —
+        # serial-only is structural.
+        self._serial_gate = FrameGate()
+        serial_server.context = SerialPacingContext(
+            self._server.context,
+            self._serial_gate,
+            self._pdu_helper,
+            self._serial_pacing_max_wait_s,
+            reg_start_address=self._reg_start_address,
+            wire_budget=self._serial_wire_budget(),
+            anchors=_SERIAL_PACING_ANCHORS,
+            valid_addresses=self._valid_addresses,
+        )
         return serial_server
 
     def add_stats_listener(self, listener: Callable[["Ts65aSlaveStats"], None]):
@@ -461,6 +535,23 @@ class Ts65aSlaveBridge(MeterDataListener):
         # stale/partial data after an internal write failure.
         if write_ok:
             self._pdu_helper.data_received(data.timestamp)
+            # A fresh (smoothed) frame was published to the downstream registers.
+            # Bump the serial frame-latching generation and wake any blocked serial
+            # read via a non-blocking hop onto the server loop. NEVER bumped on the
+            # failed-write branch.
+            self._frame_generation += 1
+            loop = self._server_loop
+            if loop is not None and self._config.serial.enabled and self._serial_gate is not None:
+                # Finding 1: publish the generation TOGETHER with an immutable
+                # snapshot of the exact register image just committed, so the
+                # serial proxy returns the bytes that correspond to the generation
+                # it records as served (no torn/duplicate frame across this hop).
+                # Listener-thread work stays non-blocking: a single tuple() copy of
+                # the register list under the existing lock + an int bump + a
+                # call_soon_threadsafe hop. No await, no new blocking.
+                with self._reg_lock:
+                    snapshot = tuple(self._registers)
+                loop.call_soon_threadsafe(self._serial_gate.publish, self._frame_generation, snapshot)
         else:
             self._pdu_helper.upstream_failed()
         self._sync_pdu_stats()

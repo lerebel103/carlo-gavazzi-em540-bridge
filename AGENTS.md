@@ -70,6 +70,64 @@ Notes:
   requests arrive within `serial_idle_timeout`, and connect/disconnect counters increment on activity
   edges evaluated at diagnostics cadence. TCP and RTU-over-TCP channels still use real transport
   connect/disconnect events.
+- Downstream SERIAL reads are frame-latched to the upstream refresh rate so serial clients never
+  receive duplicate frames (a serial client can poll faster than the meter refreshes). Each bridge
+  keeps a monotonic `self._frame_generation` counter, bumped in `new_data` ONLY on the successful-write
+  branch (next to `data_received`); after the bump it wakes the serial read via
+  `self._server_loop.call_soon_threadsafe(gate.publish, generation, snapshot)` (non-blocking
+  listener-thread work only). A shared async context proxy (`app/utils/serial_pacing.py` — `FrameGate` +
+  `SerialPacingContext`, IDENTICAL for both bridges) is installed ONLY on `serial_server.context`;
+  TCP and RTU-over-TCP keep the plain shared `SimCore` and are byte-for-byte unaffected (serial-only
+  scoping is structural, not a runtime guard).
+- Pacing is **ANCHOR-BASED**, because real serial clients split one polling cycle into MULTIPLE
+  separate reads (power block, then voltage/current, then energy). Each bridge supplies a set of
+  ANCHOR register start addresses (0-based) via the `anchors` constructor arg — the POWER registers a
+  real client polls EVERY cycle:
+  - EM540 (`em540_slave_bridge._SERIAL_PACING_ANCHORS`): `{0x0028 (system power), 0x0012 (per-phase
+    power block start)}`, confirmed from Victron dbus-cgwacs `Em540Commands` (system + per-phase power
+    read every cycle at interval 0; voltage/current, energy and frequency staggered).
+  - TS65A (`ts65a_slave_bridge._SERIAL_PACING_ANCHORS`): `{40097, 40099, 40101, 40103}` (Ac power
+    value + per-phase AC power starts), the Fronius equivalent power registers.
+  These are a protocol property of the served map, not user tunables. A read is an anchor read when
+  any anchor address falls in `range(address, address + count)` (overlap on the start address is
+  sufficient).
+- On each gated read: an ANCHOR read starts a new polling cycle — it bounded-waits for a generation
+  STRICTLY NEWER than the currently PINNED generation, then PINS that `(generation, snapshot)` pair
+  and serves from it (this is what paces the sweep to the upstream rate, one pin step per sweep). A
+  NON-anchor read is a follow-on in the same cycle — it serves IMMEDIATELY and coherently from the
+  pinned pair with NO wait, so every block of a sweep comes from the SAME frame (no cross-frame tear,
+  and the sweep rate is NOT divided by the number of blocks as a per-read cursor would do). The
+  first-ever read before any pin exists behaves like today's first read (wait once for a fresh frame
+  and pin it), so startup is covered.
+- The proxy's `async_getValues` remains stale-breaker-first (returns `ExcCodes.DEVICE_BUSY`
+  immediately when the tier-1 breaker is open — never blocks a doomed request); the anchor bounded
+  wait uses `asyncio.wait_for(..., effective_wait_s)` where `effective_wait_s = min(pacing_max_wait_s,
+  per-request SerialWireBudget)`; on timeout it serves the current frame (one possible duplicate on
+  jitter) unless the breaker opened during the wait (fail-closed). The `(generation, snapshot)` pair
+  is published together and sampled as one unit, so the pinned generation always matches the bytes
+  returned. Writes (`async_setValues`) are a straight pass-through (never gated). The gate's asyncio
+  primitive is created on the dedicated server loop (in `_build_serial_server`) so it binds to the
+  right loop, and the serial await yields that loop so co-resident TCP/RTU servers are never starved.
+  A single per-serial-server pin suffices (serial is single-request, half-duplex). Configurable per
+  bridge via `*_slave.serial.pacing_max_wait_s` (default 0.12s; `<= 0` or `pacing_enabled: false`
+  disables latching, pure pass-through) which MUST be strictly less than `serial.timeout` (validated).
+  This preserves the staleness ladder (the latch sits before the datastore read and defers to tier 1)
+  and does not touch the 0x000B overlay or the production parse/overlay path.
+- The snapshot fast-path is scoped to **register reads only** (FC3 read-holding, FC4 read-input).
+  The proxy replaces the serial server's WHOLE context, so bit reads (FC1 read-coils, FC2
+  read-discrete-inputs) and any other func code reach it too; those fall through to the real core so
+  they keep correct datastore semantics/exception. A register read whose window touches an address
+  the datastore does NOT define also falls through to the core so it raises the correct
+  `ILLEGAL_ADDRESS` (the flat snapshot tuple carries no validity flags and would otherwise serve
+  zeros for a map gap — e.g. a TS65A read at 49999). The defined-address set is computed once from
+  the SimRuntime block validity flags (`serial_pacing.valid_register_addresses`). Valid register
+  reads are still served atomically from the pinned `(generation, snapshot)` pair — the fallthrough
+  is scoped to the invalid/non-register cases so it never breaks the atomic frame guarantee.
+- Each downstream serial client's observed poll rate is exposed as a Home Assistant diagnostic
+  sensor per bridge ("EM540 Serial Read Rate" / "TS65A Serial Read Rate", Hz, enabled by default),
+  computed in `ha_diagnostics` with the SAME windowed delta-count/delta-time pattern as the upstream
+  "Acq Rate" sensor. The cumulative count is `SerialActivityTracker.total_requests`, bumped on the
+  serial server loop in `record_request` (no tick-loop/listener work added).
 
 ## Register Layout Invariants (validated against production)
 
@@ -152,7 +210,8 @@ and would otherwise keep every wall-clock breaker satisfied), not the only thing
 - `app/home_assistant/ha_bridge.py`: MQTT bridge for Home Assistant
 - `app/home_assistant/ha_diagnostics.py`: diagnostic sensor definitions and publication
 - `app/utils/pdu_helper.py`: stale-data circuit breaker plus served-ID-aware exception logging for downstream Modbus requests
-- `app/utils/serial_activity.py`: `SerialActivityTracker` — infers downstream serial-client presence from request activity
+- `app/utils/serial_activity.py`: `SerialActivityTracker` — infers downstream serial-client presence from request activity; also exposes a monotonic `total_requests` count for the serial read-rate diagnostic
+- `app/utils/serial_pacing.py`: serial-only frame-latching proxy (`FrameGate` + `SerialPacingContext`) and `valid_register_addresses` helper; anchor-based pacing, register-read-only snapshot fast-path
 
 ## Testing Guidance
 
