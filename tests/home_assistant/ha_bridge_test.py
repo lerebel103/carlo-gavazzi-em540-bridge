@@ -172,6 +172,263 @@ class TestHABridge(unittest.TestCase):
         self.assertTrue(self.bridge._availability_dirty)
         self.bridge._condition.notify_all.assert_called_once()
 
+    # -- HA/MQTT wall-clock freshness watchdog --
+
+    def test_freshness_watchdog_goes_offline_when_snapshot_too_old(self):
+        # Data available, a frame was received, but its wall-clock age exceeds
+        # ha_max_stale_s: the watchdog must mark the bridge offline WITHOUT any
+        # read_failed() call. Mock the condition so _set_data_available doesn't
+        # need a real lock; capture that the offline transition path fires.
+        self.bridge._mqtt_config.ha_max_stale_s = 3.0
+        self.bridge._data_available = True
+        self.bridge._condition = MagicMock()
+        snapshot = self.bridge._front_snapshot
+        snapshot.timestamp = 100.0
+
+        # now is 4s later -> age 4.0 > 3.0
+        self.bridge._evaluate_freshness_locked(snapshot, 104.0)
+
+        self.assertFalse(self.bridge._data_available)
+        self.assertTrue(self.bridge._availability_dirty)
+        self.bridge._condition.notify_all.assert_called_once()
+
+    def test_freshness_watchdog_does_not_trip_when_fresh(self):
+        self.bridge._mqtt_config.ha_max_stale_s = 3.0
+        self.bridge._data_available = True
+        self.bridge._condition = MagicMock()
+        snapshot = self.bridge._front_snapshot
+        snapshot.timestamp = 100.0
+
+        # age 2.0 <= 3.0 -> stays online
+        self.bridge._evaluate_freshness_locked(snapshot, 102.0)
+
+        self.assertTrue(self.bridge._data_available)
+        self.assertFalse(self.bridge._availability_dirty)
+
+    def test_freshness_watchdog_does_not_spam_offline(self):
+        # Repeated evaluations while already stale must not re-publish offline:
+        # _set_data_available(False) early-returns once already offline, so no
+        # further notify_all / availability_dirty churn occurs after the first.
+        self.bridge._mqtt_config.ha_max_stale_s = 3.0
+        self.bridge._data_available = True
+        self.bridge._condition = MagicMock()
+        snapshot = self.bridge._front_snapshot
+        snapshot.timestamp = 100.0
+
+        self.bridge._evaluate_freshness_locked(snapshot, 104.0)
+        self.assertFalse(self.bridge._data_available)
+        self.assertEqual(self.bridge._condition.notify_all.call_count, 1)
+
+        # Clear the dirty flag as the notify loop would after publishing, then
+        # evaluate again while still stale: must be a no-op (idempotent).
+        self.bridge._availability_dirty = False
+        self.bridge._evaluate_freshness_locked(snapshot, 110.0)
+
+        self.assertFalse(self.bridge._data_available)
+        self.assertFalse(self.bridge._availability_dirty)
+        self.assertEqual(self.bridge._condition.notify_all.call_count, 1)
+
+    def test_freshness_watchdog_recovers_on_fresh_frame(self):
+        import asyncio
+
+        # Start stale/offline.
+        self.bridge._mqtt_config.ha_max_stale_s = 3.0
+        self.bridge._data_available = True
+        self.bridge._condition = MagicMock()
+        snapshot = self.bridge._front_snapshot
+        snapshot.timestamp = 100.0
+        self.bridge._evaluate_freshness_locked(snapshot, 104.0)
+        self.assertFalse(self.bridge._data_available)
+
+        # A genuinely fresh frame restores availability and publishing resumes.
+        data = MeterData()
+        data._timestamp = 200.0
+        data.frame.static_reg_map[0x5000].values = [
+            0x3142,
+            0x3344,
+            0x3546,
+            0x3748,
+            0x3949,
+            0x4141,
+            0x4242,
+            0x4343,
+        ]
+        asyncio.run(self.bridge.new_data(data))
+        self.assertTrue(self.bridge._data_available)
+
+        # Evaluating the fresh snapshot shortly after keeps it online.
+        self.bridge._evaluate_freshness_locked(self.bridge._front_snapshot, 200.5)
+        self.assertTrue(self.bridge._data_available)
+
+    def test_freshness_watchdog_disabled_when_threshold_non_positive(self):
+        # ha_max_stale_s <= 0 disables the watchdog: never trips regardless of age.
+        self.bridge._mqtt_config.ha_max_stale_s = 0
+        self.bridge._data_available = True
+        self.bridge._condition = MagicMock()
+        snapshot = self.bridge._front_snapshot
+        snapshot.timestamp = 100.0
+
+        self.bridge._evaluate_freshness_locked(snapshot, 1_000_000.0)
+
+        self.assertTrue(self.bridge._data_available)
+        self.assertFalse(self.bridge._availability_dirty)
+
+    def test_freshness_watchdog_ignores_pre_first_frame(self):
+        # Before any frame (timestamp == 0) the watchdog must not trip, preserving
+        # startup semantics.
+        self.bridge._mqtt_config.ha_max_stale_s = 3.0
+        self.bridge._data_available = True
+        self.bridge._condition = MagicMock()
+        snapshot = self.bridge._front_snapshot
+        snapshot.timestamp = 0.0
+
+        self.bridge._evaluate_freshness_locked(snapshot, 1_000_000.0)
+
+        self.assertTrue(self.bridge._data_available)
+        self.assertFalse(self.bridge._availability_dirty)
+
+    # -- Finding 3: a concurrent recovery must win over a late offline flip --
+
+    def test_freshness_watchdog_recovery_wins_over_stale_capture(self):
+        # Reproduce the interleaving the loop must survive: a fresh new_data()
+        # swaps in a current snapshot around the same iteration the watchdog would
+        # otherwise expire an OLDER snapshot. Because the loop now evaluates the
+        # LATEST front snapshot under the lock (not a copy captured earlier), the
+        # fresh frame wins and the bridge stays ONLINE.
+        import asyncio
+
+        self.bridge._mqtt_config.ha_max_stale_s = 3.0
+        self.bridge._data_available = True
+        self.bridge._condition = MagicMock()
+
+        # An older stale snapshot is the front buffer; capturing THIS copy and
+        # evaluating it after release would flip the bridge offline.
+        stale_copy = self.bridge._front_snapshot
+        stale_copy.timestamp = 100.0
+
+        # A genuinely fresh frame arrives (swapped into _front_snapshot, sets
+        # _data_available True) before the watchdog evaluation runs.
+        data = MeterData()
+        data._timestamp = 200.0
+        data.frame.static_reg_map[0x5000].values = [
+            0x3142,
+            0x3344,
+            0x3546,
+            0x3748,
+            0x3949,
+            0x4141,
+            0x4242,
+            0x4343,
+        ]
+        asyncio.run(self.bridge.new_data(data))
+        self.assertTrue(self.bridge._data_available)
+
+        # The loop evaluates the CURRENT front snapshot (fresh, ts=200) at a
+        # wall-clock only slightly later: it must NOT trip, so recovery wins.
+        self.bridge._evaluate_freshness_locked(self.bridge._front_snapshot, 200.5)
+        self.assertTrue(self.bridge._data_available)
+
+        # Sanity: evaluating the STALE captured copy at the same instant WOULD
+        # have tripped — confirming the recovery-wins behaviour comes precisely
+        # from re-reading the latest snapshot rather than the captured one.
+        self.bridge._evaluate_freshness_locked(stale_copy, 200.5)
+        self.assertFalse(self.bridge._data_available)
+
+    def test_freshness_watchdog_still_trips_when_genuinely_stale(self):
+        # The recovery-wins fix must not weaken genuine staleness detection: when
+        # the latest front snapshot really is too old, the watchdog still flips
+        # offline.
+        self.bridge._mqtt_config.ha_max_stale_s = 3.0
+        self.bridge._data_available = True
+        self.bridge._condition = MagicMock()
+        self.bridge._front_snapshot.timestamp = 100.0
+
+        self.bridge._evaluate_freshness_locked(self.bridge._front_snapshot, 105.0)
+
+        self.assertFalse(self.bridge._data_available)
+        self.assertTrue(self.bridge._availability_dirty)
+
+    # -- Finding 4: breaker/health diagnostics publish even while offline --
+
+    def _run_one_notify_pass(self):
+        """Drive exactly one iteration of the real _notify_loop body on THIS thread.
+
+        First stops the auto-started background notify thread so it cannot race
+        for the pending snapshot, then re-arms a fresh stop event that fires after
+        a single publish pass and pre-sets _snapshot_pending so the inner wait
+        breaks immediately.
+        """
+        import threading
+
+        # Quiesce the background thread started in setUp so it does not consume
+        # the pending flag or publish concurrently with this deterministic pass.
+        self.bridge._stop_event.set()
+        with self.bridge._condition:
+            self.bridge._condition.notify_all()
+        self.bridge._notify_thread.join(timeout=1)
+
+        self.bridge._snapshot_pending = True
+        calls = {"n": 0}
+
+        def fake_is_set():
+            # is_set() is checked three times before the publish block runs:
+            # the outer-loop guard, the inner wait-break guard, and the
+            # post-wait early-return guard. Keep all three False so the single
+            # publish pass runs, then return True on the next outer-loop guard so
+            # the loop exits cleanly.
+            calls["n"] += 1
+            return calls["n"] > 3
+
+        self.bridge._stop_event = threading.Event()
+        self.bridge._stop_event.is_set = fake_is_set  # type: ignore[assignment]
+        self.bridge._notify_loop()
+
+    def test_diagnostics_publish_while_offline_carries_breaker_open(self):
+        # Finding 4: the master sets stale_frame_breaker_open=1 immediately before
+        # read_failed() flips the bridge offline. Diagnostics must keep flowing
+        # while offline so the breaker-open sensor is visible exactly when it
+        # matters, but stale MEASUREMENT values must NOT be published as fresh.
+        # Disable the wall-clock watchdog so the real time.time() in the loop
+        # does not independently flip availability during this deterministic pass.
+        self.bridge._mqtt_config.ha_max_stale_s = 0
+        self.bridge._data_available = False  # offline (breaker tripped upstream)
+        self.bridge._front_snapshot.timestamp = 500.0  # a frame has been seen
+        self.bridge._next_diagnostics_publish_monotonic = 0.0  # due immediately
+        self.bridge._next_sensor_publish_monotonic = 0.0
+
+        self.bridge._diagnostics.mqtt_data = MagicMock(return_value=("diag/topic", '{"stale_frame_breaker_open": 1}'))
+        self.bridge.sensors.mqtt_data = MagicMock(return_value=("sensor/topic", "{}"))
+        published: list[tuple] = []
+        self.bridge.publish = lambda topic, payload, retain=False: published.append((topic, payload))
+
+        self._run_one_notify_pass()
+
+        # Diagnostics WERE published while offline, carrying the breaker-open flag.
+        self.assertIn(("diag/topic", '{"stale_frame_breaker_open": 1}'), published)
+        self.bridge._diagnostics.mqtt_data.assert_called()
+        # Measurement sensor values were NOT published as fresh while offline.
+        self.bridge.sensors.mqtt_data.assert_not_called()
+        self.assertNotIn(("sensor/topic", "{}"), published)
+
+    def test_measurements_publish_again_after_recovery(self):
+        # Once online again, measurement values resume publishing alongside
+        # diagnostics (confirms offline-only suppression of measurements).
+        self.bridge._mqtt_config.ha_max_stale_s = 0  # watchdog off for determinism
+        self.bridge._data_available = True
+        self.bridge._front_snapshot.timestamp = 500.0
+        self.bridge._next_diagnostics_publish_monotonic = 0.0
+        self.bridge._next_sensor_publish_monotonic = 0.0
+
+        self.bridge._diagnostics.mqtt_data = MagicMock(return_value=("diag/topic", "{}"))
+        self.bridge.sensors.mqtt_data = MagicMock(return_value=("sensor/topic", "{}"))
+        published: list[tuple] = []
+        self.bridge.publish = lambda topic, payload, retain=False: published.append((topic, payload))
+
+        self._run_one_notify_pass()
+
+        self.assertIn(("sensor/topic", "{}"), published)
+        self.assertIn(("diag/topic", "{}"), published)
+
 
 class TestHABridgeConfigEntities(unittest.TestCase):
     """Tests for HAConfigEntities integration in HABridge."""

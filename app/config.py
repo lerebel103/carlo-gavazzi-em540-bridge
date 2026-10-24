@@ -68,6 +68,33 @@ class FrameValidationConfig:
 
 
 @dataclass
+class StaleFrameDetectionConfig:
+    # Master-side upstream stale/duplicate-frame safeguard. The meter can serve
+    # the same frame twice when polled faster than its internal update loop (the
+    # real poll rate, e.g. 12.5Hz, exceeds the 10Hz update_interval), and — more
+    # dangerously — can wedge and repeat one frame forever while still answering.
+    # To catch both, each ACCEPTED frame is reduced to an equality composite over
+    # six fast-changing primary-block registers (the three phase currents and the
+    # system power/apparent/reactive totals; voltage and frequency are excluded as
+    # too stable). Consecutive identical composites are counted as stale.
+    #
+    # When a stall persists for at least max_stale_s the master fails closed via
+    # the same read_failed() listener fan-out the frame-validation gate uses
+    # (downstream breaker opens, Home Assistant goes unavailable); a genuinely
+    # fresh (changed-composite) frame resets the stall and resumes publishing.
+    #
+    # The threshold is expressed in SECONDS, not a poll count, so it is
+    # independent of update_interval and the meter's true poll rate. It is also
+    # independent of the em540_master.health_max_stale_s watchdog and works even
+    # when that watchdog is disabled.
+    enabled: bool = True
+    # Idle guard: a frame whose composite is all-zero (no load — P, VA, var and
+    # all three currents == 0) is a legitimate zero-throughput idle state and is
+    # NEVER counted as stale or allowed to open the breaker.
+    max_stale_s: float = 1.0
+
+
+@dataclass
 class Em540MasterConfig:
     mode: str = "serial"
     baudrate: int = 9600
@@ -97,6 +124,7 @@ class Em540MasterConfig:
     ensure_3phase_measuring_system: bool = False
     log_level: str = "INFO"
     frame_validation: FrameValidationConfig = field(default_factory=FrameValidationConfig)
+    stale_frame_detection: StaleFrameDetectionConfig = field(default_factory=StaleFrameDetectionConfig)
 
 
 @dataclass
@@ -153,6 +181,15 @@ class MqttConfig:
     username: str = ""
     password: str = ""
     update_interval: float = 1.0
+    # HA/MQTT wall-clock freshness watchdog: max seconds since the last upstream
+    # frame before the HA bridge marks itself unavailable (retained "offline" on
+    # the availability topic) and stops publishing fresh sensor state. This is the
+    # MQTT path's OWN self-protecting staleness breaker — it fires on wall-clock
+    # frame age even if the master never signalled a failure. Default 3.0s is ~3x
+    # the default MQTT update_interval (1.0s) so a single missed publish does not
+    # flap HA offline, and ~10x tighter than the ~30s health_max_stale_s process
+    # watchdog. A value <= 0 DISABLES the watchdog (mirrors health_max_stale_s).
+    ha_max_stale_s: float = 3.0
     log_level: str = "INFO"
 
 
@@ -380,6 +417,34 @@ class ConfigManager:
         # subclass). Frequencies must additionally satisfy min < max.
         self._validate_frame_validation(state.em540_master.frame_validation)
 
+        # 9. stale-frame detection — toggle must be a boolean and max_stale_s a
+        # finite number > 0 (bool rejected explicitly: it is an int subclass).
+        self._validate_stale_frame_detection(state.em540_master.stale_frame_detection)
+
+        # 10. MQTT — ha_max_stale_s must be a finite number (bool rejected
+        # explicitly: it is an int subclass). Non-positive values are ALLOWED
+        # (<= 0 disables the HA freshness watchdog, mirroring health_max_stale_s),
+        # so this is NOT a > 0 check. An unvalidated NaN/inf would silently defeat
+        # the watchdog and a non-numeric value would raise an uncaught TypeError on
+        # the MQTT notify thread.
+        self._validate_mqtt(state.mqtt)
+
+    def _validate_mqtt(self, mqtt: MqttConfig) -> None:
+        name = "mqtt.ha_max_stale_s"
+        value = mqtt.ha_max_stale_s
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ConfigError(f"{name} must be a number, got {value!r}")
+        # Must be representable as a finite float: the HA bridge compares
+        # time.time() - snapshot.timestamp against this value on the notify
+        # thread, so NaN/inf must be rejected here rather than silently defeating
+        # the watchdog. Non-positive values are intentionally allowed (disabled).
+        try:
+            as_float = float(value)
+        except (OverflowError, ValueError) as exc:
+            raise ConfigError(f"{name} must be a finite number, got {value!r}") from exc
+        if not math.isfinite(as_float):
+            raise ConfigError(f"{name} must be finite, got {value}")
+
     def _validate_frame_validation(self, fv: FrameValidationConfig) -> None:
         for name, value in (
             ("em540_master.frame_validation.enabled", fv.enabled),
@@ -417,6 +482,27 @@ class ConfigManager:
                 "em540_master.frame_validation.min_frequency_hz must be < max_frequency_hz, "
                 f"got min={fv.min_frequency_hz} max={fv.max_frequency_hz}"
             )
+
+    def _validate_stale_frame_detection(self, sfd: StaleFrameDetectionConfig) -> None:
+        name = "em540_master.stale_frame_detection.enabled"
+        if not isinstance(sfd.enabled, bool):
+            raise ConfigError(f"{name} must be a boolean (true/false), got {sfd.enabled!r}")
+
+        name = "em540_master.stale_frame_detection.max_stale_s"
+        value = sfd.max_stale_s
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ConfigError(f"{name} must be a number, got {value!r}")
+        # Must be representable as a finite float: Em540Master.__init__ coerces
+        # max_stale_s with float(), and an oversized int (e.g. 10**1000) raises
+        # OverflowError there instead of a clean ConfigError. Check it here.
+        try:
+            as_float = float(value)
+        except (OverflowError, ValueError) as exc:
+            raise ConfigError(f"{name} must be a finite number, got {value!r}") from exc
+        if not math.isfinite(as_float):
+            raise ConfigError(f"{name} must be finite, got {value}")
+        if value <= 0:
+            raise ConfigError(f"{name} must be > 0, got {value}")
 
     def _populate_config(self, target, section_data: dict, path: str) -> None:
         for key, value in section_data.items():

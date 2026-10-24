@@ -573,6 +573,52 @@ def test_valid_smoothing_window_seconds_accepted(tmp_path, value):
     assert state.ts65a_slave.smoothing_window_seconds == value
 
 
+# -- mqtt.ha_max_stale_s (HA/MQTT freshness watchdog) --
+
+
+def test_ha_max_stale_s_defaults_to_3(tmp_path):
+    # Unset in YAML -> dataclass default of 3.0.
+    path = _make_config(tmp_path)
+    state = ConfigManager(path).load()
+    assert state.mqtt.ha_max_stale_s == 3.0
+
+
+@pytest.mark.parametrize("value", [1.5, 0.5, 10, 30.0])
+def test_ha_max_stale_s_override_accepted(tmp_path, value):
+    path = _make_config(tmp_path, {"mqtt.ha_max_stale_s": value})
+    state = ConfigManager(path).load()
+    assert state.mqtt.ha_max_stale_s == value
+
+
+@pytest.mark.parametrize("value", [0, 0.0, -1, -5.0])
+def test_ha_max_stale_s_non_positive_disables_and_loads(tmp_path, value):
+    # Disable convention (mirrors health_max_stale_s): <= 0 must load, not raise.
+    path = _make_config(tmp_path, {"mqtt.ha_max_stale_s": value})
+    state = ConfigManager(path).load()
+    assert state.mqtt.ha_max_stale_s == value
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        float("nan"),  # non-finite: silently defeats the watchdog if unvalidated
+        float("inf"),
+        float("-inf"),
+        True,  # bool (int subclass) must be rejected explicitly
+        False,
+        "soon",  # non-numeric: raises an uncaught TypeError on the notify thread
+    ],
+)
+def test_ha_max_stale_s_invalid_raises(tmp_path, value):
+    # Finding 2: ha_max_stale_s must be a finite, non-bool number. NaN/inf would
+    # silently defeat the HA freshness watchdog; a non-numeric/bool value would
+    # raise an uncaught TypeError on the MQTT notify thread. All must fail fast
+    # with a ConfigError naming the field.
+    path = _make_config(tmp_path, {"mqtt.ha_max_stale_s": value})
+    with pytest.raises(ConfigError, match="ha_max_stale_s"):
+        ConfigManager(path).load()
+
+
 # ---------------------------------------------------------------------------
 # Persistence tests (Task 2.4)
 # ---------------------------------------------------------------------------
@@ -1561,3 +1607,47 @@ def test_frame_validation_frequency_order_enforced(tmp_path):
     )
     with pytest.raises(ConfigError, match="min_frequency_hz"):
         ConfigManager(path).load()
+
+
+def test_stale_frame_detection_defaults(tmp_path):
+    """Absent stale_frame_detection block -> defaults enabled True, 1.0s."""
+    path = _make_config(tmp_path)
+    sfd = ConfigManager(path).load().em540_master.stale_frame_detection
+    assert sfd.enabled is True
+    assert sfd.max_stale_s == 1.0
+
+
+def test_stale_frame_detection_override_loads(tmp_path):
+    path = _make_config(
+        tmp_path,
+        {
+            "em540_master.stale_frame_detection.enabled": False,
+            "em540_master.stale_frame_detection.max_stale_s": 2.5,
+        },
+    )
+    sfd = ConfigManager(path).load().em540_master.stale_frame_detection
+    assert sfd.enabled is False
+    assert sfd.max_stale_s == 2.5
+
+
+@pytest.mark.parametrize("value", ["true", 1, "yes", None])
+def test_stale_frame_detection_enabled_rejects_non_boolean(tmp_path, value):
+    path = _make_config(tmp_path, {"em540_master.stale_frame_detection.enabled": value})
+    with pytest.raises(ConfigError, match="stale_frame_detection.enabled"):
+        ConfigManager(path).load()
+
+
+# 10**1000 is a valid positive int but not representable as a finite float, so
+# float() of it raises OverflowError at master init — validation must reject it
+# cleanly as a ConfigError first.
+@pytest.mark.parametrize("value", [0, -1.0, "nope", True, float("inf"), float("nan"), 10**1000])
+def test_stale_frame_detection_max_stale_s_rejects_invalid(tmp_path, value):
+    path = _make_config(tmp_path, {"em540_master.stale_frame_detection.max_stale_s": value})
+    with pytest.raises(ConfigError, match="stale_frame_detection.max_stale_s"):
+        ConfigManager(path).load()
+
+
+def test_stale_frame_detection_max_stale_s_positive_float_accepted(tmp_path):
+    path = _make_config(tmp_path, {"em540_master.stale_frame_detection.max_stale_s": 0.5})
+    sfd = ConfigManager(path).load().em540_master.stale_frame_detection
+    assert sfd.max_stale_s == 0.5

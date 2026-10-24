@@ -47,7 +47,17 @@ def _make_config(**overrides):
         max_frequency_hz=fv_overrides.get("frame_validation_max_frequency_hz", 70.0),
         max_consecutive_invalid_s=fv_overrides.get("frame_validation_max_consecutive_invalid_s", 5.0),
     )
-    return SimpleNamespace(frame_validation=fv, **defaults)
+    # Nested stale-frame-detection block mirroring config.StaleFrameDetectionConfig.
+    # Enabled by default here (matching the production default), but the freshness
+    # tracker never trips in the existing plumbing tests because they never feed
+    # two consecutive identical accepted frames. Dedicated stale-frame tests
+    # override via stale_frame_detection_* keys.
+    sfd_overrides = {k: defaults.pop(k) for k in list(defaults) if k.startswith("stale_frame_detection_")}
+    sfd = SimpleNamespace(
+        enabled=sfd_overrides.get("stale_frame_detection_enabled", True),
+        max_stale_s=sfd_overrides.get("stale_frame_detection_max_stale_s", 1.0),
+    )
+    return SimpleNamespace(frame_validation=fv, stale_frame_detection=sfd, **defaults)
 
 
 def _make_successful_result(num_registers):
@@ -1460,6 +1470,324 @@ class TestFrameValidationIntegration(unittest.TestCase):
         master._recompute_effective_current_bounds()
         self.assertEqual(master._effective_max_phase_current_a, 130.0)
         self.assertEqual(master._effective_max_system_current_a, 390.0)
+
+
+class TestFrameFreshnessUnit(unittest.TestCase):
+    """Direct unit tests of the lock-free FrameFreshness tracker (no master)."""
+
+    @staticmethod
+    def _composite(current):
+        return (current, current, current, current * 3, current * 3, 0)
+
+    def test_first_frame_not_stale(self):
+        from app.carlo_gavazzi.em540_master import FrameFreshness
+
+        ff = FrameFreshness(max_stale_s=1.0, enabled=True)
+        self.assertFalse(ff.observe(self._composite(10), now_mono=100.0))
+        self.assertEqual(ff.consecutive_stale, 0)
+        self.assertIsNone(ff.stall_start_mono)
+
+    def test_duplicate_is_stale_and_starts_stall(self):
+        from app.carlo_gavazzi.em540_master import FrameFreshness
+
+        ff = FrameFreshness(max_stale_s=1.0, enabled=True)
+        comp = self._composite(10)
+        self.assertFalse(ff.observe(comp, now_mono=100.0))
+        self.assertTrue(ff.observe(comp, now_mono=100.08))
+        self.assertEqual(ff.consecutive_stale, 1)
+        self.assertEqual(ff.stall_start_mono, 100.08)
+        # A second duplicate keeps the same stall start, increments the count.
+        self.assertTrue(ff.observe(comp, now_mono=100.16))
+        self.assertEqual(ff.consecutive_stale, 2)
+        self.assertEqual(ff.stall_start_mono, 100.08)
+
+    def test_idle_all_zero_never_stale_and_resets(self):
+        from app.carlo_gavazzi.em540_master import FrameFreshness
+
+        ff = FrameFreshness(max_stale_s=1.0, enabled=True)
+        comp = self._composite(10)
+        ff.observe(comp, now_mono=100.0)
+        ff.observe(comp, now_mono=100.08)  # stall active
+        self.assertEqual(ff.consecutive_stale, 1)
+        # An all-zero (idle) composite repeated is never stale and resets stall.
+        idle = (0, 0, 0, 0, 0, 0)
+        self.assertFalse(ff.observe(idle, now_mono=100.16))
+        self.assertFalse(ff.observe(idle, now_mono=100.24))
+        self.assertEqual(ff.consecutive_stale, 0)
+        self.assertIsNone(ff.stall_start_mono)
+
+    def test_changed_composite_resets_stall(self):
+        from app.carlo_gavazzi.em540_master import FrameFreshness
+
+        ff = FrameFreshness(max_stale_s=1.0, enabled=True)
+        comp_a = self._composite(10)
+        ff.observe(comp_a, now_mono=100.0)
+        ff.observe(comp_a, now_mono=100.08)
+        self.assertEqual(ff.consecutive_stale, 1)
+        self.assertFalse(ff.observe(self._composite(11), now_mono=100.16))
+        self.assertEqual(ff.consecutive_stale, 0)
+        self.assertIsNone(ff.stall_start_mono)
+
+    def test_breaker_should_open_time_based(self):
+        from app.carlo_gavazzi.em540_master import FrameFreshness
+
+        ff = FrameFreshness(max_stale_s=1.0, enabled=True)
+        comp = self._composite(10)
+        ff.observe(comp, now_mono=100.0)
+        ff.observe(comp, now_mono=100.5)  # stall starts at 100.5
+        self.assertFalse(ff.breaker_should_open(100.9))  # 0.4s < 1.0s
+        self.assertTrue(ff.breaker_should_open(101.5))  # 1.0s >= 1.0s
+
+    def test_disabled_never_stale(self):
+        from app.carlo_gavazzi.em540_master import FrameFreshness
+
+        ff = FrameFreshness(max_stale_s=1.0, enabled=False)
+        comp = self._composite(10)
+        self.assertFalse(ff.observe(comp, now_mono=100.0))
+        self.assertFalse(ff.observe(comp, now_mono=200.0))
+        self.assertFalse(ff.breaker_should_open(500.0))
+
+
+class TestStaleFrameDetection(unittest.TestCase):
+    """Master-loop integration of the upstream stale/duplicate-frame safeguard."""
+
+    @patch("app.carlo_gavazzi.em540_master.AsyncModbusTcpClient")
+    def _build(self, mock_tcp_cls, **config_overrides):
+        mock_client = MagicMock()
+        mock_client.read_holding_registers = AsyncMock(
+            side_effect=lambda address, count=1, device_id=None: _make_successful_result(count)
+        )
+        mock_client.connect = AsyncMock()
+        mock_client.close = MagicMock()
+        type(mock_client).connected = PropertyMock(return_value=True)
+        mock_tcp_cls.return_value = mock_client
+
+        # Realistic frames pass spec validation, so leave frame_validation on by
+        # default. The idle-frame test opts out (frame_validation_enabled=False)
+        # because an all-zero frame fails the frequency bound.
+        config_overrides.setdefault("frame_validation_enabled", True)
+        config = _make_config(**config_overrides)
+        master = Em540Master(config)
+        master._client = mock_client
+        master._static_data_valid = True
+        master._energy_initial_read_complete = True
+        return master, mock_client
+
+    @staticmethod
+    def _primary_result(regs):
+        result = MagicMock()
+        result.isError.return_value = False
+        result.registers = list(regs)
+        return result
+
+    def _tick_responses(self, regs):
+        from app.carlo_gavazzi.em540_data import ENERGY_BLOCK_TOTAL_SIZE
+
+        return [
+            self._primary_result(regs),
+            _make_successful_result(ENERGY_BLOCK_TOTAL_SIZE),
+        ]
+
+    @staticmethod
+    def _realistic():
+        from tests.carlo_gavazzi.frame_validation_test import _realistic_registers
+
+        return _realistic_registers()
+
+    @staticmethod
+    def _realistic_current(current):
+        from tests.carlo_gavazzi.frame_validation_test import _realistic_registers
+
+        return _realistic_registers(current=current)
+
+    def _run_tick(self, master, client, regs, now_mono):
+        client.read_holding_registers = AsyncMock(side_effect=self._tick_responses(regs))
+        with patch("app.carlo_gavazzi.em540_master.time.monotonic", return_value=now_mono):
+            with patch.object(master._condition, "notify"):
+                return asyncio.run(master.acquire_data())
+
+    def _run_tick_at(self, master, client, regs, now_mono, wall_clock):
+        """Drive one tick with BOTH clocks controlled.
+
+        ``now_mono`` drives the monotonic stale/freshness logic; ``wall_clock``
+        is the epoch stamped onto the frame by MeterData.update_from_frame (and
+        therefore the value DailyExtrema uses for its local-day rollover check).
+        """
+        client.read_holding_registers = AsyncMock(side_effect=self._tick_responses(regs))
+        with patch("app.carlo_gavazzi.em540_master.time.monotonic", return_value=now_mono):
+            with patch("app.carlo_gavazzi.meter_data.time.time", return_value=wall_clock):
+                with patch.object(master._condition, "notify"):
+                    return asyncio.run(master.acquire_data())
+
+    def test_withheld_stale_frame_does_not_seed_next_day_extrema(self):
+        # Finding 1: a frozen/duplicate frame that the stale-frame gate WITHHOLDS
+        # must not be folded into DailyExtrema. Previously the extrema fold ran
+        # BEFORE the stale gate, so a frame withheld across local midnight could
+        # seed the new day's min/max with the stuck reading. The fold now runs
+        # only AFTER the gate clears the frame for publication.
+        from app.carlo_gavazzi.em540_master import _local_next_day_start
+
+        master, client = self._build(stale_frame_detection_max_stale_s=1.0)
+        listener = MagicMock(spec=MeterDataListener)
+        listener.read_failed = AsyncMock()
+        listener.new_data = AsyncMock()
+        master.add_listener(listener)
+
+        # Anchor a local-midnight boundary (DST-aware, timezone-independent).
+        base = 1_700_000_000.0
+        midnight = _local_next_day_start(base)
+        regs = self._realistic_current(10000)  # L1 current ~10 A
+
+        # Day N: a good frame publishes and folds ~10 A into day N's extrema.
+        self.assertTrue(self._run_tick_at(master, client, regs, 100.0, midnight - 2.0))
+        self.assertAlmostEqual(master.daily_extrema.snapshot(now=midnight - 2.0)["current_l1_max"], 10.0, places=2)
+
+        # Still day N: an identical frame starts the stall but stays within the
+        # 1.0s window, so it is still published (same day, no harm).
+        self.assertTrue(self._run_tick_at(master, client, regs, 100.08, midnight - 1.0))
+
+        # Day N+1: the same frozen frame crosses max_stale_s AND the local-midnight
+        # boundary. It trips the breaker and is WITHHELD (returns False).
+        front_before = master._front_data
+        self.assertFalse(self._run_tick_at(master, client, regs, 101.2, midnight + 1.0))
+
+        # The breaker tripped and the frame was withheld (last-good retained).
+        listener.read_failed.assert_awaited_once()
+        self.assertEqual(master._stats.stale_frame_breaker_open, 1)
+        self.assertIs(master._front_data, front_before)
+
+        # The withheld frozen reading must NOT have seeded day N+1's extrema:
+        # evaluated in the new day's window, every extremum reads as unset.
+        new_day_snapshot = master.daily_extrema.snapshot(now=midnight + 1.0)
+        self.assertIsNone(new_day_snapshot["current_l1_max"])
+        self.assertIsNone(new_day_snapshot["current_l1_min"])
+        self.assertIsNone(new_day_snapshot["power_max"])
+
+    def test_duplicate_frames_counted_stale(self):
+        master, client = self._build()
+        regs = self._realistic()
+
+        self.assertTrue(self._run_tick(master, client, regs, 100.0))
+        # Second identical frame 0.08s later (12.5Hz): stale but within 1.0s.
+        self.assertTrue(self._run_tick(master, client, regs, 100.08))
+
+        self.assertEqual(master._stats.stale_frame_total, 1)
+        self.assertEqual(master._stats.stale_frame_breaker_open, 0)
+        # Frame still published (seq advanced, freshness timestamp advanced).
+        self.assertEqual(master.last_frame_monotonic, 100.08)
+
+    def test_changed_composite_resets_stall(self):
+        master, client = self._build()
+        a = self._realistic()
+        b = self._realistic_current(12000)  # different current -> changed composite
+
+        self.assertTrue(self._run_tick(master, client, a, 100.0))
+        self.assertTrue(self._run_tick(master, client, a, 100.08))  # stall starts
+        self.assertEqual(master._frame_freshness.consecutive_stale, 1)
+        self.assertTrue(self._run_tick(master, client, b, 100.16))  # fresh
+        self.assertEqual(master._frame_freshness.consecutive_stale, 0)
+        self.assertIsNone(master._frame_freshness.stall_start_mono)
+        self.assertEqual(master._stats.stale_frame_breaker_open, 0)
+
+    def test_breaker_trips_after_max_stale_s(self):
+        master, client = self._build(stale_frame_detection_max_stale_s=1.0)
+        listener = MagicMock(spec=MeterDataListener)
+        listener.read_failed = AsyncMock()
+        listener.new_data = AsyncMock()
+        master.add_listener(listener)
+
+        regs = self._realistic()
+        # First accepted frame, then a duplicate starts the stall at t=100.08.
+        self.assertTrue(self._run_tick(master, client, regs, 100.0))
+        self.assertTrue(self._run_tick(master, client, regs, 100.08))
+        self.assertEqual(master._stats.stale_frame_breaker_open, 0)
+        listener.read_failed.assert_not_awaited()
+        pre_trip_mono = master.last_frame_monotonic
+
+        # A later identical frame crosses max_stale_s (elapsed 1.0s+): trip.
+        front_before = master._front_data
+        self.assertFalse(self._run_tick(master, client, regs, 101.1))
+
+        listener.read_failed.assert_awaited_once()
+        self.assertEqual(master._stats.stale_frame_breaker_open, 1)
+        # Tripped frame NOT published: front buffer unchanged, timestamp frozen.
+        self.assertIs(master._front_data, front_before)
+        self.assertEqual(master.last_frame_monotonic, pre_trip_mono)
+        # Exactly one read_failed_total increment for the tripped tick.
+        self.assertEqual(master._stats.read_failed_total, 1)
+
+    def test_lone_duplicate_does_not_trip(self):
+        master, client = self._build(stale_frame_detection_max_stale_s=1.0)
+        listener = MagicMock(spec=MeterDataListener)
+        listener.read_failed = AsyncMock()
+        listener.new_data = AsyncMock()
+        master.add_listener(listener)
+
+        regs = self._realistic()
+        self.assertTrue(self._run_tick(master, client, regs, 100.0))
+        # One duplicate 0.08s later: within the window, never trips.
+        self.assertTrue(self._run_tick(master, client, regs, 100.08))
+
+        listener.read_failed.assert_not_awaited()
+        self.assertEqual(master._stats.stale_frame_breaker_open, 0)
+
+    def test_all_zero_idle_never_trips(self):
+        from tests.carlo_gavazzi.frame_validation_test import PRIMARY_BLOCK_SIZE
+
+        # Validation OFF: an all-zero frame would otherwise fail the frequency
+        # bound and never reach the freshness path.
+        master, client = self._build(
+            frame_validation_enabled=False,
+            stale_frame_detection_max_stale_s=1.0,
+        )
+        listener = MagicMock(spec=MeterDataListener)
+        listener.read_failed = AsyncMock()
+        listener.new_data = AsyncMock()
+        master.add_listener(listener)
+
+        idle = [0] * PRIMARY_BLOCK_SIZE
+        # Many idle frames spanning well beyond max_stale_s.
+        for i in range(20):
+            self.assertTrue(self._run_tick(master, client, idle, 100.0 + i * 0.08))
+
+        self.assertEqual(master._stats.stale_frame_total, 0)
+        self.assertEqual(master._stats.stale_frame_breaker_open, 0)
+        listener.read_failed.assert_not_awaited()
+
+    def test_recovery_after_trip_resumes_publishing(self):
+        master, client = self._build(stale_frame_detection_max_stale_s=1.0)
+        listener = MagicMock(spec=MeterDataListener)
+        listener.read_failed = AsyncMock()
+        listener.new_data = AsyncMock()
+        master.add_listener(listener)
+
+        regs = self._realistic()
+        self.assertTrue(self._run_tick(master, client, regs, 100.0))
+        self.assertTrue(self._run_tick(master, client, regs, 100.08))
+        # Trip.
+        self.assertFalse(self._run_tick(master, client, regs, 101.2))
+        self.assertEqual(master._stats.stale_frame_breaker_open, 1)
+
+        # A changed (fresh) frame recovers and clears the breaker-open stat.
+        fresh = self._realistic_current(12000)
+        self.assertTrue(self._run_tick(master, client, fresh, 101.3))
+        self.assertEqual(master._stats.stale_frame_breaker_open, 0)
+        self.assertEqual(master.last_frame_monotonic, 101.3)
+
+    def test_disabled_detector_is_noop(self):
+        master, client = self._build(stale_frame_detection_enabled=False)
+        listener = MagicMock(spec=MeterDataListener)
+        listener.read_failed = AsyncMock()
+        listener.new_data = AsyncMock()
+        master.add_listener(listener)
+
+        regs = self._realistic()
+        for i in range(20):
+            self.assertTrue(self._run_tick(master, client, regs, 100.0 + i))
+
+        self.assertEqual(master._stats.stale_frame_total, 0)
+        self.assertEqual(master._stats.stale_frame_breaker_open, 0)
+        listener.read_failed.assert_not_awaited()
 
 
 def _encode_uint32_le(value):
