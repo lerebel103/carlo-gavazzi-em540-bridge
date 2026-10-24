@@ -785,6 +785,11 @@ def _run_marker_latching_scenario(*, pacing_enabled: bool, pacing_max_wait_s: fl
                 serial_pacing_enabled=pacing_enabled,
                 serial_pacing_max_wait_s=pacing_max_wait_s,
                 serial_timeout=0.5,
+                # Live-frame test: the simulator advances the composite every
+                # tick via publish_next(), so the upstream stale-frame detector
+                # stays dormant. Arm it to additionally prove it does not trip
+                # under genuine per-tick traffic.
+                stale_frame_detection_enabled=True,
             )
 
             service = ServiceProcess(config_path)
@@ -1057,6 +1062,11 @@ def _run_sweep_latching_scenario(*, pacing_enabled: bool, pacing_max_wait_s: flo
                 serial_pacing_enabled=pacing_enabled,
                 serial_pacing_max_wait_s=pacing_max_wait_s,
                 serial_timeout=0.5,
+                # Live-frame test: the simulator advances the composite every
+                # tick via publish_next(), so the upstream stale-frame detector
+                # stays dormant. Arm it to additionally prove it does not trip
+                # under genuine per-tick traffic.
+                stale_frame_detection_enabled=True,
             )
 
             service = ServiceProcess(config_path)

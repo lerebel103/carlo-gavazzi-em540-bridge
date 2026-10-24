@@ -19,6 +19,7 @@ def generate_config(
     serial_pacing_enabled: bool = True,
     serial_pacing_max_wait_s: float = 0.12,
     serial_timeout: float = 0.5,
+    stale_frame_detection_enabled: bool = False,
 ) -> None:
     """Generate a complete service configuration file for testing.
 
@@ -36,6 +37,12 @@ def generate_config(
             strictly less than serial_timeout when pacing is enabled; <= 0 disables
             latching (duplicate frames possible).
         serial_timeout: Downstream serial adapter client-response timeout.
+        stale_frame_detection_enabled: Whether the upstream stale/duplicate-frame
+            detector is armed. Defaults to False for the integration harness: a
+            test that holds the simulated upstream frame constant (e.g. during
+            convergence) would otherwise be (correctly) flagged as a stuck meter
+            and fail closed. Tests that advance the frame every tick can pass True
+            to additionally assert the detector stays dormant under live traffic.
     """
     data = {
         "em540_master": {
@@ -51,6 +58,7 @@ def generate_config(
             "update_interval": update_interval,
             "timeout": 0.3,
             "retries": 0,
+            "stale_frame_detection": {"enabled": stale_frame_detection_enabled},
             "log_level": "WARNING",
         },
         "em540_slave": {
