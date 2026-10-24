@@ -71,16 +71,37 @@ duplicate frames. The latch paces that client to the real data rate instead.
 
 **How it works (anchoring).** Real clients split one polling cycle into several separate reads
 (power block, then voltage/current, then energy). The latch keys off the **power anchor registers**
-a client reads on every cycle:
+a client reads on every cycle. Each bridge recognises a full power-anchor set, but exactly one of
+them is the **primary cycle-start anchor** — the system-power register a real client reads *first*
+every cycle:
 
-- EM540: system power (`0x0028`) and the per-phase power block (`0x0012`).
-- TS65A: the SunSpec AC power value (`40097`) and the three per-phase AC power registers
-  (`40099`/`40101`/`40103`).
+- EM540: primary cycle-start anchor system power (`0x0028`); secondary power anchor the per-phase
+  power block (`0x0012`).
+- TS65A: primary cycle-start anchor the SunSpec AC power value (`40097`); secondary power anchors the
+  three per-phase AC power registers (`40099`/`40101`/`40103`).
 
-A read that overlaps an anchor starts a new cycle: it waits (bounded) for a fresh upstream frame,
-pins it, and serves from it. The follow-on, non-anchor reads of the same sweep serve immediately
-and coherently from that pinned frame, so the sweep tracks the upstream rate and is never torn
-across frames.
+Only a read that overlaps the **single primary cycle-start anchor** starts a new polling cycle: it
+waits (bounded) for a fresh upstream frame, pins it, and serves from it. That advances the pin **at
+most once per client cycle**. Every other read of the sweep — a secondary power anchor or a
+non-anchor block — is a follow-on read that serves immediately and coherently from that one pinned
+frame, so the whole sweep comes from a single upstream generation and is never torn across frames,
+and the sweep rate tracks the upstream refresh rate rather than being divided by the number of
+blocks in the cycle.
+
+**Consistency and correctness guarantees (serial).** With the latch enabled a serial client gets:
+
+- **one fresh frame per cycle** — each cycle-start read advances to a strictly newer upstream
+  generation, so the client never re-reads a frame it has already consumed;
+- **whole-cycle coherence** — all blocks of a multi-block sweep (power, voltage/current, energy)
+  are sliced from the one generation pinned at the cycle start, so no sweep is torn across frames;
+- **no duplicate or stale frames** at the client's raw poll rate, while the served rate never
+  exceeds the upstream rate.
+
+A client that *never* reads the primary cycle-start anchor (a non-anchor-only poller) is not frozen
+on whatever frame its first read happened to pin: its follow-on reads refresh the pin to the latest
+**already-published** upstream generation. This pin-age bound is driven purely by upstream frame
+**availability** — it only jumps to a frame the upstream has already produced, never to a configured
+wall-clock cadence.
 
 **Configuration** (per bridge, under `em540_slave.serial` and `ts65a_slave.serial`):
 
@@ -92,7 +113,11 @@ across frames.
 
 Two Home Assistant diagnostic sensors expose the observed downstream serial poll rate so you can
 see the latch in action: **EM540 Serial Read Rate** and **TS65A Serial Read Rate** (both in Hz,
-enabled by default).
+enabled by default). The rate is **pinned to the power-register (primary cycle-start anchor) reads**
+— it counts one tick each time a cycle-start anchor read advances the pin to a fresh frame, i.e.
+once per client polling cycle. It is deliberately **not** counted per inbound request, because a
+real client issues several sparse reads per cycle (and discovery scans add more), which would
+otherwise inflate the number. So the sensor reports the client's true per-cycle refresh rate.
 
 > **Serial only — not TCP.** This guarantee applies to Modbus-over-**serial** clients only. It is
 > deliberately **not** implemented for TCP or RTU-over-TCP clients: those transports can carry many
@@ -344,8 +369,12 @@ Transport diagnostics distinguish the downstream channels each bridge can serve:
   are inferred from request activity: a client is considered connected while requests arrive within
   `serial_idle_timeout` seconds, and the connect/disconnect counters increment on the activity edges.
   `Serial Read Rate` (Hz) reports the downstream serial client's observed poll rate, computed as a
-  windowed rate the same way the upstream `Acq Rate` sensor is — handy for confirming the serial
-  frame latch is pacing a fast client (see [Serial Frame Latching](#serial-frame-latching-serial-clients-only)).
+  windowed rate the same way the upstream `Acq Rate` sensor is. It is **pinned to the power-register
+  (primary cycle-start anchor) reads** — one tick per cycle-start pin advance — so it reflects the
+  client's true per-cycle refresh rate rather than the raw inbound-request count (which the sparse
+  multi-read sweeps and discovery scans of a real client would otherwise inflate). Handy for
+  confirming the serial frame latch is pacing a fast client
+  (see [Serial Frame Latching](#serial-frame-latching-serial-clients-only)).
 
 In addition, per-quantity **daily min/max extrema** are published for Power, Current, Voltage L-N,
 and Voltage L-L, at both system and per-phase (L1/L2/L3) scope (for example `Daily Power Min`,
