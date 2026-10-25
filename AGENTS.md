@@ -170,10 +170,12 @@ Notes:
   NOT a bug — pacing still delivers smooth, duplicate-free, coherent frames capped at upstream, but
   cannot clock a client's reads out faster than the line. Do NOT "fix" this by asserting 12.5Hz for a
   multi-block client or by changing `async_getValues` to chase the rate; the only lever is baud. The
-  9600 ceiling is NOT a hard GX limit: the Victron GX driver baud is a CLI arg and has been verified
-  on real hardware to run at 115200 (edit `/opt/victronenergy/dbus-cgwacs/start-cgwacs.sh` to add
-  `--baud 115200`, and set the matching `*_slave.serial.baudrate: 115200` on the bridge — both ends
-  must agree), after which the client reaches the full ~12.5Hz. See README for the operator steps.
+  9600 ceiling is NOT a hard GX limit. This baud path is specific to a VICTRON GX consumer on the
+  EM540/EM530 serial bridge (not the TS65A path): the Victron GX driver baud is a CLI arg and has
+  been verified on real hardware to run at 115200 (edit `/opt/victronenergy/dbus-cgwacs/start-cgwacs.sh`
+  to add `--baud 115200`, and set the matching `em540_slave.serial.baudrate: 115200` on the bridge —
+  both ends must agree), after which the client reaches the full ~12.5Hz. Full rate end-to-end also
+  needs `em540_master.update_interval: 0` (unpaced upstream). See README for the operator steps.
   Guarded by the multi-block throughput gates
   `test_{em540,ts65a}_serial_multi_block_client_is_wire_bound_below_upstream` (assert the ~6-9Hz band
   for the TEST harness's configured baud, no duplicate anchor frames, bounded jitter), which

@@ -118,17 +118,20 @@ integration suite guards this expectation with a multi-block throughput test for
 asserts the wire-bound band for the configured baud rather than a physically impossible 12.5 Hz.
 
 The 6–9 Hz wire-bound figure is the ceiling *only at 9600 baud* — it is **not** a hard limit of the
-bridge or of the Victron GX. See [Achieving full 12.5 Hz end-to-end](#achieving-full-125-hz-end-to-end-em540em530)
+bridge or of the Victron GX. See [Achieving full 12.5 Hz end-to-end (Victron GX)](#achieving-full-125-hz-end-to-end-victron-gx-em540em530)
 below for how to unlock the meter's natural rate all the way through to the consumer.
 
 The multi-block throughput integration test above asserts the achievable wire-bound rate for the
 *test harness's* configured baud; it is independent of the baud you run in the field.
 
-### Achieving full 12.5 Hz end-to-end (EM540/EM530)
+### Achieving full 12.5 Hz end-to-end (Victron GX, EM540/EM530)
+
+> This section is specific to a **Victron GX** consumer reading the **EM540/EM530** serial bridge.
+> It does not apply to the Fronius TS65A path.
 
 The EM540/EM530 can be read at its natural **~12.5 Hz** internal update rate, and that full rate can
-be carried all the way through to a downstream Victron (or Fronius) consumer with minimal latency.
-This is **not** the default — the defaults favour a steady, conservative 10 Hz-style cadence and a
+be carried all the way through to a downstream Victron GX consumer with minimal latency. This is
+**not** the default — the defaults favour a steady, conservative 10 Hz-style cadence and a
 9600-baud serial link, which caps a multi-block serial client at ~6–9 Hz (see above). To get the
 full rate you must change **two independent things**; changing only one will not help:
 
@@ -167,22 +170,19 @@ on real hardware**.
   This is a manual, user-applied change to a Victron system file — the bridge cannot make it for you
   — and it is the path that has been verified to deliver a steady ~12.5 Hz to the Victron system.
 
-- **On the bridge**, set the matching downstream serial baud so both ends agree:
+- **On the bridge**, set the matching EM540 downstream serial baud so both ends agree:
 
   ```yaml
   em540_slave:
     serial:
       baudrate: 115200   # must match the GX --baud setting
-  ts65a_slave:
-    serial:
-      baudrate: 115200   # if the TS65A serial output is used
   ```
 
-**Summary:** `em540_master.update_interval: 0` unlocks the meter's natural ~12.5 Hz *into* the bridge;
-raising the serial link to 115200 (GX start-script `--baud 115200` **and** the matching bridge
-`serial.baudrate`) carries that ~12.5 Hz *out* to the consumer with minimal latency. Do both for
-full-rate, low-latency throughput; the serial latch continues to guarantee smooth, duplicate-free,
-whole-cycle-coherent frames the whole time.
+**Summary (Victron GX + EM540/EM530):** `em540_master.update_interval: 0` unlocks the meter's natural
+~12.5 Hz *into* the bridge; raising the EM540 serial link to 115200 (GX start-script `--baud 115200`
+**and** the matching `em540_slave.serial.baudrate`) carries that ~12.5 Hz *out* to the Victron GX
+with minimal latency. Do both for full-rate, low-latency throughput; the serial latch continues to
+guarantee smooth, duplicate-free, whole-cycle-coherent frames the whole time.
 
 **Configuration** (per bridge, under `em540_slave.serial` and `ts65a_slave.serial`):
 
