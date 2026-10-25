@@ -31,6 +31,7 @@ readings (see `config-default.yaml`).
 - **Home Assistant integration:** Publishes measurements and diagnostics as MQTT sensors.
 - **High-rate acquisition:** Targets a 10 Hz (100 ms) polling interval for near real-time updates.
 - **Concurrent client support:** Serves multiple downstream clients without increasing load on the EM540 meter.
+- **Serial frame latching:** Downstream Modbus-over-serial clients are latched to the upstream meter refresh rate, so they never receive duplicate frames and a multi-block polling sweep always reads one coherent snapshot (serial clients only — see below).
 - **Stale-data protection:** A circuit breaker blocks downstream Modbus responses when upstream data is stale or unavailable, preventing silent delivery of bad values.
 
 ## Configuration
@@ -54,6 +55,165 @@ See [config-default.yaml](config-default.yaml) for the full sample layout.
 - These can run concurrently with each slave's TCP endpoint.
 
 When running with Docker, map each enabled serial adapter device into the container (for example `/dev/ttyUSB1` for EM540 slave serial and `/dev/ttyUSB2` for TS65A slave serial).
+
+### Serial Frame Latching (Serial clients only)
+
+Downstream Modbus-over-**serial** clients get their effective read rate latched to the upstream
+EM540/EM530 refresh rate. Without it, a serial client that polls faster than the meter refreshes
+simply reads the same registers again and receives **duplicate frames**; with it, every served
+frame is a distinct upstream frame, and a multi-block polling sweep is **coherent** (all blocks in
+one sweep come from the same upstream frame).
+
+**Why it exists.** The EM540 is the one Carlo Gavazzi model that Victron's `dbus-cgwacs` treats as
+a *fastloop* meter (its `AcSensor::supportFastloop()` returns true only for the EM540 protocol), so
+an EM540-aware client reads as fast as the serial link allows and would otherwise see a stream of
+duplicate frames. The latch paces that client to the real data rate instead.
+
+**How it works (anchoring).** Real clients split one polling cycle into several separate reads
+(power block, then voltage/current, then energy). The latch keys off the **power anchor registers**
+a client reads on every cycle. Each bridge recognises a full power-anchor set, but exactly one of
+them is the **primary cycle-start anchor** — the system-power register a real client reads *first*
+every cycle:
+
+- EM540: primary cycle-start anchor system power (`0x0028`); secondary power anchor the per-phase
+  power block (`0x0012`).
+- TS65A: primary cycle-start anchor the SunSpec AC power value (`40097`); secondary power anchors the
+  three per-phase AC power registers (`40099`/`40101`/`40103`).
+
+Only a read that overlaps the **single primary cycle-start anchor** starts a new polling cycle: it
+waits (bounded) for a fresh upstream frame, pins it, and serves from it. That advances the pin **at
+most once per client cycle**. Every other read of the sweep — a secondary power anchor or a
+non-anchor block — is a follow-on read that serves immediately and coherently from that one pinned
+frame, so the whole sweep comes from a single upstream generation and is never torn across frames,
+and the sweep rate tracks the upstream refresh rate rather than being divided by the number of
+blocks in the cycle.
+
+**Consistency and correctness guarantees (serial).** With the latch enabled a serial client gets:
+
+- **one fresh frame per cycle** — each cycle-start read advances to a strictly newer upstream
+  generation, so the client never re-reads a frame it has already consumed;
+- **whole-cycle coherence** — all blocks of a multi-block sweep (power, voltage/current, energy)
+  are sliced from the one generation pinned at the cycle start, so no sweep is torn across frames;
+- **no duplicate or stale frames** at the client's raw poll rate, while the served rate never
+  exceeds the upstream rate.
+
+A client that *never* reads the primary cycle-start anchor (a non-anchor-only poller) is not frozen
+on whatever frame its first read happened to pin: its follow-on reads refresh the pin to the latest
+**already-published** upstream generation. This pin-age bound is driven purely by upstream frame
+**availability** — it only jumps to a frame the upstream has already produced, never to a configured
+wall-clock cadence.
+
+**What the latch does *not* do: it cannot make a client read faster than its own cycle clocks over
+the wire.** A real multi-block client (e.g. a Victron GX reading the full EM540 register set, or a
+Fronius inverter reading the SunSpec blocks) issues several reads per cycle, and the whole cycle's
+on-wire time is bounded by the serial **baud rate**. At the **9600-baud default** the full EM540
+read set clocks roughly 120–160 ms over the line, which **exceeds** the 80 ms (12.5 Hz) upstream
+period, so a flat-out multi-block client is **wire-bound to about 6–9 Hz** — *below* the upstream
+rate — purely by serial physics. This is **expected and correct at 9600 baud, not a bug and not a
+duplicate-frame problem**: the latch still delivers smooth, duplicate-free, whole-cycle-coherent
+frames capped at the upstream rate; it simply cannot clock a client's reads out faster than the line
+allows. The pacing layer itself is unaffected by baud — baud only sets the wire ceiling. The
+integration suite guards this expectation with a multi-block throughput test for both bridges
+(`test_em540_serial_multi_block_client_is_wire_bound_below_upstream` and its TS65A twin), which
+asserts the wire-bound band for the configured baud rather than a physically impossible 12.5 Hz.
+
+The 6–9 Hz wire-bound figure is the ceiling *only at 9600 baud* — it is **not** a hard limit of the
+bridge or of the Victron GX. See [Achieving full 12.5 Hz end-to-end (Victron GX)](#achieving-full-125-hz-end-to-end-victron-gx-em540em530)
+below for how to unlock the meter's natural rate all the way through to the consumer.
+
+The multi-block throughput integration test above asserts the achievable wire-bound rate for the
+*test harness's* configured baud; it is independent of the baud you run in the field.
+
+### Achieving full 12.5 Hz end-to-end (Victron GX, EM540/EM530)
+
+> This section is specific to a **Victron GX** consumer reading the **EM540/EM530** serial bridge.
+> It does not apply to the Fronius TS65A path.
+
+The EM540/EM530 can be read at its natural **~12.5 Hz** internal update rate, and that full rate can
+be carried all the way through to a downstream Victron GX consumer with minimal latency. This is
+**not** the default — the defaults favour a steady, conservative 10 Hz-style cadence and a
+9600-baud serial link, which caps a multi-block serial client at ~6–9 Hz (see above). To get the
+full rate you must change **two independent things**; changing only one will not help:
+
+**1. Run the bridge at the meter's natural rate — set the upstream tick to zero.**
+
+Set the master read interval to `0`, which puts the bridge in **unpaced mode**: it reads the meter
+as fast as the hardware produces frames (the EM540/EM530's true internal rate, ~12.5 Hz) instead of
+on a fixed 100 ms tick.
+
+```yaml
+em540_master:
+  update_interval: 0   # 0 = unpaced: read as fast as the meter produces (~12.5 Hz on EM540/EM530)
+```
+
+With `update_interval: 0` the upstream generation counter advances at the meter's real rate, so
+every downstream path (serial latch, TCP, MQTT) is fed at ~12.5 Hz instead of 10 Hz. The serial
+frame latch then paces serial clients to this ~12.5 Hz natural rate.
+
+**2. Raise the serial baud so the client's multi-block cycle fits inside the 12.5 Hz window.**
+
+Even at the natural ~12.5 Hz upstream, a multi-block serial client (e.g. a Victron GX) is still
+**wire-bound**: at 9600 baud its full read cycle takes ~120–160 ms, longer than the 80 ms (12.5 Hz)
+period, so it tops out at ~6–9 Hz. Raising the serial link to **115200 baud** clocks the whole cycle
+well under 80 ms, so the client observes the full ~12.5 Hz with minimal latency. **Both ends must
+agree on the baud rate** or you get framing errors (not merely a slow link). This has been **verified
+on real hardware**.
+
+- **On the Victron GX device**, the Carlo Gavazzi meter driver defaults to 9600 but accepts a baud
+  argument. Edit the driver start script `/opt/victronenergy/dbus-cgwacs/start-cgwacs.sh` and add
+  `--baud 115200` to the driver args line. The default line is `args="/dev/$tty"`; change it to:
+
+  ```sh
+  args="/dev/$tty --baud 115200"
+  ```
+
+  This is a manual, user-applied change to a Victron system file — the bridge cannot make it for you
+  — and it is the path that has been verified to deliver a steady ~12.5 Hz to the Victron system.
+
+- **On the bridge**, set the matching EM540 downstream serial baud so both ends agree:
+
+  ```yaml
+  em540_slave:
+    serial:
+      baudrate: 115200   # must match the GX --baud setting
+  ```
+
+**Summary (Victron GX + EM540/EM530):** `em540_master.update_interval: 0` unlocks the meter's natural
+~12.5 Hz *into* the bridge; raising the EM540 serial link to 115200 (GX start-script `--baud 115200`
+**and** the matching `em540_slave.serial.baudrate`) carries that ~12.5 Hz *out* to the Victron GX
+with minimal latency. Do both for full-rate, low-latency throughput; the serial latch continues to
+guarantee smooth, duplicate-free, whole-cycle-coherent frames the whole time.
+
+**Configuration** (per bridge, under `em540_slave.serial` and `ts65a_slave.serial`):
+
+| Setting | Default | Notes |
+|---------|---------|-------|
+| `pacing_enabled` | `true` | Set `false` to disable latching entirely (pure pass-through; duplicate frames possible). Runtime-settable and persisted — changeable live via Home Assistant (see below) with no restart. |
+| `pacing_max_wait_s` | `0.12` | Upper bound on how long a read waits for a fresh frame. Must be strictly less than `serial.timeout` (validated). `<= 0` also disables latching. |
+| `client_read_timeout_ms` | `200` | The client's own read deadline. The latch wait is clamped per request so the response still fits inside it. |
+
+**Dynamic Home Assistant pacing toggle.** Each serial bridge exposes a Home Assistant **switch** —
+**EM540 Serial Pacing** and **TS65A Serial Pacing** — that enables or disables that bridge's serial
+pacing at runtime. The switch is bound to the live `pacing_enabled` config value the bridge's pacing
+layer reads on every request, so flipping it takes effect **immediately with no service restart**,
+and the change is persisted to `config.yaml`. Turn a switch **off** to let a serial client poll
+unpaced and observe its **natural, unpaced read rate** (e.g. to compare against the paced rate or to
+measure the raw wire-bound ceiling described above); turn it back **on** to restore duplicate-free,
+coherent pacing.
+
+Two Home Assistant diagnostic sensors expose the observed downstream serial poll rate so you can
+see the latch in action: **EM540 Serial Read Rate** and **TS65A Serial Read Rate** (both in Hz,
+enabled by default). The rate is **pinned to the power-register (primary cycle-start anchor) reads**
+— it counts one tick each time a cycle-start anchor read advances the pin to a fresh frame, i.e.
+once per client polling cycle. It is deliberately **not** counted per inbound request, because a
+real client issues several sparse reads per cycle (and discovery scans add more), which would
+otherwise inflate the number. So the sensor reports the client's true per-cycle refresh rate.
+
+> **Serial only — not TCP.** This guarantee applies to Modbus-over-**serial** clients only. It is
+> deliberately **not** implemented for TCP or RTU-over-TCP clients: those transports can carry many
+> concurrent connections, and correct per-connection frame latching there is significantly more
+> complex. TCP/RTU-over-TCP clients therefore get no duplicate-frame or single-sweep-coherence
+> guarantee today. Extending the latch to TCP is possible future work, not a current promise.
 
 ### Meter Configuration Enforcement (Victron setups)
 
@@ -271,6 +431,7 @@ state classes are `measurement`; monotonic counters (e.g. RS485 Invalid Frames) 
 | EM540 Serial Active               |      |              | 0         | yes                |
 | EM540 Serial Connects             |      |              | 0         | yes                |
 | EM540 Serial Disconnects          |      |              | 0         | yes                |
+| EM540 Serial Read Rate            | Hz   | frequency    | 2         | yes                |
 | EM540 Circuit Breaker Open        |      |              | 0         | no                 |
 | EM540 Circuit Breaker Open Count  |      |              | 0         | no                 |
 | EM540 Stale Data Age              | ms   | duration     | 1         | yes                |
@@ -281,6 +442,7 @@ state classes are `measurement`; monotonic counters (e.g. RS485 Invalid Frames) 
 | TS65A Serial Active               |      |              | 0         | yes                |
 | TS65A Serial Connects             |      |              | 0         | yes                |
 | TS65A Serial Disconnects          |      |              | 0         | yes                |
+| TS65A Serial Read Rate            | Hz   | frequency    | 2         | yes                |
 | Overfeed Limit Count              |      |              | 0         | yes                |
 | Overfeed Limit Max Duration       | ms   | duration     | 2         | yes                |
 | TS65A Circuit Breaker Open        |      |              | 0         | no                 |
@@ -296,6 +458,13 @@ Transport diagnostics distinguish the downstream channels each bridge can serve:
   connect/disconnect event, so `Serial Active` (1/0), `Serial Connects`, and `Serial Disconnects`
   are inferred from request activity: a client is considered connected while requests arrive within
   `serial_idle_timeout` seconds, and the connect/disconnect counters increment on the activity edges.
+  `Serial Read Rate` (Hz) reports the downstream serial client's observed poll rate, computed as a
+  windowed rate the same way the upstream `Acq Rate` sensor is. It is **pinned to the power-register
+  (primary cycle-start anchor) reads** — one tick per cycle-start pin advance — so it reflects the
+  client's true per-cycle refresh rate rather than the raw inbound-request count (which the sparse
+  multi-read sweeps and discovery scans of a real client would otherwise inflate). Handy for
+  confirming the serial frame latch is pacing a fast client
+  (see [Serial Frame Latching](#serial-frame-latching-serial-clients-only)).
 
 In addition, per-quantity **daily min/max extrema** are published for Power, Current, Voltage L-N,
 and Voltage L-L, at both system and per-phase (L1/L2/L3) scope (for example `Daily Power Min`,

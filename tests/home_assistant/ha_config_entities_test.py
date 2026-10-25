@@ -261,6 +261,12 @@ def entity_and_value(draw):
     idx = draw(_entity_index)
     entity = entities_obj._entities[idx]
 
+    # Switch entities carry no numeric range; their valid payloads are the
+    # on/off strings HA sends.
+    if entity.entity_type == "switch":
+        value = draw(st.sampled_from(["on", "off"]))
+        return idx, value
+
     # Generate a value within [min_value, max_value] respecting the type
     if entity.parse_value is int:
         value = draw(
@@ -326,6 +332,78 @@ def test_property_valid_command_updates_state_and_triggers_persist(data):
     # 3) Published new value to state topic with retain=True (Req 10.3)
     state_topic = f"lerebel/config/em540_bridge/{entity.safe_name}/state"
     mqtt_client.publish.assert_called_once_with(state_topic, str(value), retain=True)
+
+
+# ---------------------------------------------------------------------------
+# Serial pacing switch entities (FEAT-002)
+# ---------------------------------------------------------------------------
+
+
+def _pacing_switch(entities: HAConfigEntities, field_path: str):
+    return next(e for e in entities._entities if e.field_path == field_path)
+
+
+def test_pacing_switches_advertise_under_homeassistant_switch():
+    entities = _make_entities()
+    for field_path, name, section in (
+        ("em540_slave.serial.pacing_enabled", "EM540 Serial Pacing", "em540_slave"),
+        ("ts65a_slave.serial.pacing_enabled", "TS65A Serial Pacing", "ts65a_slave"),
+    ):
+        entity = _pacing_switch(entities, field_path)
+        assert entity.entity_type == "switch"
+        topic = entities.discovery_topic_for(entity)
+        assert topic.startswith("homeassistant/switch/")
+        payload = json.loads(dict(entities.advertise())[topic])
+        assert payload["name"] == name
+        assert payload["payload_on"] == "on"
+        assert payload["payload_off"] == "off"
+        assert payload["entity_category"] == "config"
+
+
+def test_pacing_switch_off_then_on_flips_config_and_echoes_state():
+    state = AppState()
+    mqtt_client = MagicMock()
+    config_manager = MagicMock(spec=ConfigManager)
+    entities = HAConfigEntities(state, mqtt_client, config_manager)
+
+    entity = _pacing_switch(entities, "em540_slave.serial.pacing_enabled")
+    # Defaults to enabled.
+    assert state.em540_slave.serial.pacing_enabled is True
+
+    # Turn OFF.
+    _send_command(entities, entity, "off")
+    assert state.em540_slave.serial.pacing_enabled is False
+    mqtt_client.publish.assert_called_with(entities.state_topic_for(entity), "off", retain=True)
+
+    # Turn back ON (case-insensitive).
+    _send_command(entities, entity, "ON")
+    assert state.em540_slave.serial.pacing_enabled is True
+    mqtt_client.publish.assert_called_with(entities.state_topic_for(entity), "on", retain=True)
+
+
+def test_ts65a_pacing_switch_binds_to_its_own_serial_config():
+    state = AppState()
+    entities = _make_entities(state)
+    entity = _pacing_switch(entities, "ts65a_slave.serial.pacing_enabled")
+
+    _send_command(entities, entity, "off")
+    assert state.ts65a_slave.serial.pacing_enabled is False
+    # EM540 pacing is untouched.
+    assert state.em540_slave.serial.pacing_enabled is True
+
+
+def test_pacing_switch_rejects_unknown_payload():
+    state = AppState()
+    mqtt_client = MagicMock()
+    config_manager = MagicMock(spec=ConfigManager)
+    entities = HAConfigEntities(state, mqtt_client, config_manager)
+    entity = _pacing_switch(entities, "em540_slave.serial.pacing_enabled")
+
+    _send_command(entities, entity, "maybe")
+    # Unchanged; no persist, no publish.
+    assert state.em540_slave.serial.pacing_enabled is True
+    config_manager.schedule_persist.assert_not_called()
+    mqtt_client.publish.assert_not_called()
 
 
 def test_master_update_interval_command_converts_ms_payload_to_seconds_internal_value():

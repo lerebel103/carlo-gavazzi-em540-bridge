@@ -36,6 +36,23 @@ DEVICE_INFO: dict[str, Any] = {
 # ---------------------------------------------------------------------------
 
 
+def _parse_switch_payload(raw: str) -> bool:
+    """Map an MQTT switch payload ('on'/'off', case-insensitive) to a bool.
+
+    HA publishes the configured ``payload_on``/``payload_off`` ('on'/'off') to a
+    switch command topic. ``_on_command`` calls ``entity.parse_value(raw_value)``,
+    so a switch entity needs a parser mapping those payloads to the bool stored on
+    the SlaveSerialConfig field. Any other payload raises ValueError so
+    ``_on_command`` logs and ignores it like other invalid values.
+    """
+    normalized = raw.strip().lower()
+    if normalized == "on":
+        return True
+    if normalized == "off":
+        return False
+    raise ValueError(f"Invalid switch payload: {raw!r}")
+
+
 @dataclass
 class ConfigEntity:
     """Describes a single HA config entity backed by an AppState field."""
@@ -191,6 +208,27 @@ class HAConfigEntities:
                 step=0.1,
                 unit="s",
                 parse_value=float,
+            ),
+            # Dynamic per-serial-client pacing enable/disable toggles. Bound to the
+            # SAME SlaveSerialConfig.pacing_enabled instance each bridge's
+            # SerialPacingContext reads LIVE, so flipping these switches enables or
+            # disables serial pacing with no proxy reconstruction and no restart
+            # (lets an operator observe the natural, unpaced read rate).
+            ConfigEntity(
+                name="EM540 Serial Pacing",
+                field_path="em540_slave.serial.pacing_enabled",
+                config_section=self._state.em540_slave.serial,
+                field_name="pacing_enabled",
+                parse_value=_parse_switch_payload,
+                entity_type="switch",
+            ),
+            ConfigEntity(
+                name="TS65A Serial Pacing",
+                field_path="ts65a_slave.serial.pacing_enabled",
+                config_section=self._state.ts65a_slave.serial,
+                field_name="pacing_enabled",
+                parse_value=_parse_switch_payload,
+                entity_type="switch",
             ),
         ]
         return defs

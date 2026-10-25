@@ -70,6 +70,124 @@ Notes:
   requests arrive within `serial_idle_timeout`, and connect/disconnect counters increment on activity
   edges evaluated at diagnostics cadence. TCP and RTU-over-TCP channels still use real transport
   connect/disconnect events.
+- Downstream SERIAL reads are frame-latched to the upstream refresh rate so serial clients never
+  receive duplicate frames (a serial client can poll faster than the meter refreshes). Each bridge
+  keeps a monotonic `self._frame_generation` counter, bumped in `new_data` ONLY on the successful-write
+  branch (next to `data_received`); after the bump it wakes the serial read via
+  `self._server_loop.call_soon_threadsafe(gate.publish, generation, snapshot)` (non-blocking
+  listener-thread work only). A shared async context proxy (`app/utils/serial_pacing.py` — `FrameGate` +
+  `SerialPacingContext`, IDENTICAL for both bridges) is installed ONLY on `serial_server.context`;
+  TCP and RTU-over-TCP keep the plain shared `SimCore` and are byte-for-byte unaffected (serial-only
+  scoping is structural, not a runtime guard).
+- Pacing is **ANCHOR-BASED**, because real serial clients split one polling cycle into MULTIPLE
+  separate reads (power block, then voltage/current, then energy). Each bridge supplies the FULL
+  power-anchor set via the `anchors` constructor arg AND a SINGLE `primary_anchor` (the system-power
+  register a real client reads FIRST every cycle) — the POWER registers a real client polls EVERY
+  cycle:
+  - EM540 (`em540_slave_bridge._SERIAL_PACING_ANCHORS`): `{0x0028 (system power), 0x0012 (per-phase
+    power block start)}`, primary `0x0028`; confirmed from Victron dbus-cgwacs `Em540Commands`
+    (system + per-phase power read every cycle at interval 0; voltage/current, energy and frequency
+    staggered).
+  - TS65A (`ts65a_slave_bridge._SERIAL_PACING_ANCHORS`): `{40097, 40099, 40101, 40103}` (Ac power
+    value + per-phase AC power starts), primary `40097`; the Fronius equivalent power registers.
+  These are a protocol property of the served map, not user tunables. A read overlaps an anchor when
+  the anchor address falls in `range(address, address + count)` (overlap on the start address is
+  sufficient); a read is a **cycle start** only when it overlaps the SINGLE primary cycle-start
+  anchor.
+- On each gated read: ONLY a read overlapping the SINGLE primary cycle-start anchor starts a new
+  polling cycle — it bounded-waits for a generation STRICTLY NEWER than the currently PINNED
+  generation, then PINS that `(generation, snapshot)` pair and serves from it, advancing the pin **at
+  most once per client cycle** (this is what paces the sweep to the upstream rate, one pin step per
+  sweep). EVERY other read — a SECONDARY power anchor (EM540 `0x0012`; TS65A `40099/40101/40103`) or a
+  non-anchor block — is a follow-on in the same cycle: it serves IMMEDIATELY and coherently from the
+  pinned pair with NO wait and NO pin advance, so every block of a sweep comes from the SAME frame
+  (no cross-frame tear, and the sweep rate is NOT divided by the number of blocks as a per-read
+  cursor would do). The first-ever read before any pin exists behaves like today's first read (wait
+  once for a fresh frame and pin it), so startup is covered.
+- **Generation-availability pin-age bound.** A client that NEVER reads the primary cycle-start anchor
+  (a non-anchor-only poller) is not frozen on whatever frame its first read pinned: a follow-on read
+  from such a client refreshes the pin to the LATEST ALREADY-PUBLISHED generation when a strictly
+  newer one exists. This refresh is bounded purely by upstream generation **availability** (it only
+  jumps to a frame the gate has already announced, with NO wait and NO configured wall-clock cadence
+  clamp). A client that DOES drive the pin via the primary anchor sets a `_cycle_start_seen` flag, so
+  its follow-on reads never take this refresh and every block of its cycle stays coherent with the
+  one pinned frame.
+- **Unserved device-id delegation.** Downstream controllers (e.g. Fronius inverters) scan a RANGE of
+  Modbus unit ids to discover devices. A gated read for a device id this bridge does not serve is
+  delegated straight to the real core (which returns the correct scan exception) and NEVER advances
+  the pacing pin or waits for a frame, so discovery scan noise cannot re-pace the served client. This
+  is checked AFTER the stale-breaker (a doomed request still fails closed first) but before any wait
+  or snapshot serve.
+- The proxy's `async_getValues` remains stale-breaker-first (returns `ExcCodes.DEVICE_BUSY`
+  immediately when the tier-1 breaker is open — never blocks a doomed request); the anchor bounded
+  wait uses `asyncio.wait_for(..., effective_wait_s)` where `effective_wait_s = min(pacing_max_wait_s,
+  per-request SerialWireBudget)`; on timeout it serves the current frame (one possible duplicate on
+  jitter) unless the breaker opened during the wait (fail-closed). The `(generation, snapshot)` pair
+  is published together and sampled as one unit, so the pinned generation always matches the bytes
+  returned. Writes (`async_setValues`) are a straight pass-through (never gated). The gate's asyncio
+  primitive is created on the dedicated server loop (in `_build_serial_server`) so it binds to the
+  right loop, and the serial await yields that loop so co-resident TCP/RTU servers are never starved.
+  A single per-serial-server pin suffices (serial is single-request, half-duplex). Configurable per
+  bridge via `*_slave.serial.pacing_max_wait_s` (default 0.12s; `<= 0` or `pacing_enabled: false`
+  disables latching, pure pass-through) which MUST be strictly less than `serial.timeout` (validated).
+  This preserves the staleness ladder (the latch sits before the datastore read and defers to tier 1)
+  and does not touch the 0x000B overlay or the production parse/overlay path.
+- The snapshot fast-path is scoped to **register reads only** (FC3 read-holding, FC4 read-input).
+  The proxy replaces the serial server's WHOLE context, so bit reads (FC1 read-coils, FC2
+  read-discrete-inputs) and any other func code reach it too; those fall through to the real core so
+  they keep correct datastore semantics/exception. A register read whose window touches an address
+  the datastore does NOT define also falls through to the core so it raises the correct
+  `ILLEGAL_ADDRESS` (the flat snapshot tuple carries no validity flags and would otherwise serve
+  zeros for a map gap — e.g. a TS65A read at 49999). The defined-address set is computed once from
+  the SimRuntime block validity flags (`serial_pacing.valid_register_addresses`). Valid register
+  reads are still served atomically from the pinned `(generation, snapshot)` pair — the fallthrough
+  is scoped to the invalid/non-register cases so it never breaks the atomic frame guarantee.
+- Each downstream serial client's observed poll rate is exposed as a Home Assistant diagnostic
+  sensor per bridge ("EM540 Serial Read Rate" / "TS65A Serial Read Rate", Hz, enabled by default),
+  computed in `ha_diagnostics` with the SAME windowed delta-count/delta-time pattern as the upstream
+  "Acq Rate" sensor. The cumulative count is `SerialActivityTracker.cycle_read_count`, pinned to the
+  POWER cycle-start anchor: it ticks ONCE per primary-anchor pin advance to a new generation (one
+  client polling cycle) via `record_cycle_read`, driven from `SerialPacingContext.on_cycle_advance`
+  on the serial server loop (no tick-loop/listener work added). It is deliberately NOT derived from
+  `total_requests` — a real Victron/Fronius client issues several sparse reads per cycle (plus
+  discovery scans), which would overstate the refresh rate; `total_requests` is retained for
+  serial-client presence/connect inference only.
+- A tight-loop serial client under a steady live upstream observes a smooth client-perceived cadence:
+  the EM540 and TS65A cadence integration gates both measure ~12.5Hz median with ~4ms inter-arrival
+  jitter and p95 under ~90ms against a 12.5Hz upstream (see `tests/integration/e2e_serial_bridge_test.py`,
+  the two `*_observes_smooth_12_5hz_cadence_*` tests — CI-gating cadence regression tests run by the
+  `integration` job). The synchronous, lost-wakeup-free `FrameGate` wake is what delivers this: a
+  parked serial read is released in the same loop turn as the generation publish, with no deferred
+  notify task. This pacing is implemented for SERIAL clients ONLY — TCP and RTU-over-TCP clients get
+  no frame-latching/coherence guarantee (per-connection latching for concurrent TCP connections is
+  significantly more complex; future work).
+- The cadence gates poll ONLY the power anchor (one tiny read), so their per-cycle wire time is far
+  under the 80ms upstream period and they correctly read ~12.5Hz — but that is a single-block poller,
+  NOT a real client. A real MULTI-BLOCK client (Victron GX full EM540 read set; Fronius SunSpec
+  blocks) is WIRE-BOUND BELOW upstream at the 9600-baud DEFAULT: the full cycle clocks ~120-160ms
+  over the line (byte time = 10/9600 ~= 1.042ms, RTU response = 5 + 2*count bytes), exceeding the
+  80ms (12.5Hz) period, so a flat-out client tops out ~6-9Hz. This is physical, EXPECTED at 9600, and
+  NOT a bug — pacing still delivers smooth, duplicate-free, coherent frames capped at upstream, but
+  cannot clock a client's reads out faster than the line. Do NOT "fix" this by asserting 12.5Hz for a
+  multi-block client or by changing `async_getValues` to chase the rate; the only lever is baud. The
+  9600 ceiling is NOT a hard GX limit. This baud path is specific to a VICTRON GX consumer on the
+  EM540/EM530 serial bridge (not the TS65A path): the Victron GX driver baud is a CLI arg and has
+  been verified on real hardware to run at 115200 (edit `/opt/victronenergy/dbus-cgwacs/start-cgwacs.sh`
+  to add `--baud 115200`, and set the matching `em540_slave.serial.baudrate: 115200` on the bridge —
+  both ends must agree), after which the client reaches the full ~12.5Hz. Full rate end-to-end also
+  needs `em540_master.update_interval: 0` (unpaced upstream). See README for the operator steps.
+  Guarded by the multi-block throughput gates
+  `test_{em540,ts65a}_serial_multi_block_client_is_wire_bound_below_upstream` (assert the ~6-9Hz band
+  for the TEST harness's configured baud, no duplicate anchor frames, bounded jitter), which
+  SUPPLEMENT (do not replace) the anchor-only cadence gates. The PTY harness does not throttle to
+  baud, so the tests charge each read its real 9600 on-wire time (`_sim_wire_time_s`) to reproduce
+  the physics. Background: `.agents/tasks/serial-throughput-cap.md`.
+- `pacing_enabled` is runtime-settable/persisted and exposed as a Home Assistant SWITCH per bridge
+  ("EM540 Serial Pacing" / "TS65A Serial Pacing", `ha_config_entities.py`, `entity_type="switch"`).
+  The switch is bound to the live `SlaveSerialConfig.pacing_enabled` the `SerialPacingContext` reads
+  on every request, so flipping it enables/disables pacing IMMEDIATELY with NO proxy reconstruction
+  and NO service restart (and is persisted via `ConfigManager`). Turning it off lets an operator
+  observe the natural, unpaced read rate (e.g. the raw wire-bound ceiling above).
 
 ## Register Layout Invariants (validated against production)
 
@@ -152,7 +270,8 @@ and would otherwise keep every wall-clock breaker satisfied), not the only thing
 - `app/home_assistant/ha_bridge.py`: MQTT bridge for Home Assistant
 - `app/home_assistant/ha_diagnostics.py`: diagnostic sensor definitions and publication
 - `app/utils/pdu_helper.py`: stale-data circuit breaker plus served-ID-aware exception logging for downstream Modbus requests
-- `app/utils/serial_activity.py`: `SerialActivityTracker` — infers downstream serial-client presence from request activity
+- `app/utils/serial_activity.py`: `SerialActivityTracker` — infers downstream serial-client presence from request activity (`total_requests`); also exposes a monotonic `cycle_read_count` (one per primary cycle-start pin advance) that is the source for the serial read-rate (Hz) diagnostic
+- `app/utils/serial_pacing.py`: serial-only frame-latching proxy (`FrameGate` + `SerialPacingContext`) and `valid_register_addresses` helper; anchor-based pacing, register-read-only snapshot fast-path
 
 ## Testing Guidance
 

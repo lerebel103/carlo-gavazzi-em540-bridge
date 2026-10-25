@@ -59,6 +59,112 @@ def test_serial_activity_stats_are_published_for_both_bridges():
     assert payload_obj["ts65a_serial_disconnect_count"] == 1
 
 
+def test_serial_read_rate_sensors_are_declared_enabled_hz_frequency():
+    from app.fronius.ts65a_slave_stats import Ts65aSlaveStats
+
+    diagnostics = HADiagnostics(topic_prefix="test")
+
+    payloads = {topic: json.loads(payload) for topic, payload in diagnostics.advertise_data()}
+
+    em_cfg = payloads["homeassistant/sensor/em540_bridge_test_em540_serial_read_rate/config"]
+    ts_cfg = payloads["homeassistant/sensor/em540_bridge_test_ts65a_serial_read_rate/config"]
+
+    for cfg, name in ((em_cfg, "EM540 Serial Read Rate"), (ts_cfg, "TS65A Serial Read Rate")):
+        assert cfg["name"] == name
+        assert cfg["unit_of_measurement"] == "Hz"
+        assert cfg["device_class"] == "frequency"
+        assert cfg["state_class"] == "measurement"
+        assert cfg["suggested_display_precision"] == 2
+        assert cfg["entity_category"] == "diagnostic"
+        assert cfg["enabled_by_default"] is True
+
+    # Both sensors are part of the published payload and read 0.0 before any
+    # serial requests are observed (and when serial is disabled).
+    assert diagnostics.em540_serial_read_rate in diagnostics._all_sensors()
+    assert diagnostics.ts65a_serial_read_rate in diagnostics._all_sensors()
+
+    diagnostics.set_em540_slave_stats(EM540SlaveStats())
+    diagnostics.set_ts_65a_slave_stats(Ts65aSlaveStats())
+    with patch.dict("sys.modules", {"uptime": SimpleNamespace(uptime=lambda: 1)}):
+        _, payload = diagnostics.mqtt_data()
+    payload_obj = json.loads(payload)
+    assert payload_obj["em540_serial_read_rate"] == 0.0
+    assert payload_obj["ts65a_serial_read_rate"] == 0.0
+
+
+def test_serial_read_rate_is_windowed_from_cycle_count_over_interval():
+    from app.fronius.ts65a_slave_stats import Ts65aSlaveStats
+
+    diagnostics = HADiagnostics(topic_prefix="test")
+
+    em_stats = EM540SlaveStats()
+    ts_stats = Ts65aSlaveStats()
+    diagnostics.set_em540_slave_stats(em_stats)
+    diagnostics.set_ts_65a_slave_stats(ts_stats)
+
+    # First mqtt_data() seeds the window baseline (monotonic 100.0 for both the
+    # EM540 and TS65A rate updates). Each mqtt_data() call consumes one
+    # time.monotonic() per bridge rate update (EM540 then TS65A).
+    with (
+        patch.dict("sys.modules", {"uptime": SimpleNamespace(uptime=lambda: 1)}),
+        patch("app.home_assistant.ha_diagnostics.time.monotonic", side_effect=[100.0, 100.0]),
+    ):
+        diagnostics.mqtt_data()
+
+    # 60 EM540 and 30 TS65A polling CYCLES complete (primary cycle-start pin
+    # advances) before the next diagnostics emit, which lands 6s later (>
+    # DIAGNOSTICS_INTERVAL of 5s). The Hz source is the cycle count, not the raw
+    # inbound-request count.
+    for _ in range(60):
+        em_stats.serial.record_cycle_read()
+    for _ in range(30):
+        ts_stats.serial.record_cycle_read()
+
+    with (
+        patch.dict("sys.modules", {"uptime": SimpleNamespace(uptime=lambda: 1)}),
+        patch("app.home_assistant.ha_diagnostics.time.monotonic", side_effect=[106.0, 106.0]),
+    ):
+        _, payload = diagnostics.mqtt_data()
+    payload_obj = json.loads(payload)
+
+    assert abs(payload_obj["em540_serial_read_rate"] - (60 / 6)) < 1e-9
+    assert abs(payload_obj["ts65a_serial_read_rate"] - (30 / 6)) < 1e-9
+
+
+def test_serial_read_rate_ignores_inbound_requests_and_counts_only_cycles():
+    """The Hz read-rate must key off the primary cycle-start pin advance, not
+    every inbound request: a burst of sparse non-anchor follow-on reads
+    (record_request) must NOT bump the rate, while completed cycles
+    (record_cycle_read) do."""
+    diagnostics = HADiagnostics(topic_prefix="test")
+
+    em_stats = EM540SlaveStats()
+    diagnostics.set_em540_slave_stats(em_stats)
+
+    with (
+        patch.dict("sys.modules", {"uptime": SimpleNamespace(uptime=lambda: 1)}),
+        patch("app.home_assistant.ha_diagnostics.time.monotonic", side_effect=[100.0, 100.0]),
+    ):
+        diagnostics.mqtt_data()
+
+    # 50 raw inbound requests (several sparse reads per cycle) but only 10
+    # completed polling cycles over the 5s window.
+    for _ in range(50):
+        em_stats.serial.record_request(now=0.0)
+    for _ in range(10):
+        em_stats.serial.record_cycle_read()
+
+    with (
+        patch.dict("sys.modules", {"uptime": SimpleNamespace(uptime=lambda: 1)}),
+        patch("app.home_assistant.ha_diagnostics.time.monotonic", side_effect=[106.0, 106.0]),
+    ):
+        _, payload = diagnostics.mqtt_data()
+    payload_obj = json.loads(payload)
+
+    # Rate reflects the 10 cycles, NOT the 50 inbound requests.
+    assert abs(payload_obj["em540_serial_read_rate"] - (10 / 6)) < 1e-9
+
+
 def test_transport_display_names_distinguish_tcp_rtu_and_serial():
     diagnostics = HADiagnostics(topic_prefix="test")
 
@@ -197,6 +303,7 @@ def test_only_selected_diagnostics_are_enabled_by_default():
         "em540_serial_client_active",
         "em540_serial_connect_count",
         "em540_serial_disconnect_count",
+        "em540_serial_read_rate",
         "em540_stale_data_age",
         "em540_dropped_stale_requests",
         "em540_wrong_connection",
@@ -205,6 +312,7 @@ def test_only_selected_diagnostics_are_enabled_by_default():
         "ts65a_serial_client_active",
         "ts65a_serial_connect_count",
         "ts65a_serial_disconnect_count",
+        "ts65a_serial_read_rate",
         "overfeed_limit_count",
         "overfeed_limit_max_duration",
         "ts65a_stale_data_age",

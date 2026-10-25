@@ -76,3 +76,31 @@ def test_boundary_at_exactly_idle_timeout_is_active():
     # now - last == idle_timeout exactly -> still active (<=).
     t.evaluate(idle_timeout=5.0, now=105.0)
     assert t.active is True
+
+
+def test_total_requests_counts_every_recorded_request():
+    t = SerialActivityTracker()
+    assert t.total_requests == 0
+
+    for i in range(7):
+        t.record_request(now=100.0 + i)
+
+    # Cumulative and monotonic — used for connect/presence inference only.
+    assert t.total_requests == 7
+
+
+def test_cycle_read_count_counts_only_recorded_cycles_not_requests():
+    t = SerialActivityTracker()
+    assert t.cycle_read_count == 0
+
+    # Inbound requests must NOT bump the cycle count (the Hz read-rate source).
+    for i in range(10):
+        t.record_request(now=100.0 + i)
+    assert t.cycle_read_count == 0
+
+    # Only completed polling cycles (primary-anchor pin advances) do.
+    for _ in range(3):
+        t.record_cycle_read()
+    assert t.cycle_read_count == 3
+    # The request counter is unaffected by cycle recording.
+    assert t.total_requests == 10
