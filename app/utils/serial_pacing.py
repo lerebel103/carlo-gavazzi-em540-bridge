@@ -327,6 +327,7 @@ class SerialPacingContext:
         primary_anchor: int | None = None,
         valid_addresses: Iterable[int] | None = None,
         on_cycle_advance: Callable[[], None] | None = None,
+        pin_age_bound_generations: int = 1,
     ) -> None:
         self._core = core
         self._gate = gate
@@ -397,6 +398,19 @@ class SerialPacingContext:
         # refresh only jumps to a generation the gate has already published, never
         # a configured wall-clock cadence.
         self._cycle_start_seen: bool = False
+        # Maximum number of upstream generations a follow-on read's pin may lag
+        # behind the latest AVAILABLE generation before it is refreshed (BUG B).
+        # The bound applies to EVERY follow-on read — including a primary-anchor-
+        # driven client once _cycle_start_seen is set — so a pin left behind by an
+        # outage or a client polling-pattern change (the client stops reading the
+        # primary cycle-start anchor) is not served indefinitely while the breaker
+        # stays closed (PduHelper tracks the latest UPSTREAM timestamp, not the age
+        # of the served pin). Default 1: a normal anchor-driven sweep advances the
+        # pin on its own primary read each cycle and lags at most one generation
+        # mid-sweep, so the bound does NOT trigger and whole-cycle coherence is
+        # preserved; it fires only when the pin is genuinely left behind by more
+        # than the bound. Still availability-bounded (no wait, no wall-clock).
+        self._pin_age_bound_generations: int = pin_age_bound_generations
 
     def _effective_wait_s(self, count: int) -> float:
         """Effective latch wait for a ``count``-register read.
@@ -503,22 +517,32 @@ class SerialPacingContext:
         # cannot cover the window (odd / out-of-range read) fall through to the
         # live core so it behaves exactly as before.
         if not is_cycle_start and have_pin:
-            # (c1) PIN-AGE BOUND (COMMIT 2): a client that NEVER reads the primary
-            # cycle-start anchor would otherwise be frozen on the frame its first
-            # read happened to pin. For such a non-anchor-only client (one that has
-            # never advanced the pin via the primary anchor), refresh the pin to
-            # the LATEST ALREADY-PUBLISHED generation when a strictly-newer one is
-            # available — bounded purely by upstream generation availability (NOT a
-            # configured wall-clock cadence, and with no wait: the refresh only
-            # jumps to a frame the gate has already announced). A client that DOES
-            # drive the pin via the primary anchor keeps whole-cycle coherence: its
-            # follow-on reads never refresh here, so every block of a cycle comes
-            # from the one pinned frame.
-            if not self._cycle_start_seen:
-                latest_generation, latest_snapshot = self._gate.current_frame()
-                if latest_generation > self._pinned_generation and latest_snapshot is not None:
-                    self._pinned_generation = latest_generation
-                    self._pinned_snapshot = latest_snapshot
+            # (c1) PIN-AGE BOUND (COMMIT 2 + BUG B): a follow-on read must never
+            # serve a pinned generation that lags the latest AVAILABLE generation
+            # by more than ``_pin_age_bound_generations`` (default 1). This covers
+            # TWO stale-pin cases without a wall-clock clamp (the refresh only
+            # jumps to a frame the gate has ALREADY published, with no wait):
+            #   - a non-anchor-only client (never reads the primary cycle-start
+            #     anchor) that would otherwise be frozen on the frame its first
+            #     read happened to pin; and
+            #   - a primary-anchor-driven client (``_cycle_start_seen`` set) whose
+            #     pin is left behind after an upstream outage or a polling-pattern
+            #     change (it STOPS reading the primary anchor) — BUG B: the breaker
+            #     stays closed because PduHelper tracks the latest UPSTREAM
+            #     timestamp, not the age of this served pin, so the stale snapshot
+            #     would be served indefinitely.
+            # A NORMAL anchor-driven sweep re-pins on its own primary read each
+            # cycle and so lags at most one generation mid-sweep: with the default
+            # bound of 1 this condition is FALSE and every block of the cycle stays
+            # coherent with the one pinned frame. The bound only triggers once the
+            # pin falls MORE than the bound behind the latest available generation.
+            latest_generation, latest_snapshot = self._gate.current_frame()
+            if (
+                latest_snapshot is not None
+                and latest_generation - self._pinned_generation > self._pin_age_bound_generations
+            ):
+                self._pinned_generation = latest_generation
+                self._pinned_snapshot = latest_snapshot
             sliced = self._slice_snapshot(self._pinned_snapshot, address, count)
             if sliced is not None:
                 return sliced
@@ -540,26 +564,30 @@ class SerialPacingContext:
         # cap, the budget that leaves room to serialize this read's response
         # before the client's read deadline). Returns immediately if a newer
         # generation already exists at entry.
-        effective_wait_s = self._effective_wait_s(count)
-        if effective_wait_s <= 0:
-            # No room to latch this read without risking the client deadline:
-            # pin the freshest available frame immediately (still fail-closed on
-            # an open breaker, handled above) rather than waiting.
-            return await self._pin_and_serve(device_id, func_code, address, count)
-        try:
-            await asyncio.wait_for(
-                self._gate.wait_for_generation_after(self._pinned_generation),
-                timeout=effective_wait_s,
-            )
-        except (asyncio.TimeoutError, TimeoutError):
-            # (e) JITTER FALLBACK: the bounded wait timed out. If the breaker
-            # OPENED during the wait, fail closed (DEVICE_BUSY). Otherwise pin and
-            # serve the current frame (one possible duplicate, acceptable) rather
-            # than tripping a breaker on mere jitter.
-            if self._pdu_helper.circuit_open:
-                return ExcCodes.DEVICE_BUSY
-
         previous_generation = self._pinned_generation
+        effective_wait_s = self._effective_wait_s(count)
+        # BUG A fix: a non-positive wire budget means there is no room to latch
+        # this read without risking the client deadline, so SKIP ONLY the
+        # bounded wait — do NOT early-return. Control still reaches the shared
+        # _pin_and_serve + cycle-counter block below, so a primary cycle-start
+        # read that advances the pin (e.g. a large TS65A 90-reg read whose own
+        # serialization consumes the whole deadline) still ticks
+        # cycle_start_advances / on_cycle_advance exactly once. The freshest
+        # available frame is pinned and served immediately, same as before.
+        if effective_wait_s > 0:
+            try:
+                await asyncio.wait_for(
+                    self._gate.wait_for_generation_after(self._pinned_generation),
+                    timeout=effective_wait_s,
+                )
+            except (asyncio.TimeoutError, TimeoutError):
+                # (e) JITTER FALLBACK: the bounded wait timed out. If the breaker
+                # OPENED during the wait, fail closed (DEVICE_BUSY). Otherwise pin
+                # and serve the current frame (one possible duplicate, acceptable)
+                # rather than tripping a breaker on mere jitter.
+                if self._pdu_helper.circuit_open:
+                    return ExcCodes.DEVICE_BUSY
+
         result = await self._pin_and_serve(device_id, func_code, address, count)
         # Hz 'Serial Read Rate' source: count ONE tick when a PRIMARY cycle-start
         # anchor read advances the pin to a strictly-newer generation (one per
