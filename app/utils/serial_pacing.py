@@ -284,8 +284,13 @@ class SerialPacingContext:
     anchor read when the primary anchor falls in ``range(address, address +
     count)`` — overlap on the start address is sufficient.
 
-    If ``max_wait_s <= 0`` latching is disabled and ``async_getValues`` is a pure
-    pass-through (today's behaviour, duplicate frames possible).
+    The pacing cap is resolved LIVE on every request. When a ``serial_config``
+    (the bridge's SlaveSerialConfig) is supplied, ``pacing_enabled``/
+    ``pacing_max_wait_s`` are read fresh each request so the HA pacing switch can
+    toggle pacing on/off with NO reconstruction and NO restart; when no live
+    config is supplied the cached ``max_wait_s`` is used. If the resolved cap is
+    ``<= 0`` latching is disabled and ``async_getValues`` is a pure pass-through
+    (duplicate frames possible).
 
     The snapshot fast-path applies ONLY to register reads (FC3 read-holding, FC4
     read-input). Bit reads (FC1 read-coils, FC2 read-discrete-inputs) and any
@@ -328,11 +333,24 @@ class SerialPacingContext:
         valid_addresses: Iterable[int] | None = None,
         on_cycle_advance: Callable[[], None] | None = None,
         pin_age_bound_generations: int = 1,
+        serial_config: object | None = None,
     ) -> None:
         self._core = core
         self._gate = gate
         self._pdu_helper = pdu_helper
         self._max_wait_s = max_wait_s
+        # Live source of the pacing cap and enable flag (the bridge's
+        # SlaveSerialConfig dataclass instance — the SAME object the HA pacing
+        # switch mutates via HAConfigEntities._on_command). When set, the
+        # effective cap is resolved FRESH on EVERY request (see _resolve_wait_s),
+        # so toggling the HA switch takes effect immediately with NO proxy
+        # reconstruction and NO service restart. ``pacing_enabled``/
+        # ``pacing_max_wait_s`` are a plain bool/float attribute read on the
+        # server loop; a single attribute read is atomic under the GIL, so no
+        # lock is needed and the read stays cheap/lock-free on the hot request
+        # path. When None (unit tests / no config) the cached ``max_wait_s`` is
+        # used unchanged.
+        self._serial_config = serial_config
         # Base Modbus protocol address of the served register block, used to map a
         # requested address onto an index into the published snapshot tuple.
         self._reg_start_address = reg_start_address
@@ -412,16 +430,47 @@ class SerialPacingContext:
         # than the bound. Still availability-bounded (no wait, no wall-clock).
         self._pin_age_bound_generations: int = pin_age_bound_generations
 
-    def _effective_wait_s(self, count: int) -> float:
+    def _resolve_wait_s(self) -> float:
+        """Resolve the LIVE pacing cap for this request.
+
+        When a live ``serial_config`` was supplied (the bridge's SlaveSerialConfig
+        instance, which the HA pacing switch mutates in place), the cap is read
+        FRESH on every request so toggling the HA switch takes effect immediately
+        with NO proxy reconstruction and NO restart:
+          - ``pacing_enabled`` False or ``pacing_max_wait_s <= 0`` -> 0.0, which
+            drives the pure pass-through path in ``async_getValues`` (serve the
+            latest immediately, duplicates allowed);
+          - otherwise -> ``pacing_max_wait_s`` (pacing active; re-pins on the next
+            primary-anchor read).
+
+        ``pacing_enabled``/``pacing_max_wait_s`` are a plain bool/float attribute
+        read on the server loop, set by the MQTT/HA thread via
+        ``HAConfigEntities._on_command``; a single attribute read is atomic under
+        the GIL, so no lock is needed and the read stays cheap/lock-free on the
+        request path. When no live config is supplied (unit tests / plain float)
+        the cached ``max_wait_s`` is returned unchanged.
+        """
+        if self._serial_config is None:
+            return self._max_wait_s
+        if not self._serial_config.pacing_enabled or self._serial_config.pacing_max_wait_s <= 0:
+            return 0.0
+        return self._serial_config.pacing_max_wait_s
+
+    def _effective_wait_s(self, count: int, max_wait_s: float | None = None) -> float:
         """Effective latch wait for a ``count``-register read.
 
         ``min(max_wait_s, per-request wire budget)``, never negative. With no wire
-        budget configured this is just ``max_wait_s``.
+        budget configured this is just ``max_wait_s``. ``max_wait_s`` is the live
+        cap resolved for this request (see :meth:`_resolve_wait_s`); when omitted
+        it is resolved here so callers/tests that only pass ``count`` still get the
+        live-resolved cap.
         """
+        if max_wait_s is None:
+            max_wait_s = self._resolve_wait_s()
         if self._wire_budget is None:
-            return self._max_wait_s
+            return max_wait_s
         budget = self._wire_budget.available_wait_s(count)
-        return max(0.0, min(self._max_wait_s, budget))
+        return max(0.0, min(max_wait_s, budget))
 
     def device_ids(self) -> list[int]:
         return self._core.device_ids()
@@ -491,8 +540,12 @@ class SerialPacingContext:
         if device_id not in self._core.device_ids():
             return await self._core.async_getValues(device_id, func_code, address, count)
 
-        # (b) DISABLED: latching off — pure pass-through, no wait.
-        if self._max_wait_s <= 0:
+        # (b) DISABLED: latching off — pure pass-through, no wait. The cap is
+        # resolved LIVE from the serial config on every request (plain GIL-atomic
+        # attribute read, no lock), so flipping the HA pacing switch to "off"
+        # takes effect on the very next read with no reconstruction/restart.
+        max_wait_s = self._resolve_wait_s()
+        if max_wait_s <= 0:
             return await self._core.async_getValues(device_id, func_code, address, count)
 
         # (b2) NON-REGISTER READ (Finding B1): the proxy replaces the serial
@@ -565,7 +618,7 @@ class SerialPacingContext:
         # before the client's read deadline). Returns immediately if a newer
         # generation already exists at entry.
         previous_generation = self._pinned_generation
-        effective_wait_s = self._effective_wait_s(count)
+        effective_wait_s = self._effective_wait_s(count, max_wait_s)
         # BUG A fix: a non-positive wire budget means there is no room to latch
         # this read without risking the client deadline, so SKIP ONLY the
         # bounded wait — do NOT early-return. Control still reaches the shared

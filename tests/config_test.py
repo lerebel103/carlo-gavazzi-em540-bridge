@@ -880,6 +880,52 @@ def test_write_updates_persisted_fields(tmp_path):
     assert reloaded["em540_master"]["retries"] == 3
 
 
+def test_write_persists_nested_serial_pacing_enabled(tmp_path):
+    """_write() must persist the 3-level em540_slave.serial.pacing_enabled path.
+
+    The persisted field is nested two levels deep (section.serial.pacing_enabled),
+    so _write() must walk/create data['em540_slave']['serial']['pacing_enabled']
+    rather than the old two-level split, and the value must round-trip on reload.
+    """
+    data = {
+        "em540_master": {
+            "mode": "tcp",
+            "host": "10.0.0.1",
+            "port": 502,
+            "update_interval": 0.1,
+            "retries": 0,
+            "timeout": 0.15,
+        },
+        "em540_slave": {"host": "0.0.0.0", "update_timeout": 0.5},
+        "ts65a_slave": {
+            "port": 5003,
+            "grid_feed_in_hard_limit": -5000,
+            "smoothing_window_seconds": 2.5,
+            "update_timeout": 0.5,
+        },
+        "mqtt": {"host": "broker.local", "port": 1883, "update_interval": 0.5},
+    }
+    p = tmp_path / "config.yaml"
+    p.write_text(yaml.safe_dump(data))
+
+    cm = ConfigManager(str(p))
+    state = cm.load()
+    assert state.em540_slave.serial.pacing_enabled is True  # default
+
+    state.em540_slave.serial.pacing_enabled = False
+    state.ts65a_slave.serial.pacing_enabled = False
+    cm._write()
+
+    reloaded = yaml.safe_load(p.read_text())
+    assert reloaded["em540_slave"]["serial"]["pacing_enabled"] is False
+    assert reloaded["ts65a_slave"]["serial"]["pacing_enabled"] is False
+
+    # Full reload through ConfigManager confirms the round-trip.
+    state2 = ConfigManager(str(p)).load()
+    assert state2.em540_slave.serial.pacing_enabled is False
+    assert state2.ts65a_slave.serial.pacing_enabled is False
+
+
 def test_write_preserves_non_persisted_fields(tmp_path):
     """_write() should not alter fields outside PERSISTED_FIELDS."""
     data = {
@@ -1099,6 +1145,8 @@ _FIELD_STRATEGIES: dict[str, st.SearchStrategy] = {
         allow_nan=False,
         allow_infinity=False,
     ),
+    "em540_slave.serial.pacing_enabled": st.booleans(),
+    "ts65a_slave.serial.pacing_enabled": st.booleans(),
 }
 
 # Composite strategy: draw a field name and a matching valid value.
@@ -1149,8 +1197,13 @@ def test_property_config_persistence_round_trip(field_and_value):
         cm = ConfigManager(str(p))
         state = cm.load()
 
-        section_name, key = field_path.split(".")
-        sub_config = getattr(state, section_name)
+        # Walk the (possibly nested, e.g. em540_slave.serial.pacing_enabled)
+        # dotted path: all but the last segment are containers, the last holds
+        # the value.
+        *parent_segments, key = field_path.split(".")
+        sub_config = state
+        for segment in parent_segments:
+            sub_config = getattr(sub_config, segment)
         setattr(sub_config, key, new_value)
 
         cm._write()
@@ -1159,7 +1212,9 @@ def test_property_config_persistence_round_trip(field_and_value):
         cm2 = ConfigManager(str(p))
         state2 = cm2.load()
 
-        sub_config2 = getattr(state2, section_name)
+        sub_config2 = state2
+        for segment in parent_segments:
+            sub_config2 = getattr(sub_config2, segment)
         actual = getattr(sub_config2, key)
 
         assert actual == new_value, f"Round-trip failed for {field_path}: wrote {new_value!r}, got {actual!r}"

@@ -1074,6 +1074,95 @@ class TestSerialPacing(unittest.TestCase):
 
         asyncio.run(scenario())
 
+    # -- FEAT-002: live pacing_enabled toggle (no reconstruction) -------------
+
+    def test_live_pacing_toggle_switches_between_paced_and_passthrough(self):
+        """FEAT-002: flipping serial_config.pacing_enabled on a SINGLE
+        SerialPacingContext instance changes async_getValues behaviour LIVE —
+        paced -> pure pass-through -> paced — WITHOUT reconstructing the proxy.
+
+        Paced: a read before a fresh frame blocks until one lands and serves the
+        pinned snapshot (no live-core read). Pass-through (disabled): the read
+        returns the live core immediately, duplicates allowed, no wait.
+        """
+        from app.config import SlaveSerialConfig
+
+        async def scenario():
+            core = _FakeCore(result=[9, 9])
+            helper = _FakePduHelper()
+            gate = FrameGate()
+            serial_config = SlaveSerialConfig(pacing_enabled=True, pacing_max_wait_s=0.12)
+            ctx = SerialPacingContext(
+                core,
+                gate,
+                helper,
+                # Positional back-compat cap is DISABLED (0.0); the live resolver
+                # must take precedence so pacing is driven purely by serial_config.
+                0.0,
+                reg_start_address=0,
+                anchors={0x0000},
+                primary_anchor=0x0000,
+                serial_config=serial_config,
+            )
+
+            # (1) PACED: no fresh frame yet -> the read blocks, then serves the
+            # pinned snapshot once a generation lands (never touches the core).
+            task = asyncio.ensure_future(ctx.async_getValues(1, 3, 0x0000, 2))
+            await asyncio.sleep(0)
+            self.assertFalse(task.done(), "while paced, a read must block for a fresh frame")
+            gate.publish(1, _snapshot(1))
+            result = await asyncio.wait_for(task, timeout=1.0)
+            self.assertEqual(result, [100, 101])
+            self.assertEqual(core.get_calls, [], "paced read is served from the snapshot, not the core")
+
+            # (2) TOGGLE OFF (live, same instance) -> pure pass-through: the read
+            # returns the live-core sentinel immediately with no wait, even though
+            # no newer generation was published.
+            serial_config.pacing_enabled = False
+            result = await asyncio.wait_for(ctx.async_getValues(1, 3, 0x0000, 2), timeout=0.05)
+            self.assertEqual(result, [9, 9], "disabled pacing must pass through to the live core")
+            self.assertEqual(core.get_calls, [(1, 3, 0x0000, 2)], "pass-through must read the live core")
+
+            # (3) TOGGLE BACK ON (live) -> pacing resumes: a read with no newer
+            # frame blocks again until the next generation lands, served from the
+            # snapshot (no additional core read).
+            serial_config.pacing_enabled = True
+            task = asyncio.ensure_future(ctx.async_getValues(1, 3, 0x0000, 2))
+            await asyncio.sleep(0)
+            self.assertFalse(task.done(), "re-enabled pacing must block for a fresh frame again")
+            gate.publish(2, _snapshot(2))
+            result = await asyncio.wait_for(task, timeout=1.0)
+            self.assertEqual(result, [200, 201])
+            self.assertEqual(core.get_calls, [(1, 3, 0x0000, 2)], "no extra core read once pacing is re-enabled")
+
+        asyncio.run(scenario())
+
+    def test_live_pacing_disabled_via_zero_wait_is_passthrough(self):
+        """FEAT-002: pacing_enabled True but pacing_max_wait_s <= 0 also resolves
+        to pure pass-through on the live path (mirrors the cap-<=0 disable)."""
+        from app.config import SlaveSerialConfig
+
+        async def scenario():
+            core = _FakeCore(result=[7, 7])
+            helper = _FakePduHelper()
+            gate = FrameGate()
+            serial_config = SlaveSerialConfig(pacing_enabled=True, pacing_max_wait_s=0.0)
+            ctx = SerialPacingContext(
+                core,
+                gate,
+                helper,
+                0.12,
+                reg_start_address=0,
+                anchors={0x0000},
+                primary_anchor=0x0000,
+                serial_config=serial_config,
+            )
+            result = await asyncio.wait_for(ctx.async_getValues(1, 3, 0x0000, 2), timeout=0.05)
+            self.assertEqual(result, [7, 7])
+            self.assertEqual(core.get_calls, [(1, 3, 0x0000, 2)])
+
+        asyncio.run(scenario())
+
 
 if __name__ == "__main__":
     unittest.main()

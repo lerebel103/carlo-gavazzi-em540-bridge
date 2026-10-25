@@ -288,6 +288,8 @@ PERSISTED_FIELDS: set[str] = {
     "em540_master.timeout",
     "em540_slave.update_timeout",
     "ts65a_slave.update_timeout",
+    "em540_slave.serial.pacing_enabled",
+    "ts65a_slave.serial.pacing_enabled",
 }
 
 # ---------------------------------------------------------------------------
@@ -747,18 +749,45 @@ class ConfigManager:
                 self._dirty = True
 
     def _write(self) -> None:
-        """Write current PERSISTED_FIELDS values back to the YAML config file."""
+        """Write current PERSISTED_FIELDS values back to the YAML config file.
+
+        Each persisted field is an arbitrary-depth dotted path (e.g.
+        ``mqtt.update_interval`` or ``em540_slave.serial.pacing_enabled``). The
+        intermediate segments are walked through the AppState dataclass tree via
+        getattr to read the live value, and the matching nested YAML dicts are
+        created on demand so a 3-level path writes
+        ``data['em540_slave']['serial']['pacing_enabled']`` while existing
+        2-level paths keep working.
+        """
         path = Path(self._path)
         raw = path.read_text()
         data = yaml.safe_load(raw) or {}
 
         for field_path in PERSISTED_FIELDS:
-            section, key = field_path.split(".")
-            sub_config = getattr(self._state, section, None)
-            if sub_config is not None and hasattr(sub_config, key):
-                if section not in data:
-                    data[section] = {}
-                data[section][key] = getattr(sub_config, key)
+            segments = field_path.split(".")
+            # Resolve the live value by walking the AppState dataclass tree. A
+            # missing segment skips the field (defensive against a stale
+            # PERSISTED_FIELDS entry), matching the previous hasattr() guard.
+            source = self._state
+            missing = False
+            for segment in segments:
+                if not hasattr(source, segment):
+                    missing = True
+                    break
+                source = getattr(source, segment)
+            if missing:
+                continue
+
+            # Walk/create the nested YAML dicts for every segment except the last,
+            # which holds the value.
+            target = data
+            for segment in segments[:-1]:
+                existing = target.get(segment)
+                if not isinstance(existing, dict):
+                    existing = {}
+                    target[segment] = existing
+                target = existing
+            target[segments[-1]] = source
 
         with open(self._path, "w") as f:
             yaml.safe_dump(data, f, default_flow_style=False, sort_keys=False)

@@ -332,6 +332,13 @@ class Em540Slave(MeterDataListener):
             # Hz 'Serial Read Rate' source: count one tick per primary cycle-start
             # pin advance (one client polling cycle), not per inbound request.
             on_cycle_advance=self._stats.serial.record_cycle_read,
+            # Live pacing source: the SAME SlaveSerialConfig instance the HA
+            # pacing switch mutates. The proxy reads pacing_enabled/
+            # pacing_max_wait_s fresh on every request, so toggling the switch
+            # takes effect with no proxy reconstruction and no restart. The
+            # positional max_wait_s above is retained as a back-compat fallback;
+            # the live resolver takes precedence when serial_config is present.
+            serial_config=self._config.serial,
         )
         return serial_server
 
