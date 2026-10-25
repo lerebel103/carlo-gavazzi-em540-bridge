@@ -117,30 +117,72 @@ integration suite guards this expectation with a multi-block throughput test for
 (`test_em540_serial_multi_block_client_is_wire_bound_below_upstream` and its TS65A twin), which
 asserts the wire-bound band for the configured baud rather than a physically impossible 12.5 Hz.
 
-**Raising the baud rate to reach the full ~12.5 Hz (Victron GX).** The 6–9 Hz figure is the ceiling
-*only at 9600 baud* — it is **not** a hard limit of the GX. The baud is a command-line argument of
-the GX's Carlo Gavazzi meter driver and can be raised. This has been verified on real hardware: with
-the link at 115200 baud the full multi-block cycle clocks well under the 80 ms upstream period and
-the Victron system consumes the (emulated) EM540 data at a steady **~12.5 Hz**. Both ends must agree
-on the baud rate or you get framing errors (not merely a slow link). To do this:
+The 6–9 Hz wire-bound figure is the ceiling *only at 9600 baud* — it is **not** a hard limit of the
+bridge or of the Victron GX. See [Achieving full 12.5 Hz end-to-end](#achieving-full-125-hz-end-to-end-em540em530)
+below for how to unlock the meter's natural rate all the way through to the consumer.
 
-1. **On the GX device**, edit the driver start script
-   `/opt/victronenergy/dbus-cgwacs/start-cgwacs.sh` and add `--baud 115200` to the driver args line.
-   The default line is `args="/dev/$tty"`; change it to:
+The multi-block throughput integration test above asserts the achievable wire-bound rate for the
+*test harness's* configured baud; it is independent of the baud you run in the field.
 
-   ```sh
-   args="/dev/$tty --baud 115200"
-   ```
+### Achieving full 12.5 Hz end-to-end (EM540/EM530)
 
-   This is a manual, user-applied change to a Victron system file — the bridge cannot make it for
-   you — and it is the path that has been verified to work.
+The EM540/EM530 can be read at its natural **~12.5 Hz** internal update rate, and that full rate can
+be carried all the way through to a downstream Victron (or Fronius) consumer with minimal latency.
+This is **not** the default — the defaults favour a steady, conservative 10 Hz-style cadence and a
+9600-baud serial link, which caps a multi-block serial client at ~6–9 Hz (see above). To get the
+full rate you must change **two independent things**; changing only one will not help:
 
-2. **On the bridge**, set the matching downstream serial baud rate so both ends agree:
-   `em540_slave.serial.baudrate: 115200` (and `ts65a_slave.serial.baudrate: 115200` if that bridge's
-   serial output is used).
+**1. Run the bridge at the meter's natural rate — set the upstream tick to zero.**
 
-The multi-block throughput integration test above still asserts the achievable wire-bound rate for
-the *test harness's* configured baud; it is independent of the GX baud you run in the field.
+Set the master read interval to `0`, which puts the bridge in **unpaced mode**: it reads the meter
+as fast as the hardware produces frames (the EM540/EM530's true internal rate, ~12.5 Hz) instead of
+on a fixed 100 ms tick.
+
+```yaml
+em540_master:
+  update_interval: 0   # 0 = unpaced: read as fast as the meter produces (~12.5 Hz on EM540/EM530)
+```
+
+With `update_interval: 0` the upstream generation counter advances at the meter's real rate, so
+every downstream path (serial latch, TCP, MQTT) is fed at ~12.5 Hz instead of 10 Hz. The serial
+frame latch then paces serial clients to this ~12.5 Hz natural rate.
+
+**2. Raise the serial baud so the client's multi-block cycle fits inside the 12.5 Hz window.**
+
+Even at the natural ~12.5 Hz upstream, a multi-block serial client (e.g. a Victron GX) is still
+**wire-bound**: at 9600 baud its full read cycle takes ~120–160 ms, longer than the 80 ms (12.5 Hz)
+period, so it tops out at ~6–9 Hz. Raising the serial link to **115200 baud** clocks the whole cycle
+well under 80 ms, so the client observes the full ~12.5 Hz with minimal latency. **Both ends must
+agree on the baud rate** or you get framing errors (not merely a slow link). This has been **verified
+on real hardware**.
+
+- **On the Victron GX device**, the Carlo Gavazzi meter driver defaults to 9600 but accepts a baud
+  argument. Edit the driver start script `/opt/victronenergy/dbus-cgwacs/start-cgwacs.sh` and add
+  `--baud 115200` to the driver args line. The default line is `args="/dev/$tty"`; change it to:
+
+  ```sh
+  args="/dev/$tty --baud 115200"
+  ```
+
+  This is a manual, user-applied change to a Victron system file — the bridge cannot make it for you
+  — and it is the path that has been verified to deliver a steady ~12.5 Hz to the Victron system.
+
+- **On the bridge**, set the matching downstream serial baud so both ends agree:
+
+  ```yaml
+  em540_slave:
+    serial:
+      baudrate: 115200   # must match the GX --baud setting
+  ts65a_slave:
+    serial:
+      baudrate: 115200   # if the TS65A serial output is used
+  ```
+
+**Summary:** `em540_master.update_interval: 0` unlocks the meter's natural ~12.5 Hz *into* the bridge;
+raising the serial link to 115200 (GX start-script `--baud 115200` **and** the matching bridge
+`serial.baudrate`) carries that ~12.5 Hz *out* to the consumer with minimal latency. Do both for
+full-rate, low-latency throughput; the serial latch continues to guarantee smooth, duplicate-free,
+whole-cycle-coherent frames the whole time.
 
 **Configuration** (per bridge, under `em540_slave.serial` and `ts65a_slave.serial`):
 

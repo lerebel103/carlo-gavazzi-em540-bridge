@@ -57,9 +57,14 @@ em540_master:
   slave_id: 1
   # --------------------------------------------------------------------------
 
-  # Master read interval in seconds, 10Hz max supported rate by EM540/EM530
+  # Master read interval in seconds. 0.1 = a steady 10Hz cadence (conservative
+  # default). Set to 0 for UNPACED mode: read as fast as the meter produces,
+  # i.e. the EM540/EM530 natural internal rate (~12.5Hz). Use 0 for full-rate,
+  # low-latency throughput (see the "Achieving full 12.5 Hz end-to-end" section
+  # in the README, which also requires raising the downstream serial baud).
   update_interval: 0.1
-  # Read timeout in seconds (keep below update_interval for best 10Hz stability)
+  # Read timeout in seconds (keep below update_interval for best stability; for
+  # unpaced mode keep it tight enough to sustain the ~12.5Hz read rate)
   timeout: 0.08
   # Number of retries on read failure
   retries: 0
