@@ -1552,6 +1552,342 @@ def test_serial_client_observes_smooth_12_5hz_cadence_under_live_upstream() -> N
 
 
 # ---------------------------------------------------------------------------
+# Multi-block THROUGHPUT ceiling gate (PR #44 wire-bound expectation gate)
+# ---------------------------------------------------------------------------
+#
+# The anchor-only cadence tests above prove the stream is SMOOTH (no jerk) by
+# polling only the power anchor (count 2) in a tight loop: that cycle clocks out
+# in ~10-20 ms over 9600 baud, comfortably under the 80 ms (12.5 Hz) upstream
+# period, so the anchor always finds a newer frame already waiting and the client
+# reads a clean ~12.5 Hz. That is correct for a single-block poller, but it does
+# NOT represent a real Victron GX / Fronius client, which reads a FULL multi-block
+# register set every cycle.
+#
+# This gate exercises the honest multi-block case: it drives upstream at a steady
+# 12.5 Hz and, per client cycle, issues the primary anchor read FOLLOWED BY the
+# realistic follow-on block reads a real client issues, charging each read its
+# real 9600 8N1 on-wire time (see _sim_wire_time_s and the simulated-wire-timing
+# comment below — the PTY harness does NOT throttle to baud, so the wire time
+# must be simulated to reproduce real RS485 physics). Because the WHOLE cycle's
+# on-wire time exceeds the 80 ms upstream period, the client is WIRE-BOUND below
+# 12.5 Hz. This test DOCUMENTS and GUARDS that physically-achievable ceiling
+# (~6-9 Hz). It is a correctness-of-EXPECTATION gate, NOT a performance target:
+# asserting 12.5 Hz here would be asserting something physically impossible on a
+# 9600-baud line.
+#
+# Wire-time arithmetic (9600 8N1, byte time = 10 bits / 9600 = 1.042 ms):
+#   RTU request  = 8 bytes; RTU response = 5 + 2*count bytes; round trip per read
+#   ~= (8 + 5 + 2*count) * 1.042 ms + bus turnaround (_SIM_TURNAROUND_S = 2 ms).
+# The EM540 cycle below reads:
+#   0x0028 cnt2  -> 17 bytes -> ~17.7 ms + 2 ms = ~19.7 ms  (power anchor)
+#   0x0012 cnt6  -> 25 bytes -> ~26.0 ms + 2 ms = ~28.0 ms  (per-phase power)
+#   0x0000 cnt18 -> 49 bytes -> ~51.0 ms + 2 ms = ~53.0 ms  (V/I primary block)
+#   0x0500 cnt4  -> 21 bytes -> ~21.9 ms + 2 ms = ~23.9 ms  (energy)
+#   0x0033 cnt2  -> 17 bytes -> ~17.7 ms + 2 ms = ~19.7 ms  (frequency)
+# Sum ~= 144 ms of simulated wire time per cycle (pure arithmetic ~6.9 Hz). The
+# harness then also clocks the REAL pymodbus RTU round-trips for all five reads
+# over the PTY on top of that single sleep, so the OBSERVED per-cycle wall-clock
+# is ~200-210 ms (~4.8-5.0 Hz). Both are comfortably WIRE-BOUND below the 12.5 Hz
+# upstream — the point of the gate. See _MULTIBLOCK_LOW_HZ/_MULTIBLOCK_HIGH_HZ for
+# the asserted band (set around the observed rate with headroom). The band is
+# asserted off the MEDIAN inter-arrival (robust to a lone outlier).
+
+# EM540 follow-on blocks a Victron-like client reads each cycle, in the order it
+# polls them, as (address, count) pairs. The ANCHOR (power 0x0028 cnt2) drives
+# distinct-frame detection; the rest are the realistic follow-on reads.
+_EM540_PERPHASE_POWER_ADDRESS = 0x0012
+_EM540_PERPHASE_POWER_REG_COUNT = 6
+_EM540_PRIMARY_BLOCK_ADDRESS = 0x0000
+_EM540_PRIMARY_BLOCK_REG_COUNT = 18
+_EM540_FREQUENCY_ADDRESS = 0x0033
+_EM540_FREQUENCY_REG_COUNT = 2
+# The full EM540 cycle (anchor first, then follow-on blocks), as (addr, count).
+_EM540_MULTIBLOCK_CYCLE: tuple[tuple[int, int], ...] = (
+    (_MARKER_POWER_BLOCK_ADDRESS, _MARKER_POWER_REG_COUNT),  # 0x0028 cnt2 (anchor)
+    (_EM540_PERPHASE_POWER_ADDRESS, _EM540_PERPHASE_POWER_REG_COUNT),  # 0x0012 cnt6
+    (_EM540_PRIMARY_BLOCK_ADDRESS, _EM540_PRIMARY_BLOCK_REG_COUNT),  # 0x0000 cnt18
+    (_MARKER_BLOCK_ADDRESS, _MARKER_REG_COUNT),  # 0x0500 cnt4 (energy)
+    (_EM540_FREQUENCY_ADDRESS, _EM540_FREQUENCY_REG_COUNT),  # 0x0033 cnt2 (freq)
+)
+
+# --- Simulated serial wire timing --------------------------------------------
+#
+# WHY A SIMULATED WIRE DELAY IS REQUIRED HERE. The integration harness bridges
+# the client and the bridge over a PTY pair (SerialCable), and a PTY relay
+# forwards bytes at MEMORY speed — it does NOT throttle to the configured 9600
+# baud (there is no byte-time on a pseudo-terminal). So a multi-block cycle over
+# the PTY completes in well under the 80 ms upstream period and a flat-out client
+# would (correctly, for the PTY) read ~12.5 Hz — which does NOT reproduce the
+# real RS485 wire-bound ceiling this gate exists to document. The upstream
+# investigation (.agents/tasks/serial-throughput-cap.md, evidence E2) used the
+# same technique: it inserted asyncio.sleep to "simulate per-read wire
+# serialization" because the mechanism under measurement is pure serial physics,
+# not anything the PTY can emulate.
+#
+# So each cycle is charged the SUM of its reads' REAL 9600-baud on-wire time,
+# computed from the RTU framing, as a SINGLE sleep after the cycle completes (one
+# sleep per cycle, not one per read, so OS sleep granularity is not stacked five
+# times). The real PTY round-trips are sub-millisecond and negligible against
+# this, so the client's per-cycle wall-clock time matches a real 9600 8N1 line and
+# the measured rate is the honest wire-bound rate (~6-9 Hz) rather than the PTY's
+# memory-speed ~12.5 Hz.
+_SIM_BAUD = 9600
+_SIM_BYTE_TIME_S = 10.0 / _SIM_BAUD  # 8N1 -> 10 bits per byte -> ~1.042 ms
+# RTU bus turnaround/silence charged once per read (≈ the 3.5-char inter-frame
+# gap plus adapter latency), on top of the request+response byte time.
+_SIM_TURNAROUND_S = 0.002
+
+
+def _sim_wire_time_s(count: int) -> float:
+    """Real 9600 8N1 on-wire time for one RTU read of ``count`` registers.
+
+    RTU request = 8 bytes; RTU response = 5 + 2*count bytes (addr, func, byte
+    count, data, 2-byte CRC). Round trip = (request + response) byte time plus a
+    fixed bus turnaround. See the module comment for why this is simulated rather
+    than clocked by the PTY.
+    """
+    frame_bytes = 8 + (5 + 2 * count)
+    return frame_bytes * _SIM_BYTE_TIME_S + _SIM_TURNAROUND_S
+
+
+def _sim_cycle_wire_time_s(cycle: tuple[tuple[int, int], ...]) -> float:
+    """Total simulated 9600-baud wire time for one full multi-block cycle.
+
+    Charged as a SINGLE sleep per cycle (not per read) so OS sleep granularity is
+    not stacked five times over — the real PTY round-trips (sub-millisecond) are
+    negligible against this, so the measured cycle wall-clock closely tracks the
+    pure wire-time arithmetic.
+    """
+    return sum(_sim_wire_time_s(count) for _, count in cycle)
+
+
+def _measure_multiblock_throughput_int(
+    client, cycle: tuple[tuple[int, int], ...], *, window_s: float
+) -> list[tuple[float, int]]:
+    """Read a full multi-block cycle for ``window_s``, charging real 9600-baud
+    wire time per read, and return ``(receive_monotonic_s, anchor_marker)`` for
+    every SUCCESSFUL cycle.
+
+    The FIRST entry of ``cycle`` is the primary anchor read; its decoded INT32
+    marker drives distinct-frame detection and its response-receive timestamp is
+    the cycle's arrival time, so _distinct_frame_arrivals / _summarize_cadence
+    measure the cycle-to-cycle rate of DISTINCT anchor frames exactly as the
+    anchor-only cadence test does — but now with the full multi-block cycle (and
+    its simulated wire time) between anchor reads. A cycle where any read
+    errors/raises is skipped so a transient PTY hiccup never pollutes the sample.
+    """
+    samples: list[tuple[float, int]] = []
+    cycle_wire_s = _sim_cycle_wire_time_s(cycle)
+    deadline = time.monotonic() + window_s
+    while time.monotonic() < deadline:
+        anchor_marker: int | None = None
+        anchor_received: float | None = None
+        torn = False
+        for address, count in cycle:
+            try:
+                result = client.read_holding_registers(address, count=count, device_id=1)
+            except (ModbusException, OSError, ConnectionError):
+                torn = True
+                break
+            received = time.monotonic()
+            if result.isError():
+                torn = True
+                break
+            if anchor_marker is None:
+                anchor_marker = _decode_marker_int32_le(list(result.registers))
+                anchor_received = received
+        if torn or anchor_marker is None or anchor_received is None:
+            continue
+        samples.append((anchor_received, anchor_marker))
+        # Charge the whole cycle its real 9600-baud on-wire time as one sleep.
+        time.sleep(cycle_wire_s)
+    return samples
+
+
+def _log_throughput_report(metrics: dict, *, label: str, low_hz: float, high_hz: float) -> None:
+    """Emit the measured multi-block throughput metrics into captured output."""
+    deltas = metrics["deltas_ms"]
+    histogram = _histogram_ms(deltas)
+    report = (
+        f"\n=== {label} serial client multi-block THROUGHPUT (wire-bound ceiling) ===\n"
+        f"upstream target        : {_CADENCE_RATE_HZ:.2f} Hz ({_CADENCE_PERIOD_S * 1000:.0f} ms period)\n"
+        f"asserted wire band     : {low_hz:.1f}-{high_hz:.1f} Hz (9600 8N1 full multi-block cycle)\n"
+        f"measurement window     : {metrics['elapsed_s']:.2f} s (after {_CADENCE_WARMUP_S:.1f}s warmup discard)\n"
+        f"total cycles (reads)   : {metrics['total_reads']}\n"
+        f"distinct anchor frames : {metrics['distinct_markers']}\n"
+        f"duplicate anchor reads : {metrics['duplicate_reads']} "
+        f"(consecutive: {metrics['consecutive_duplicate_reads']})\n"
+        f"delivery (median-based): {metrics['median_rate_hz']:.2f} Hz  <-- wire-bound rate\n"
+        f"delivery (mean-based)  : {metrics['mean_rate_hz']:.2f} Hz\n"
+        f"inter-arrival mean     : {metrics['mean_ms']:.2f} ms\n"
+        f"inter-arrival median   : {metrics['median_ms']:.2f} ms\n"
+        f"inter-arrival stdev    : {metrics['stdev_ms']:.2f} ms  <-- JITTER\n"
+        f"inter-arrival min/max  : {metrics['min_ms']:.2f} / {metrics['max_ms']:.2f} ms\n"
+        f"inter-arrival p95      : {metrics['p95_ms']:.2f} ms\n"
+        f"first ~40 deltas (ms)  : {[round(d, 1) for d in deltas[:40]]}\n"
+        f"delta histogram (ms)   :\n{histogram}\n"
+        "=======================================================================\n"
+    )
+    print(report)
+    logger.info(report)
+
+
+# Wire-bound band asserted for a full multi-block cycle at the simulated 9600
+# baud. The pure wire-time arithmetic lands ~6.9 Hz (EM540) / ~7.9 Hz (TS65A), but
+# the measured per-cycle wall-clock is ~200-210 ms (observed ~4.8-5.0 Hz) because,
+# on top of the single simulated-wire sleep, the harness also clocks the REAL
+# pymodbus RTU round-trips over the PTY for all five reads (the cnt18 EM540 block
+# and cnt16 TS65A block are not free even over a PTY) plus OS sleep rounding. That
+# per-cycle overhead is consistent and low-jitter (observed stdev ~3-14 ms), so
+# the band is set around the OBSERVED rate with generous headroom rather than the
+# idealised arithmetic. The UPPER bound (9.5 Hz) is well below the 12.5 Hz
+# upstream, so the test fails if the simulated wire time were removed and the
+# cycle degenerated to the PTY's memory-speed ~12.5 Hz single-block rate; the
+# LOWER bound (3.5 Hz) guards against a regression that stalls the client far
+# below the ceiling (e.g. an injected per-cycle wait) without flaking on harness
+# overhead. The assertion is on the MEDIAN inter-arrival (robust to a lone gap).
+_MULTIBLOCK_LOW_HZ = 3.5
+_MULTIBLOCK_HIGH_HZ = 9.5
+
+
+@pytest.mark.integration
+def test_em540_serial_multi_block_client_is_wire_bound_below_upstream() -> None:
+    """GATE: a flat-out EM540 serial client that reads the FULL multi-block
+    register set every cycle is WIRE-BOUND below the 12.5 Hz upstream at 9600 baud.
+
+    This supplements (does NOT replace) the anchor-only cadence test. The anchor-
+    only test proves SMOOTHNESS; this test proves the honest THROUGHPUT ceiling a
+    real Victron GX observes, which the anchor-only loop structurally cannot see
+    (its tiny single-block cycle always reads a clean ~12.5 Hz). See the module
+    comment above for the wire-time arithmetic that justifies the asserted band.
+
+    It is a correctness-of-EXPECTATION gate, NOT a perf target: we assert the
+    physically achievable ~6-9 Hz band (with CI headroom), NOT 12.5 Hz, plus:
+      - no DUPLICATE anchor frames (each served anchor frame strictly newer than
+        the last — the pacing layer never re-serves a consumed frame even when the
+        client's own multi-block cycle is the bottleneck);
+      - bounded jitter (the wire-bound stream is still steady, not jerky).
+
+    Each read is charged its real 9600 8N1 on-wire time (the PTY harness does not
+    throttle to baud, so the wire time is simulated — see _sim_wire_time_s).
+    """
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        tmp_path = Path(tmp_dir)
+
+        em540_tcp_port = find_free_port()
+        em540_rtu_port = find_free_port()
+        ts65a_tcp_port = find_free_port()
+
+        em540_serial = SerialCable("throughput-em540")
+        ts65a_serial = SerialCable("throughput-ts65a")
+
+        upstream = Em540UpstreamSimulator(frame_seed=100)
+        upstream.start()
+
+        try:
+            config_path = tmp_path / "config.yaml"
+            generate_config(
+                config_path,
+                upstream.port,
+                em540_tcp_port,
+                em540_rtu_port,
+                ts65a_tcp_port,
+                em540_serial_port=em540_serial.left_path,
+                ts65a_serial_port=ts65a_serial.left_path,
+                update_interval=_CADENCE_PERIOD_S,
+                serial_pacing_enabled=True,
+                serial_pacing_max_wait_s=0.12,
+                serial_timeout=0.5,
+                stale_frame_detection_enabled=True,
+            )
+
+            service = ServiceProcess(config_path)
+            service.start()
+
+            # Drive the upstream at a steady 12.5Hz, independent of the client.
+            publisher = _SteadyMarkerPublisher(upstream, _CADENCE_PERIOD_S)
+            publisher.start()
+
+            try:
+                wait_for_port(em540_tcp_port, timeout=20.0)
+                wait_for_port(ts65a_tcp_port, timeout=20.0)
+
+                clients = DownstreamClients(
+                    em540_tcp_port,
+                    em540_rtu_port,
+                    ts65a_tcp_port,
+                    em540_serial.right_path,
+                    ts65a_serial.right_path,
+                )
+                clients.connect_all()
+
+                wait_for_downstream_data(clients.em540_tcp, address=0x0000, timeout=120.0)
+
+                # Confirm the serial path serves a full multi-block cycle before
+                # the timed window (breaker closed, pin established).
+                wait_for_condition(
+                    lambda: (
+                        _measure_multiblock_throughput_int(clients.em540_serial, _EM540_MULTIBLOCK_CYCLE, window_s=0.5)
+                        != []
+                    ),
+                    timeout=30.0,
+                    message="EM540 serial path did not serve a multi-block cycle before the window"
+                    + service.diagnostics(),
+                )
+
+                raw_samples = _measure_multiblock_throughput_int(
+                    clients.em540_serial, _EM540_MULTIBLOCK_CYCLE, window_s=_CADENCE_WINDOW_S
+                )
+
+                service.assert_running()
+                clients.disconnect_all()
+            finally:
+                publisher.stop()
+                service.stop()
+        finally:
+            upstream.stop()
+            em540_serial.close()
+            ts65a_serial.close()
+
+    samples = _drop_warmup(raw_samples, _CADENCE_WARMUP_S)
+
+    assert len(samples) >= 20, f"too few successful multi-block cycles to assess throughput (got {len(samples)})"
+
+    metrics = _summarize_cadence(samples)
+    _log_throughput_report(metrics, label="EM540", low_hz=_MULTIBLOCK_LOW_HZ, high_hz=_MULTIBLOCK_HIGH_HZ)
+
+    assert metrics["distinct_markers"] >= 10, (
+        f"too few distinct multi-block frames to assess throughput (got {metrics['distinct_markers']})"
+    )
+
+    # (1) WIRE-BOUND BAND: the full multi-block cycle at 9600 baud tops out well
+    # below the 12.5 Hz upstream. Keyed off the MEDIAN inter-arrival. NOT 12.5 Hz.
+    assert _MULTIBLOCK_LOW_HZ <= metrics["median_rate_hz"] <= _MULTIBLOCK_HIGH_HZ, (
+        f"EM540 multi-block throughput (median) {metrics['median_rate_hz']:.2f} Hz outside the wire-bound band "
+        f"{_MULTIBLOCK_LOW_HZ:.1f}-{_MULTIBLOCK_HIGH_HZ:.1f} Hz — a value AT 12.5 Hz means the cycle degenerated "
+        f"to a single-block poll; far below the band means an injected per-cycle stall"
+    )
+
+    # (2) NO DUPLICATE ANCHOR FRAMES: even though the client is slower than
+    # upstream, the pacing layer must never re-serve a frame it already delivered.
+    # Each distinct-anchor delivery is strictly newer than the last. A wire-bound
+    # client is slower than 12.5 Hz, so every cycle SHOULD find a newer frame.
+    assert metrics["consecutive_duplicate_reads"] == 0, (
+        f"a wire-bound multi-block client must never see a DUPLICATE anchor frame, got "
+        f"{metrics['consecutive_duplicate_reads']} consecutive-duplicate reads — pacing re-served a consumed frame"
+    )
+
+    # (3) BOUNDED JITTER: wire-bound does not mean jerky. The cycle time is larger
+    # than the anchor-only case, so allow a wider absolute jitter bound, but still
+    # fail a stream whose inter-arrival stdev balloons (a sign of recurring stalls).
+    assert metrics["stdev_ms"] < 60.0, (
+        f"EM540 multi-block inter-arrival jitter {metrics['stdev_ms']:.2f} ms exceeds 60 ms — stream not steady; "
+        f"median={metrics['median_ms']:.1f}ms p95={metrics['p95_ms']:.1f}ms "
+        f"deltas(ms)={[round(d, 1) for d in metrics['deltas_ms'][:40]]}"
+    )
+
+
+# ---------------------------------------------------------------------------
 # TS65A client-observed cadence / coherence measurement (PR #44 diagnostic)
 # ---------------------------------------------------------------------------
 #
@@ -2057,4 +2393,209 @@ def test_ts65a_serial_anchor_pacing_disabled_sweep_duplicates_negative_control()
     assert duplicates > 0, (
         "TS65A pacing DISABLED must produce at least one duplicate sweep marker (client outrunning upstream); "
         f"saw none in {sweep_markers} — the no-duplicate proof would be vacuous"
+    )
+
+
+# ---------------------------------------------------------------------------
+# TS65A multi-block THROUGHPUT ceiling gate (PR #44 wire-bound expectation gate)
+# ---------------------------------------------------------------------------
+#
+# The TS65A analog of test_em540_serial_multi_block_client_is_wire_bound_below_
+# upstream. The TS65A bridge shares the SAME FrameGate/SerialPacingContext as the
+# EM540 bridge, so a flat-out Fronius-like client reading a full SunSpec block set
+# per cycle is wire-bound below 12.5 Hz at 9600 baud by the SAME serial physics.
+# The anchor (AC power FLOAT32 40097) drives distinct-frame detection; the decoded
+# float is strictly increasing per distinct upstream frame (see the TS65A cadence
+# module comment), so a CHANGE marks a genuinely new generation.
+#
+# Each read is charged its real 9600 8N1 on-wire time (the PTY harness does not
+# throttle to baud — see the simulated-wire-timing comment above _sim_wire_time_s).
+# Wire-time arithmetic (9600 8N1, byte time = 1.042 ms; response = 5 + 2*count;
+# + _SIM_TURNAROUND_S = 2 ms per read):
+#   40097 cnt2  -> 17 B -> ~17.7 ms + 2 = ~19.7 ms (AC power anchor)
+#   40071 cnt2  -> 17 B -> ~17.7 ms + 2 = ~19.7 ms (AC current total)
+#   40137 cnt2  -> 17 B -> ~17.7 ms + 2 = ~19.7 ms (wh_plus_total)
+#   40000 cnt2  -> 17 B -> ~17.7 ms + 2 = ~19.7 ms (signature/model)
+#   40071 cnt16 -> 45 B -> ~46.9 ms + 2 = ~48.9 ms (wider dynamic model block)
+# Sum ~= 127 ms/cycle of simulated wire time (pure arithmetic ~7.9 Hz); with the
+# real pymodbus RTU round-trips clocked over the PTY on top of the single sleep
+# the OBSERVED rate is ~5 Hz. Both are wire-bound below the 12.5 Hz upstream. Band
+# shared with EM540 (_MULTIBLOCK_LOW_HZ/_MULTIBLOCK_HIGH_HZ).
+
+_TS65A_SIGNATURE_ADDRESS = 40000
+_TS65A_SIGNATURE_REG_COUNT = 2
+_TS65A_MODEL_BLOCK_ADDRESS = 40071
+_TS65A_MODEL_BLOCK_REG_COUNT = 16
+# The full TS65A cycle (anchor first, then follow-on blocks), as (addr, count).
+_TS65A_MULTIBLOCK_CYCLE: tuple[tuple[int, int], ...] = (
+    (_TS65A_POWER_ANCHOR_ADDRESS, _TS65A_POWER_REG_COUNT),  # 40097 cnt2 (anchor)
+    (_TS65A_CURRENT_BLOCK_ADDRESS, _TS65A_CURRENT_REG_COUNT),  # 40071 cnt2
+    (_TS65A_ENERGY_MARKER_ADDRESS, _TS65A_ENERGY_REG_COUNT),  # 40137 cnt2
+    (_TS65A_SIGNATURE_ADDRESS, _TS65A_SIGNATURE_REG_COUNT),  # 40000 cnt2 (model/sig)
+    (_TS65A_MODEL_BLOCK_ADDRESS, _TS65A_MODEL_BLOCK_REG_COUNT),  # 40071 cnt16 (wide block)
+)
+
+
+def _measure_multiblock_throughput_float(
+    client, cycle: tuple[tuple[int, int], ...], *, window_s: float
+) -> list[tuple[float, float]]:
+    """TS65A analog of _measure_multiblock_throughput_int: read a full multi-block
+    cycle for ``window_s``, charging real 9600-baud wire time per read, and return
+    ``(receive_monotonic_s, anchor_power_float)`` for every SUCCESSFUL cycle.
+
+    The FIRST entry of ``cycle`` is the primary anchor read (AC power FLOAT32);
+    its decoded float drives distinct-frame detection (it changes once per
+    distinct upstream generation — see the TS65A cadence module comment) and its
+    response-receive timestamp is the cycle's arrival time. A cycle where any read
+    errors/raises is skipped so a transient PTY hiccup never pollutes the sample.
+    """
+    samples: list[tuple[float, float]] = []
+    cycle_wire_s = _sim_cycle_wire_time_s(cycle)
+    deadline = time.monotonic() + window_s
+    while time.monotonic() < deadline:
+        anchor_power: float | None = None
+        anchor_received: float | None = None
+        torn = False
+        for address, count in cycle:
+            try:
+                result = client.read_holding_registers(address, count=count, device_id=1)
+            except (ModbusException, OSError, ConnectionError):
+                torn = True
+                break
+            received = time.monotonic()
+            if result.isError():
+                torn = True
+                break
+            if anchor_power is None:
+                anchor_power = _decode_float32_be(list(result.registers))
+                anchor_received = received
+        if torn or anchor_power is None or anchor_received is None:
+            continue
+        samples.append((anchor_received, anchor_power))
+        time.sleep(cycle_wire_s)
+    return samples
+
+
+@pytest.mark.integration
+def test_ts65a_serial_multi_block_client_is_wire_bound_below_upstream() -> None:
+    """GATE: a flat-out TS65A serial client that reads the FULL SunSpec block set
+    every cycle is WIRE-BOUND below the 12.5 Hz upstream at 9600 baud — the TS65A
+    analog of the EM540 multi-block throughput gate.
+
+    Supplements (does NOT replace) the anchor-only TS65A cadence test, which
+    proves smoothness. This proves the honest throughput ceiling a real Fronius
+    client observes. Correctness-of-EXPECTATION gate, NOT a perf target: asserts
+    the physically achievable ~6-9 Hz band (with CI headroom), NOT 12.5 Hz, plus
+    no duplicate anchor frames and bounded jitter. See the module comment above
+    for the wire-time arithmetic justifying the band. Each read is charged its
+    real 9600 8N1 on-wire time (the PTY harness does not throttle to baud — see
+    _sim_wire_time_s).
+    """
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        tmp_path = Path(tmp_dir)
+
+        em540_tcp_port = find_free_port()
+        em540_rtu_port = find_free_port()
+        ts65a_tcp_port = find_free_port()
+
+        em540_serial = SerialCable("ts65a-throughput-em540")
+        ts65a_serial = SerialCable("ts65a-throughput-ts65a")
+
+        upstream = Em540UpstreamSimulator(frame_seed=100)
+        upstream.start()
+
+        try:
+            config_path = tmp_path / "config.yaml"
+            generate_config(
+                config_path,
+                upstream.port,
+                em540_tcp_port,
+                em540_rtu_port,
+                ts65a_tcp_port,
+                em540_serial_port=em540_serial.left_path,
+                ts65a_serial_port=ts65a_serial.left_path,
+                update_interval=_CADENCE_PERIOD_S,
+                serial_pacing_enabled=True,
+                serial_pacing_max_wait_s=0.12,
+                serial_timeout=0.5,
+                stale_frame_detection_enabled=True,
+            )
+
+            service = ServiceProcess(config_path)
+            service.start()
+
+            # Drive the upstream at a steady 12.5Hz, independent of the client.
+            publisher = _SteadyMarkerPublisher(upstream, _CADENCE_PERIOD_S)
+            publisher.start()
+
+            try:
+                wait_for_port(em540_tcp_port, timeout=20.0)
+                wait_for_port(ts65a_tcp_port, timeout=20.0)
+
+                clients = DownstreamClients(
+                    em540_tcp_port,
+                    em540_rtu_port,
+                    ts65a_tcp_port,
+                    em540_serial.right_path,
+                    ts65a_serial.right_path,
+                )
+                clients.connect_all()
+
+                wait_for_downstream_data(clients.ts65a_tcp, address=40071, timeout=120.0)
+
+                wait_for_condition(
+                    lambda: (
+                        _measure_multiblock_throughput_float(
+                            clients.ts65a_serial, _TS65A_MULTIBLOCK_CYCLE, window_s=0.5
+                        )
+                        != []
+                    ),
+                    timeout=30.0,
+                    message="TS65A serial path did not serve a multi-block cycle before the window"
+                    + service.diagnostics(),
+                )
+
+                raw_samples = _measure_multiblock_throughput_float(
+                    clients.ts65a_serial, _TS65A_MULTIBLOCK_CYCLE, window_s=_CADENCE_WINDOW_S
+                )
+
+                service.assert_running()
+                clients.disconnect_all()
+            finally:
+                publisher.stop()
+                service.stop()
+        finally:
+            upstream.stop()
+            em540_serial.close()
+            ts65a_serial.close()
+
+    samples = _drop_warmup(raw_samples, _CADENCE_WARMUP_S)
+
+    assert len(samples) >= 20, f"too few successful TS65A multi-block cycles to assess throughput (got {len(samples)})"
+
+    metrics = _summarize_cadence(samples)
+    _log_throughput_report(metrics, label="TS65A", low_hz=_MULTIBLOCK_LOW_HZ, high_hz=_MULTIBLOCK_HIGH_HZ)
+
+    assert metrics["distinct_markers"] >= 10, (
+        f"too few distinct TS65A multi-block frames to assess throughput (got {metrics['distinct_markers']})"
+    )
+
+    # (1) WIRE-BOUND BAND (median-based), NOT 12.5 Hz.
+    assert _MULTIBLOCK_LOW_HZ <= metrics["median_rate_hz"] <= _MULTIBLOCK_HIGH_HZ, (
+        f"TS65A multi-block throughput (median) {metrics['median_rate_hz']:.2f} Hz outside the wire-bound band "
+        f"{_MULTIBLOCK_LOW_HZ:.1f}-{_MULTIBLOCK_HIGH_HZ:.1f} Hz — a value AT 12.5 Hz means the cycle degenerated "
+        f"to a single-block poll; far below the band means an injected per-cycle stall"
+    )
+
+    # (2) NO DUPLICATE ANCHOR FRAMES even though the client is slower than upstream.
+    assert metrics["consecutive_duplicate_reads"] == 0, (
+        f"a wire-bound TS65A multi-block client must never see a DUPLICATE anchor frame, got "
+        f"{metrics['consecutive_duplicate_reads']} consecutive-duplicate reads — pacing re-served a consumed frame"
+    )
+
+    # (3) BOUNDED JITTER: wire-bound but still steady (same 60 ms bound as EM540).
+    assert metrics["stdev_ms"] < 60.0, (
+        f"TS65A multi-block inter-arrival jitter {metrics['stdev_ms']:.2f} ms exceeds 60 ms — stream not steady; "
+        f"median={metrics['median_ms']:.1f}ms p95={metrics['p95_ms']:.1f}ms "
+        f"deltas(ms)={[round(d, 1) for d in metrics['deltas_ms'][:40]]}"
     )

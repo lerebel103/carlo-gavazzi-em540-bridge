@@ -103,13 +103,61 @@ on whatever frame its first read happened to pin: its follow-on reads refresh th
 **availability** — it only jumps to a frame the upstream has already produced, never to a configured
 wall-clock cadence.
 
+**What the latch does *not* do: it cannot make a client read faster than its own cycle clocks over
+the wire.** A real multi-block client (e.g. a Victron GX reading the full EM540 register set, or a
+Fronius inverter reading the SunSpec blocks) issues several reads per cycle, and the whole cycle's
+on-wire time is bounded by the serial **baud rate**. At the **9600-baud default** the full EM540
+read set clocks roughly 120–160 ms over the line, which **exceeds** the 80 ms (12.5 Hz) upstream
+period, so a flat-out multi-block client is **wire-bound to about 6–9 Hz** — *below* the upstream
+rate — purely by serial physics. This is **expected and correct at 9600 baud, not a bug and not a
+duplicate-frame problem**: the latch still delivers smooth, duplicate-free, whole-cycle-coherent
+frames capped at the upstream rate; it simply cannot clock a client's reads out faster than the line
+allows. The pacing layer itself is unaffected by baud — baud only sets the wire ceiling. The
+integration suite guards this expectation with a multi-block throughput test for both bridges
+(`test_em540_serial_multi_block_client_is_wire_bound_below_upstream` and its TS65A twin), which
+asserts the wire-bound band for the configured baud rather than a physically impossible 12.5 Hz.
+
+**Raising the baud rate to reach the full ~12.5 Hz (Victron GX).** The 6–9 Hz figure is the ceiling
+*only at 9600 baud* — it is **not** a hard limit of the GX. The baud is a command-line argument of
+the GX's Carlo Gavazzi meter driver and can be raised. This has been verified on real hardware: with
+the link at 115200 baud the full multi-block cycle clocks well under the 80 ms upstream period and
+the Victron system consumes the (emulated) EM540 data at a steady **~12.5 Hz**. Both ends must agree
+on the baud rate or you get framing errors (not merely a slow link). To do this:
+
+1. **On the GX device**, edit the driver start script
+   `/opt/victronenergy/dbus-cgwacs/start-cgwacs.sh` and add `--baud 115200` to the driver args line.
+   The default line is `args="/dev/$tty"`; change it to:
+
+   ```sh
+   args="/dev/$tty --baud 115200"
+   ```
+
+   This is a manual, user-applied change to a Victron system file — the bridge cannot make it for
+   you — and it is the path that has been verified to work.
+
+2. **On the bridge**, set the matching downstream serial baud rate so both ends agree:
+   `em540_slave.serial.baudrate: 115200` (and `ts65a_slave.serial.baudrate: 115200` if that bridge's
+   serial output is used).
+
+The multi-block throughput integration test above still asserts the achievable wire-bound rate for
+the *test harness's* configured baud; it is independent of the GX baud you run in the field.
+
 **Configuration** (per bridge, under `em540_slave.serial` and `ts65a_slave.serial`):
 
 | Setting | Default | Notes |
 |---------|---------|-------|
-| `pacing_enabled` | `true` | Set `false` to disable latching entirely (pure pass-through; duplicate frames possible). |
+| `pacing_enabled` | `true` | Set `false` to disable latching entirely (pure pass-through; duplicate frames possible). Runtime-settable and persisted — changeable live via Home Assistant (see below) with no restart. |
 | `pacing_max_wait_s` | `0.12` | Upper bound on how long a read waits for a fresh frame. Must be strictly less than `serial.timeout` (validated). `<= 0` also disables latching. |
 | `client_read_timeout_ms` | `200` | The client's own read deadline. The latch wait is clamped per request so the response still fits inside it. |
+
+**Dynamic Home Assistant pacing toggle.** Each serial bridge exposes a Home Assistant **switch** —
+**EM540 Serial Pacing** and **TS65A Serial Pacing** — that enables or disables that bridge's serial
+pacing at runtime. The switch is bound to the live `pacing_enabled` config value the bridge's pacing
+layer reads on every request, so flipping it takes effect **immediately with no service restart**,
+and the change is persisted to `config.yaml`. Turn a switch **off** to let a serial client poll
+unpaced and observe its **natural, unpaced read rate** (e.g. to compare against the paced rate or to
+measure the raw wire-bound ceiling described above); turn it back **on** to restore duplicate-free,
+coherent pacing.
 
 Two Home Assistant diagnostic sensors expose the observed downstream serial poll rate so you can
 see the latch in action: **EM540 Serial Read Rate** and **TS65A Serial Read Rate** (both in Hz,

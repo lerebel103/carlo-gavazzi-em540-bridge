@@ -161,6 +161,31 @@ Notes:
   notify task. This pacing is implemented for SERIAL clients ONLY — TCP and RTU-over-TCP clients get
   no frame-latching/coherence guarantee (per-connection latching for concurrent TCP connections is
   significantly more complex; future work).
+- The cadence gates poll ONLY the power anchor (one tiny read), so their per-cycle wire time is far
+  under the 80ms upstream period and they correctly read ~12.5Hz — but that is a single-block poller,
+  NOT a real client. A real MULTI-BLOCK client (Victron GX full EM540 read set; Fronius SunSpec
+  blocks) is WIRE-BOUND BELOW upstream at the 9600-baud DEFAULT: the full cycle clocks ~120-160ms
+  over the line (byte time = 10/9600 ~= 1.042ms, RTU response = 5 + 2*count bytes), exceeding the
+  80ms (12.5Hz) period, so a flat-out client tops out ~6-9Hz. This is physical, EXPECTED at 9600, and
+  NOT a bug — pacing still delivers smooth, duplicate-free, coherent frames capped at upstream, but
+  cannot clock a client's reads out faster than the line. Do NOT "fix" this by asserting 12.5Hz for a
+  multi-block client or by changing `async_getValues` to chase the rate; the only lever is baud. The
+  9600 ceiling is NOT a hard GX limit: the Victron GX driver baud is a CLI arg and has been verified
+  on real hardware to run at 115200 (edit `/opt/victronenergy/dbus-cgwacs/start-cgwacs.sh` to add
+  `--baud 115200`, and set the matching `*_slave.serial.baudrate: 115200` on the bridge — both ends
+  must agree), after which the client reaches the full ~12.5Hz. See README for the operator steps.
+  Guarded by the multi-block throughput gates
+  `test_{em540,ts65a}_serial_multi_block_client_is_wire_bound_below_upstream` (assert the ~6-9Hz band
+  for the TEST harness's configured baud, no duplicate anchor frames, bounded jitter), which
+  SUPPLEMENT (do not replace) the anchor-only cadence gates. The PTY harness does not throttle to
+  baud, so the tests charge each read its real 9600 on-wire time (`_sim_wire_time_s`) to reproduce
+  the physics. Background: `.agents/tasks/serial-throughput-cap.md`.
+- `pacing_enabled` is runtime-settable/persisted and exposed as a Home Assistant SWITCH per bridge
+  ("EM540 Serial Pacing" / "TS65A Serial Pacing", `ha_config_entities.py`, `entity_type="switch"`).
+  The switch is bound to the live `SlaveSerialConfig.pacing_enabled` the `SerialPacingContext` reads
+  on every request, so flipping it enables/disables pacing IMMEDIATELY with NO proxy reconstruction
+  and NO service restart (and is persisted via `ConfigManager`). Turning it off lets an operator
+  observe the natural, unpaced read rate (e.g. the raw wire-bound ceiling above).
 
 ## Register Layout Invariants (validated against production)
 
