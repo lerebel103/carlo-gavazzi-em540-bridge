@@ -1369,6 +1369,259 @@ class TestSerialPacing(unittest.TestCase):
 
         asyncio.run(scenario())
 
+    # -- FIX 1: non-anchor-only client refreshes on EVERY new generation ------
+
+    def test_non_anchor_only_client_refreshes_on_every_new_generation(self):
+        """FIX 1 regression: a client that NEVER reads the primary cycle-start
+        anchor must refresh its pin on EVERY strictly-newer generation
+        (N -> N+1 -> N+2), tracking upstream at the FULL rate — not at half rate
+        (every other generation) as the old pin-age bound of 1 forced."""
+
+        async def scenario():
+            # Primary anchor is 0x0028; this client only ever reads 0x0000.
+            core, _helper, gate, ctx = self._make(anchors={0x0028, 0x0012}, max_wait_s=0.12)
+            ctx._primary_anchor = 0x0028
+
+            # First-ever (non-anchor) read pins the first available frame (gen 1).
+            gate.publish(1, _snapshot(1, length=0x0200))
+            t_first = asyncio.ensure_future(ctx.async_getValues(1, 3, 0x0000, 2))
+            await asyncio.sleep(0)
+            r_first = await asyncio.wait_for(t_first, timeout=1.0)
+            self.assertEqual(ctx._pinned_generation, 1)
+            self.assertEqual(r_first, [100 + 0, 100 + 1])
+            self.assertFalse(ctx._cycle_start_seen, "a non-anchor read must not mark the client primary-driven")
+
+            # Upstream advances by exactly ONE generation; the next non-anchor read
+            # must refresh to gen 2 (NOT stay frozen on gen 1 until gen 3).
+            gate.publish(2, _snapshot(2, length=0x0200))
+            await asyncio.sleep(0)
+            r_n1 = await asyncio.wait_for(ctx.async_getValues(1, 3, 0x0000, 2), timeout=0.01)
+            self.assertEqual(ctx._pinned_generation, 2, "must refresh on the FIRST newer generation, not every other")
+            self.assertEqual(r_n1, [200 + 0, 200 + 1])
+
+            # Another single advance -> refresh again to gen 3 (full rate).
+            gate.publish(3, _snapshot(3, length=0x0200))
+            await asyncio.sleep(0)
+            r_n2 = await asyncio.wait_for(ctx.async_getValues(1, 3, 0x0000, 2), timeout=0.01)
+            self.assertEqual(ctx._pinned_generation, 3, "every new generation must refresh the pin (N -> N+1 -> N+2)")
+            self.assertEqual(r_n2, [300 + 0, 300 + 1])
+
+            # No new generation -> the pin must NOT advance (still coherent, no
+            # spurious refresh).
+            same = await asyncio.wait_for(ctx.async_getValues(1, 3, 0x0000, 2), timeout=0.01)
+            self.assertEqual(ctx._pinned_generation, 3, "no new generation -> pin unchanged")
+            self.assertEqual(same, [300 + 0, 300 + 1])
+            self.assertEqual(core.get_calls, [], "refresh never touches the live core")
+
+        asyncio.run(scenario())
+
+    def test_primary_anchor_driven_follow_ons_stay_coherent_despite_fix1(self):
+        """FIX 1 must NOT regress BUG 1 whole-sweep coherence: a primary-anchor-
+        driven client's follow-on reads stay on the SINGLE pinned generation even
+        when MULTIPLE upstream generations land mid-sweep, and the pin advances
+        ONLY on the next primary-anchor read."""
+
+        async def scenario():
+            core, _helper, gate, ctx = self._make(anchors={0x0028, 0x0012}, max_wait_s=0.12)
+            ctx._primary_anchor = 0x0028
+
+            # Primary-anchor read pins gen 1 and marks the client primary-driven.
+            gate.publish(1, _snapshot(1, length=0x0200))
+            power = await asyncio.wait_for(ctx.async_getValues(1, 3, 0x0028, 2), timeout=1.0)
+            self.assertEqual(ctx._pinned_generation, 1)
+            self.assertTrue(ctx._cycle_start_seen)
+            self.assertEqual(power, [100 + 0x0028, 100 + 0x0029])
+
+            # TWO generations land mid-sweep; the follow-on blocks must all come
+            # from gen 1 — the strictly-newer refresh must NOT apply to a
+            # primary-driven client.
+            gate.publish(2, _snapshot(2, length=0x0200))
+            gate.publish(3, _snapshot(3, length=0x0200))
+            await asyncio.sleep(0)
+            secondary = await asyncio.wait_for(ctx.async_getValues(1, 3, 0x0012, 2), timeout=0.01)
+            energy = await asyncio.wait_for(ctx.async_getValues(1, 3, 0x0100, 2), timeout=0.01)
+            self.assertEqual(ctx._pinned_generation, 1, "primary-driven follow-ons must hold the pinned generation")
+            self.assertEqual(secondary, [100 + 0x0012, 100 + 0x0013])
+            self.assertEqual(energy, [100 + 0x0100, 100 + 0x0101])
+
+            # The next primary read advances exactly one cycle step, to the latest.
+            power2 = await asyncio.wait_for(ctx.async_getValues(1, 3, 0x0028, 2), timeout=0.01)
+            self.assertEqual(ctx._pinned_generation, 3, "next primary-anchor read advances the pin")
+            self.assertEqual(power2, [300 + 0x0028, 300 + 0x0029])
+            self.assertEqual(core.get_calls, [])
+
+        asyncio.run(scenario())
+
+    # -- FIX 2: toggle-off clears the stale pin so re-enable never serves it ---
+
+    def test_toggle_off_clears_pin_so_reenable_does_not_serve_stale_snapshot(self):
+        """FIX 2 regression: with pacing DISABLED the client reads newer live
+        frames unpaced; RE-ENABLING pacing must never return the stale pre-toggle
+        pinned snapshot on the next follow-on read, nor stay frozen on it. The
+        disabled path clears the cached snapshot and cycle-start flag, so the
+        first read after re-enable re-pins a fresh frame."""
+
+        from app.config import SlaveSerialConfig
+
+        async def scenario():
+            core = _FakeCore(result=[9, 9])
+            helper = _FakePduHelper()
+            gate = FrameGate()
+            serial_config = SlaveSerialConfig(pacing_enabled=True, pacing_max_wait_s=0.12)
+            ctx = SerialPacingContext(
+                core,
+                gate,
+                helper,
+                0.0,  # live resolver drives behaviour
+                reg_start_address=0,
+                anchors={0x0028, 0x0012},
+                primary_anchor=0x0028,
+                serial_config=serial_config,
+            )
+
+            # (1) PACED: primary read pins gen 1; the client is primary-driven.
+            gate.publish(1, _snapshot(1, length=0x0200))
+            power = await asyncio.wait_for(ctx.async_getValues(1, 3, 0x0028, 2), timeout=1.0)
+            self.assertEqual(ctx._pinned_generation, 1)
+            self.assertTrue(ctx._cycle_start_seen)
+            self.assertEqual(power, [100 + 0x0028, 100 + 0x0029])
+
+            # (2) TOGGLE OFF, then the gate advances by several generations while
+            # the client reads them unpaced (straight pass-through to the core).
+            serial_config.pacing_enabled = False
+            for gen in (2, 3, 4):
+                gate.publish(gen, _snapshot(gen, length=0x0200))
+                await asyncio.sleep(0)
+                r = await asyncio.wait_for(ctx.async_getValues(1, 3, 0x0028, 2), timeout=0.05)
+                self.assertEqual(r, [9, 9], "disabled pacing passes through to the live core")
+            # The disabled path must have cleared the cached pin snapshot and the
+            # primary-driven flag.
+            self.assertIsNone(ctx._pinned_snapshot, "disabled path must clear the cached snapshot")
+            self.assertFalse(ctx._cycle_start_seen, "disabled path must clear the cycle-start flag")
+
+            # (3) RE-ENABLE pacing. With the cached snapshot cleared, the first
+            # read after re-enable goes through the cycle-start path and re-pins a
+            # FRESH frame. The latest already-published generation (gen 4) is newer
+            # than the retained pin cursor (gen 1), so the read serves gen 4
+            # immediately — it must NEVER return the stale pre-toggle gen-1
+            # snapshot, and it must not freeze.
+            serial_config.pacing_enabled = True
+            core.get_calls.clear()
+            r_post = await asyncio.wait_for(ctx.async_getValues(1, 3, 0x0100, 2), timeout=1.0)
+            self.assertEqual(
+                ctx._pinned_generation, 4, "re-enable must re-pin the latest fresh frame, not the stale pin"
+            )
+            self.assertEqual(r_post, [400 + 0x0100, 400 + 0x0101], "must never serve the pre-toggle gen-1 snapshot")
+
+            # A subsequent follow-on with no newer frame stays coherent on gen 4
+            # (served from the fresh pin) and never reverts to the stale snapshot.
+            r_follow = await asyncio.wait_for(ctx.async_getValues(1, 3, 0x0000, 2), timeout=0.01)
+            self.assertEqual(ctx._pinned_generation, 4, "follow-on stays coherent on the fresh pin (no freeze)")
+            self.assertEqual(r_follow, [400 + 0, 400 + 1])
+
+            # A genuinely newer frame (gen 5) then refreshes the pin again, proving
+            # pacing fully resumed and the client never gets stuck on an old frame.
+            gate.publish(5, _snapshot(5, length=0x0200))
+            await asyncio.sleep(0)
+            r_newer = await asyncio.wait_for(ctx.async_getValues(1, 3, 0x0000, 2), timeout=0.01)
+            self.assertEqual(ctx._pinned_generation, 5, "a newer frame refreshes the pin after re-enable")
+            self.assertEqual(r_newer, [500 + 0, 500 + 1])
+
+        asyncio.run(scenario())
+
+    # -- FIX 3: re-enabling pacing does not double-count a generation ----------
+
+    def test_toggle_off_then_on_does_not_double_count_unpaced_generation(self):
+        """FIX 3 regression (extends the switch-back-on step): pace and count
+        gen 1; toggle off; an unpaced primary read counts gen 2; toggle on; a
+        primary read that pins gen 2 must NOT re-count gen 2 — the paced and
+        unpaced paths share the observed-generation cursor. A normal paced
+        sequence still counts exactly one per cycle."""
+
+        from app.config import SlaveSerialConfig
+
+        async def scenario():
+            core = _FakeCore(result=[9, 9])
+            helper = _FakePduHelper()
+            gate = FrameGate()
+            ticks: list[int] = []
+            serial_config = SlaveSerialConfig(pacing_enabled=True, pacing_max_wait_s=0.12)
+            ctx = SerialPacingContext(
+                core,
+                gate,
+                helper,
+                0.0,  # live resolver drives behaviour
+                reg_start_address=0,
+                anchors={0x0028},
+                primary_anchor=0x0028,
+                on_cycle_advance=lambda: ticks.append(1),
+                serial_config=serial_config,
+            )
+
+            # PACED: primary read pins gen 1 -> count once.
+            gate.publish(1, _snapshot(1, length=0x0200))
+            await asyncio.wait_for(ctx.async_getValues(1, 3, 0x0028, 2), timeout=1.0)
+            self.assertEqual(ctx.cycle_start_advances, 1)
+            self.assertEqual(len(ticks), 1)
+
+            # TOGGLE OFF, then an UNPACED primary read observes gen 2 -> count 2.
+            serial_config.pacing_enabled = False
+            gate.publish(2, _snapshot(2, length=0x0200))
+            await asyncio.sleep(0)
+            await asyncio.wait_for(ctx.async_getValues(1, 3, 0x0028, 2), timeout=0.05)
+            self.assertEqual(ctx.cycle_start_advances, 2, "unpaced primary read counts the new generation")
+            self.assertEqual(len(ticks), 2)
+
+            # TOGGLE BACK ON. A primary read now PINS gen 2 (the latest already
+            # available). Because gen 2 was ALREADY counted by the unpaced path,
+            # it must NOT be counted again (no double count) — this is the switch-
+            # back-on step the old guard (> previous_generation) got wrong.
+            serial_config.pacing_enabled = True
+            await asyncio.wait_for(ctx.async_getValues(1, 3, 0x0028, 2), timeout=1.0)
+            self.assertEqual(ctx._pinned_generation, 2, "re-enable pins the latest available generation")
+            self.assertEqual(ctx.cycle_start_advances, 2, "re-enabling must NOT re-count the already-counted gen 2")
+            self.assertEqual(len(ticks), 2)
+
+            # A genuinely NEW generation, paced, counts exactly once more.
+            gate.publish(3, _snapshot(3, length=0x0200))
+            await asyncio.sleep(0)
+            await asyncio.wait_for(ctx.async_getValues(1, 3, 0x0028, 2), timeout=1.0)
+            self.assertEqual(ctx._pinned_generation, 3)
+            self.assertEqual(ctx.cycle_start_advances, 3, "a new generation counts one per cycle")
+            self.assertEqual(len(ticks), 3)
+
+        asyncio.run(scenario())
+
+    def test_normal_paced_sequence_counts_one_per_cycle_after_fix3(self):
+        """FIX 3 must not regress the normal counter: a steady paced sequence with
+        no toggles counts exactly one tick per cycle (one per new generation)."""
+
+        async def scenario():
+            core = _FakeCore()
+            helper = _FakePduHelper()
+            gate = FrameGate()
+            ticks: list[int] = []
+            ctx = SerialPacingContext(
+                core,
+                gate,
+                helper,
+                0.12,
+                reg_start_address=0,
+                anchors={0x0028, 0x0012},
+                primary_anchor=0x0028,
+                on_cycle_advance=lambda: ticks.append(1),
+            )
+
+            for gen in (1, 2, 3):
+                gate.publish(gen, _snapshot(gen, length=0x0200))
+                await asyncio.wait_for(ctx.async_getValues(1, 3, 0x0028, 2), timeout=1.0)
+                # A follow-on read in the same cycle must not tick.
+                await asyncio.wait_for(ctx.async_getValues(1, 3, 0x0100, 2), timeout=0.01)
+                self.assertEqual(ctx.cycle_start_advances, gen, "exactly one tick per cycle")
+                self.assertEqual(len(ticks), gen)
+
+        asyncio.run(scenario())
+
 
 if __name__ == "__main__":
     unittest.main()

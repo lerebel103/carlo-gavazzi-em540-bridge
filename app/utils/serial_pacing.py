@@ -332,7 +332,6 @@ class SerialPacingContext:
         primary_anchor: int | None = None,
         valid_addresses: Iterable[int] | None = None,
         on_cycle_advance: Callable[[], None] | None = None,
-        pin_age_bound_generations: int = 1,
         serial_config: object | None = None,
     ) -> None:
         self._core = core
@@ -437,25 +436,12 @@ class SerialPacingContext:
         # this True on its first cycle start, and its follow-on reads then stay
         # coherent with the pinned frame for the rest of each cycle. A client that
         # NEVER reads the primary cycle-start anchor (non-anchor-only) leaves this
-        # False; its reads get a bounded refresh to the latest available
-        # generation so it is not frozen on one frame forever (COMMIT 2 /
-        # pin-age bound). The bound is upstream generation AVAILABILITY — the
-        # refresh only jumps to a generation the gate has already published, never
-        # a configured wall-clock cadence.
+        # False; its reads refresh to the latest available generation whenever a
+        # strictly newer one exists, so it is not frozen on one frame and tracks
+        # upstream at the FULL rate (COMMIT 2). The bound is upstream generation
+        # AVAILABILITY — the refresh only jumps to a generation the gate has
+        # already published, never a configured wall-clock cadence.
         self._cycle_start_seen: bool = False
-        # Maximum number of upstream generations a follow-on read's pin may lag
-        # behind the latest AVAILABLE generation before it is refreshed (BUG B).
-        # The bound applies to EVERY follow-on read — including a primary-anchor-
-        # driven client once _cycle_start_seen is set — so a pin left behind by an
-        # outage or a client polling-pattern change (the client stops reading the
-        # primary cycle-start anchor) is not served indefinitely while the breaker
-        # stays closed (PduHelper tracks the latest UPSTREAM timestamp, not the age
-        # of the served pin). Default 1: a normal anchor-driven sweep advances the
-        # pin on its own primary read each cycle and lags at most one generation
-        # mid-sweep, so the bound does NOT trigger and whole-cycle coherence is
-        # preserved; it fires only when the pin is genuinely left behind by more
-        # than the bound. Still availability-bounded (no wait, no wall-clock).
-        self._pin_age_bound_generations: int = pin_age_bound_generations
 
     def _resolve_wait_s(self) -> float:
         """Resolve the LIVE pacing cap for this request.
@@ -594,6 +580,20 @@ class SerialPacingContext:
         # takes effect on the very next read with no reconstruction/restart.
         max_wait_s = self._resolve_wait_s()
         if max_wait_s <= 0:
+            # FIX 2 — while pacing is DISABLED the client reads live frames
+            # unpaced, so any snapshot pinned before the toggle is stale the
+            # instant the next frame lands. Clear the cached pin state here so a
+            # pre-toggle snapshot can NEVER be served after pacing is re-enabled
+            # (which otherwise returned the stale pre-toggle pin on the first
+            # follow-on read, and could keep follow-ons frozen on it). Reset the
+            # cycle-start classification too, so the client is re-classified on
+            # its next paced cycle-start read. RETAIN the generation cursors
+            # (_pinned_generation / _last_observed_cycle_generation) so that when
+            # pacing resumes a primary cycle-start read still requires a STRICTLY
+            # NEWER generation and the Serial Read Rate counter is not double-
+            # counted (FIX 3).
+            self._pinned_snapshot = None
+            self._cycle_start_seen = False
             # BUG 3: still observe the primary-anchor polling cycle so the
             # 'Serial Read Rate' sensor reports the NATURAL unpaced rate when the
             # latch is off (the documented reason an operator flips it off). Only
@@ -675,14 +675,16 @@ class SerialPacingContext:
                     self._pinned_generation = latest_generation
                     self._pinned_snapshot = latest_snapshot
                     self._pinned_circuit_open_count = current_open_count
-                elif (
-                    not self._cycle_start_seen
-                    and latest_generation - self._pinned_generation > self._pin_age_bound_generations
-                ):
-                    # Non-anchor-only client: bounded generation-availability
-                    # refresh so it is not frozen on one frame. A primary-anchor-
-                    # driven client (_cycle_start_seen set) NEVER takes this branch
-                    # — its sweep stays coherent on the single pinned generation.
+                elif not self._cycle_start_seen and latest_generation > self._pinned_generation:
+                    # Non-anchor-only client: refresh to the LATEST already-
+                    # published generation whenever a STRICTLY NEWER one exists, so
+                    # it tracks upstream at the FULL rate (N -> N+1 -> N+2) instead
+                    # of lagging to every other frame. A primary-anchor-driven
+                    # client (_cycle_start_seen set) NEVER takes this branch — its
+                    # sweep stays coherent on the single pinned generation and only
+                    # advances on its next primary-anchor read (BUG 1 whole-sweep
+                    # coherence). Still availability-bounded: it only jumps to a
+                    # frame the gate has already announced (no wait, no wall-clock).
                     self._pinned_generation = latest_generation
                     self._pinned_snapshot = latest_snapshot
             sliced = self._slice_snapshot(self._pinned_snapshot, address, count)
@@ -706,7 +708,6 @@ class SerialPacingContext:
         # cap, the budget that leaves room to serialize this read's response
         # before the client's read deadline). Returns immediately if a newer
         # generation already exists at entry.
-        previous_generation = self._pinned_generation
         effective_wait_s = self._effective_wait_s(count, max_wait_s)
         # BUG A fix: a non-positive wire budget means there is no room to latch
         # this read without risking the client deadline, so SKIP ONLY the
@@ -732,14 +733,22 @@ class SerialPacingContext:
 
         result = await self._pin_and_serve(device_id, func_code, address, count)
         # Hz 'Serial Read Rate' source: count ONE tick when a PRIMARY cycle-start
-        # anchor read advances the pin to a strictly-newer generation (one per
-        # client polling cycle). Not bumped on a first-ever non-anchor read, a
-        # repeat of the same generation (jitter), or any follow-on read. Written
-        # only here on the serial server loop (lock-free, GIL-atomic int). The
-        # observed-generation marker is advanced in lockstep with the pin so the
-        # disabled-path observer (BUG 3) continues the SAME sequence after a toggle
-        # to off without double-counting the cycle that was already counted here.
-        if is_cycle_start and self._pinned_generation > previous_generation:
+        # anchor read advances the pin to a generation NOT YET COUNTED by either
+        # path (one per client polling cycle). Not bumped on a first-ever
+        # non-anchor read, a repeat of the same generation (jitter), or any
+        # follow-on read. Written only here on the serial server loop (lock-free,
+        # GIL-atomic int).
+        #
+        # FIX 3 — the increment gates on the SHARED ``_last_observed_cycle_generation``
+        # cursor (strictly greater), NOT on ``previous_generation``. The paced path
+        # and the disabled-path ``_observe_primary_cycle`` observer advance the
+        # same cursor in lockstep, so a generation already counted by the unpaced
+        # observer (while pacing was off) is NOT re-counted when pacing resumes and
+        # re-pins it, and vice versa. Without this, re-enabling pacing after an
+        # unpaced primary read inflated the counter: ``previous_generation`` only
+        # reflected the last PINNED generation, missing the generation the unpaced
+        # observer had already counted.
+        if is_cycle_start and self._pinned_generation > self._last_observed_cycle_generation:
             self.cycle_start_advances += 1
             self._last_observed_cycle_generation = self._pinned_generation
             if self._on_cycle_advance is not None:
