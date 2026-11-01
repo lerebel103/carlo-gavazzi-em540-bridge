@@ -206,6 +206,70 @@ def serial_serialization_seconds(
     return worst_resp_bytes * byte_time_s
 
 
+def serial_pacing_enabled_error(name: str, serial: "SlaveSerialConfig") -> str | None:
+    """Return the reason pacing CANNOT be enabled for ``serial``, or None if OK.
+
+    This is the SINGLE source of truth for the pacing-ENABLED timing constraints
+    (BUG 4) so the startup validator (``ConfigManager._validate_serial_pacing``)
+    and the Home Assistant pacing SWITCH command path
+    (``HAConfigEntities._on_command``) share ONE check and can never diverge. It
+    evaluates the config AS IF pacing were enabled, regardless of the live
+    ``pacing_enabled`` flag, so the HA path can validate a PROPOSED enable before
+    committing/persisting it (an enabled adapter could load with
+    ``pacing_enabled: false`` and ``pacing_max_wait_s == serial.timeout``; the
+    switch must not flip it to an unstartable state).
+
+    Returns a human-readable error string when enabling pacing would be invalid:
+      - ``pacing_max_wait_s`` is a bool / non-number / non-finite / <= 0;
+      - it is not strictly less than ``serial.timeout``;
+      - it plus the worst-case minimal-response serialization plus the turnaround
+        margin would meet or exceed the client read deadline.
+    Returns ``None`` when enabling pacing is viable. Only meaningful when the
+    serial adapter itself is enabled; callers that care only about an enabled
+    adapter should gate on ``serial.enabled`` first.
+    """
+    value = serial.pacing_max_wait_s
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return f"{name}.pacing_max_wait_s must be a number, got {value!r}"
+    if not math.isfinite(value):
+        return f"{name}.pacing_max_wait_s must be finite, got {value}"
+    if value <= 0:
+        return f"{name}.pacing_max_wait_s must be > 0 to enable pacing, got {value} (a value <= 0 disables latching)"
+
+    crt = serial.client_read_timeout_ms
+    if isinstance(crt, bool) or not isinstance(crt, (int, float)):
+        return f"{name}.client_read_timeout_ms must be a number, got {crt!r}"
+    if not math.isfinite(crt):
+        return f"{name}.client_read_timeout_ms must be finite, got {crt}"
+    if crt <= 0:
+        return f"{name}.client_read_timeout_ms must be > 0, got {crt}"
+
+    if value >= serial.timeout:
+        return (
+            f"{name}.pacing_max_wait_s must be strictly less than {name}.timeout "
+            f"(the serial client response timeout), got pacing_max_wait_s={value} timeout={serial.timeout}"
+        )
+
+    serialization_s = serial_serialization_seconds(
+        serial.baudrate,
+        serial.bytesize,
+        serial.parity,
+        serial.stopbits,
+        _SERIAL_MIN_RESPONSE_REGISTERS,
+    )
+    deadline_s = crt / 1000.0
+    if value + serialization_s + _SERIAL_TURNAROUND_MARGIN_S >= deadline_s:
+        return (
+            f"{name}.pacing_max_wait_s={value}s plus minimal response serialization "
+            f"({serialization_s * 1000:.1f}ms at {serial.baudrate} baud, {serial.bytesize}"
+            f"{serial.parity}{serial.stopbits} framing, {_SERIAL_MIN_RESPONSE_REGISTERS}-register "
+            f"response) plus {_SERIAL_TURNAROUND_MARGIN_S * 1000:.0f}ms turnaround margin would meet or "
+            f"exceed the {name}.client_read_timeout_ms={crt}ms client read deadline, leaving no latch "
+            f"budget even for a minimal read; lower pacing_max_wait_s or raise client_read_timeout_ms"
+        )
+    return None
+
+
 @dataclass
 class Em540SlaveConfig:
     host: str = "0.0.0.0"
@@ -649,35 +713,13 @@ class ConfigManager:
             raise ConfigError(f"{name}.client_read_timeout_ms must be > 0, got {crt}")
 
         # Only enforce the margin-below-timeout + wire-budget checks when latching
-        # is actually active.
+        # is actually active. The enabled-timing constraints live in the shared
+        # serial_pacing_enabled_error() helper (BUG 4) so this startup validator
+        # and the HA pacing SWITCH command path use ONE check and cannot diverge.
         if serial.enabled and serial.pacing_enabled and value > 0:
-            if value >= serial.timeout:
-                raise ConfigError(
-                    f"{name}.pacing_max_wait_s must be strictly less than {name}.timeout "
-                    f"(the serial client response timeout), got pacing_max_wait_s={value} timeout={serial.timeout}"
-                )
-
-            # Viability floor: even a minimal read must leave room to serialize
-            # its response before the client deadline. Larger reads are clamped
-            # per-request at runtime (SerialWireBudget), so this only rejects a
-            # config with no usable latch budget at all.
-            serialization_s = serial_serialization_seconds(
-                serial.baudrate,
-                serial.bytesize,
-                serial.parity,
-                serial.stopbits,
-                _SERIAL_MIN_RESPONSE_REGISTERS,
-            )
-            deadline_s = crt / 1000.0
-            if value + serialization_s + _SERIAL_TURNAROUND_MARGIN_S >= deadline_s:
-                raise ConfigError(
-                    f"{name}.pacing_max_wait_s={value}s plus minimal response serialization "
-                    f"({serialization_s * 1000:.1f}ms at {serial.baudrate} baud, {serial.bytesize}"
-                    f"{serial.parity}{serial.stopbits} framing, {_SERIAL_MIN_RESPONSE_REGISTERS}-register "
-                    f"response) plus {_SERIAL_TURNAROUND_MARGIN_S * 1000:.0f}ms turnaround margin would meet or "
-                    f"exceed the {name}.client_read_timeout_ms={crt}ms client read deadline, leaving no latch "
-                    f"budget even for a minimal read; lower pacing_max_wait_s or raise client_read_timeout_ms"
-                )
+            error = serial_pacing_enabled_error(name, serial)
+            if error is not None:
+                raise ConfigError(error)
 
     def _validate_serial_config(self, name: str, serial: SlaveSerialConfig) -> None:
         if not serial.enabled:
