@@ -388,6 +388,18 @@ class SerialPacingContext:
         # read) waits once for a fresh frame and pins it.
         self._pinned_generation: int = 0
         self._pinned_snapshot: tuple[int, ...] | None = None
+        # The upstream breaker's open-count observed when the current pin was
+        # set (BUG 2 — stale pin survives a short outage). PduHelper increments
+        # ``circuit_open_count`` on every open->(re)open transition, so a change
+        # since the pin was taken means an upstream OUTAGE occurred between the
+        # pin and now. A follow-on read on a primary-anchor-driven client holds
+        # the pin for the whole sweep (BUG 1 coherence) EXCEPT across such an
+        # outage: if the breaker opened and recovered since the pin, the first
+        # follow-on read re-pins to the current (post-recovery) frame so a
+        # seconds-old pre-outage snapshot is never served silently. Freshness —
+        # not generation delta — is what bounds the pin across an outage.
+        # ``getattr`` keeps unit fakes that expose only ``circuit_open`` working.
+        self._pinned_circuit_open_count: int = getattr(self._pdu_helper, "circuit_open_count", 0)
         # Lock-free single-writer counter of PRIMARY cycle-start pin advances —
         # incremented ONCE each time a primary cycle-start anchor read advances
         # the pin to a strictly-NEWER generation (one tick per client polling
@@ -398,6 +410,21 @@ class SerialPacingContext:
         # there) and read lock-free by the diagnostics thread — a GIL-atomic int,
         # so it never blocks the request path.
         self.cycle_start_advances: int = 0
+        # The upstream generation most recently OBSERVED by a primary cycle-start
+        # read, counted INDEPENDENTLY of whether pacing is enabled (BUG 3 — the
+        # HA toggle must not zero the 'Serial Read Rate' sensor). When pacing is
+        # enabled this advances in lockstep with the pin; when pacing is DISABLED
+        # (HA switch off / cap <= 0) the gated read returns at the pass-through
+        # before the pin ever advances, so the pin-advance counter never ticks and
+        # both rate sensors fell to 0 Hz — defeating the documented use case of
+        # flipping pacing OFF to observe the client's NATURAL unpaced rate. This
+        # counter observes the primary-anchor cycle whether paced or not: it ticks
+        # once each time a primary cycle-start read sees a strictly-newer upstream
+        # generation than the last one it observed, so the sensor reports the true
+        # per-cycle refresh rate (pinned to the primary anchor, NOT per inbound
+        # request). Lock-free single-writer on the serial server loop, like
+        # ``cycle_start_advances``.
+        self._last_observed_cycle_generation: int = 0
         # Optional sink notified ONCE per primary cycle-start pin advance (the Hz
         # 'Serial Read Rate' event). The bridge wires this to its
         # SerialActivityTracker.record_cycle_read so the diagnostics layer can
@@ -522,6 +549,27 @@ class SerialPacingContext:
             return False
         return any(address <= anchor < window_end for anchor in self._anchors)
 
+    def _observe_primary_cycle(self) -> None:
+        """Record a primary-anchor polling cycle for the 'Serial Read Rate' sensor.
+
+        BUG 3 — this counts a client polling cycle INDEPENDENTLY of whether pacing
+        is enabled, so the sensor reports the natural unpaced per-cycle rate when
+        the latch is off. It ticks once each time a primary cycle-start read sees a
+        strictly-newer upstream generation than the last one it observed (the
+        client's true per-cycle refresh, NOT per inbound request): a repeated poll
+        of the same frame (client faster than upstream) does not tick. The sink is
+        the SAME ``on_cycle_advance`` (SerialActivityTracker.record_cycle_read) the
+        paced path uses, so the Hz sensor reads consistently whether paced or not.
+        Lock-free single-writer on the serial server loop.
+        """
+        latest_generation, latest_snapshot = self._gate.current_frame()
+        if latest_snapshot is None or latest_generation <= self._last_observed_cycle_generation:
+            return
+        self._last_observed_cycle_generation = latest_generation
+        self.cycle_start_advances += 1
+        if self._on_cycle_advance is not None:
+            self._on_cycle_advance()
+
     async def async_getValues(self, device_id, func_code, address, count: int = 1):
         # (a) STALE-BREAKER FIRST: if the upstream staleness breaker is open, fail
         # closed immediately with DEVICE_BUSY — never block a doomed request up to
@@ -546,6 +594,14 @@ class SerialPacingContext:
         # takes effect on the very next read with no reconstruction/restart.
         max_wait_s = self._resolve_wait_s()
         if max_wait_s <= 0:
+            # BUG 3: still observe the primary-anchor polling cycle so the
+            # 'Serial Read Rate' sensor reports the NATURAL unpaced rate when the
+            # latch is off (the documented reason an operator flips it off). Only
+            # a register read overlapping the primary cycle-start anchor counts —
+            # never a bit read, non-anchor block, or unserved id (both already
+            # returned above). Done BEFORE the pass-through return.
+            if func_code in _REGISTER_READ_FUNC_CODES and self._is_cycle_start_read(address, count):
+                self._observe_primary_cycle()
             return await self._core.async_getValues(device_id, func_code, address, count)
 
         # (b2) NON-REGISTER READ (Finding B1): the proxy replaces the serial
@@ -570,32 +626,65 @@ class SerialPacingContext:
         # cannot cover the window (odd / out-of-range read) fall through to the
         # live core so it behaves exactly as before.
         if not is_cycle_start and have_pin:
-            # (c1) PIN-AGE BOUND (COMMIT 2 + BUG B): a follow-on read must never
-            # serve a pinned generation that lags the latest AVAILABLE generation
-            # by more than ``_pin_age_bound_generations`` (default 1). This covers
-            # TWO stale-pin cases without a wall-clock clamp (the refresh only
-            # jumps to a frame the gate has ALREADY published, with no wait):
-            #   - a non-anchor-only client (never reads the primary cycle-start
-            #     anchor) that would otherwise be frozen on the frame its first
-            #     read happened to pin; and
-            #   - a primary-anchor-driven client (``_cycle_start_seen`` set) whose
-            #     pin is left behind after an upstream outage or a polling-pattern
-            #     change (it STOPS reading the primary anchor) — BUG B: the breaker
-            #     stays closed because PduHelper tracks the latest UPSTREAM
-            #     timestamp, not the age of this served pin, so the stale snapshot
-            #     would be served indefinitely.
-            # A NORMAL anchor-driven sweep re-pins on its own primary read each
-            # cycle and so lags at most one generation mid-sweep: with the default
-            # bound of 1 this condition is FALSE and every block of the cycle stays
-            # coherent with the one pinned frame. The bound only triggers once the
-            # pin falls MORE than the bound behind the latest available generation.
+            # (c1) PIN REFRESH POLICY for a follow-on read. The pin lifecycle is
+            # split by client class so BUG 1 (whole-sweep coherence) and BUG 2
+            # (outage freshness) both hold at once:
+            #
+            #   BUG 1 — PRIMARY-ANCHOR-DRIVEN client (``_cycle_start_seen`` set):
+            #   HOLD the pin for the ENTIRE sweep. Do NOT apply any generation-delta
+            #   refresh mid-cycle. At the natural ~12.5Hz (80ms) a multi-block
+            #   client sweep over 9600 baud takes LONGER than one upstream period,
+            #   so TWO upstream generations can arrive between the primary-anchor
+            #   read and a later follow-on block WITHIN ONE sweep. The old
+            #   generation-delta bound (>1) tripped mid-sweep and TORE the sweep
+            #   across generations (e.g. system power from gen N, energy from
+            #   gen N+2). Holding the pin for the whole sweep guarantees every block
+            #   comes from the one generation pinned at the cycle's primary-anchor
+            #   read, regardless of how many upstream generations land during it.
+            #   The pin advances ONLY on the next primary-anchor (cycle-start) read.
+            #
+            #   BUG 2 — OUTAGE across the sweep: holding the pin must NOT silently
+            #   serve a pre-outage snapshot after a short upstream outage. After an
+            #   outage the first recovered frame is only ONE generation newer than
+            #   the pre-outage pin, so a generation-delta check would miss it; and
+            #   PduHelper's breaker closes on the RECOVERED upstream timestamp, so
+            #   the outgoing freshness check passes and the stale (seconds-old) pin
+            #   would be served. Bound the pin by actual FRESHNESS instead: if the
+            #   upstream breaker opened->recovered since the pin was taken
+            #   (``circuit_open_count`` advanced), the first follow-on read re-pins
+            #   to the CURRENT (post-recovery) frame. A NORMAL no-outage sweep never
+            #   bumps that count, so whole-sweep coherence (BUG 1) is preserved.
+            #
+            #   NON-ANCHOR-ONLY client (``_cycle_start_seen`` NOT set): it never
+            #   reads the primary anchor, so its pin would otherwise freeze on
+            #   whatever frame its first read pinned. Keep the generation-
+            #   availability refresh for THAT client class only — bounded purely by
+            #   upstream availability (jump to an ALREADY-published generation, no
+            #   wait, no wall-clock clamp) so it still tracks fresh frames.
+            #
+            # All refreshes only jump to a frame the gate has ALREADY published
+            # (no wait), and within a single frame the client stays coherent.
             latest_generation, latest_snapshot = self._gate.current_frame()
-            if (
-                latest_snapshot is not None
-                and latest_generation - self._pinned_generation > self._pin_age_bound_generations
-            ):
-                self._pinned_generation = latest_generation
-                self._pinned_snapshot = latest_snapshot
+            current_open_count = getattr(self._pdu_helper, "circuit_open_count", 0)
+            if latest_snapshot is not None:
+                if current_open_count != self._pinned_circuit_open_count:
+                    # BUG 2: an upstream outage happened since the pin was set.
+                    # Re-pin to the current (post-recovery) frame so a pre-outage
+                    # snapshot is never served silently. Applies to BOTH client
+                    # classes; a normal sweep never reaches here (count unchanged).
+                    self._pinned_generation = latest_generation
+                    self._pinned_snapshot = latest_snapshot
+                    self._pinned_circuit_open_count = current_open_count
+                elif (
+                    not self._cycle_start_seen
+                    and latest_generation - self._pinned_generation > self._pin_age_bound_generations
+                ):
+                    # Non-anchor-only client: bounded generation-availability
+                    # refresh so it is not frozen on one frame. A primary-anchor-
+                    # driven client (_cycle_start_seen set) NEVER takes this branch
+                    # — its sweep stays coherent on the single pinned generation.
+                    self._pinned_generation = latest_generation
+                    self._pinned_snapshot = latest_snapshot
             sliced = self._slice_snapshot(self._pinned_snapshot, address, count)
             if sliced is not None:
                 return sliced
@@ -646,9 +735,13 @@ class SerialPacingContext:
         # anchor read advances the pin to a strictly-newer generation (one per
         # client polling cycle). Not bumped on a first-ever non-anchor read, a
         # repeat of the same generation (jitter), or any follow-on read. Written
-        # only here on the serial server loop (lock-free, GIL-atomic int).
+        # only here on the serial server loop (lock-free, GIL-atomic int). The
+        # observed-generation marker is advanced in lockstep with the pin so the
+        # disabled-path observer (BUG 3) continues the SAME sequence after a toggle
+        # to off without double-counting the cycle that was already counted here.
         if is_cycle_start and self._pinned_generation > previous_generation:
             self.cycle_start_advances += 1
+            self._last_observed_cycle_generation = self._pinned_generation
             if self._on_cycle_advance is not None:
                 self._on_cycle_advance()
         return result
@@ -666,6 +759,10 @@ class SerialPacingContext:
         generation, snapshot = self._gate.current_frame()
         self._pinned_generation = generation
         self._pinned_snapshot = snapshot
+        # Re-baseline the outage marker on every (re)pin so a NORMAL cycle-start
+        # read clears any outage seen earlier and the next sweep's follow-on reads
+        # measure freshness from THIS pin (BUG 2).
+        self._pinned_circuit_open_count = getattr(self._pdu_helper, "circuit_open_count", 0)
         sliced = self._slice_snapshot(snapshot, address, count)
         if sliced is not None:
             return sliced

@@ -28,10 +28,28 @@ from app.utils.serial_pacing import FrameGate, SerialPacingContext, SerialWireBu
 
 
 class _FakePduHelper:
-    """Minimal stand-in exposing a settable circuit_open bool."""
+    """Minimal stand-in exposing a settable circuit_open bool and open-count.
+
+    ``circuit_open_count`` mirrors the real PduHelper: it increments on every
+    open->(re)open transition, so a test can simulate an upstream OUTAGE by
+    calling :meth:`simulate_outage_and_recovery` (count bumps once), which the
+    pacing context reads to bound a pinned frame by freshness (BUG 2).
+    """
 
     def __init__(self, circuit_open: bool = False) -> None:
         self.circuit_open = circuit_open
+        self.circuit_open_count = 1
+
+    def simulate_outage_and_recovery(self) -> None:
+        """Model a short upstream outage: breaker opened once, then recovered.
+
+        The real PduHelper bumps ``circuit_open_count`` when the breaker opens;
+        on recovery it closes (``circuit_open`` back to False) but the count
+        stays advanced. That advanced count is the freshness signal the pacing
+        context uses to re-pin across an outage.
+        """
+        self.circuit_open_count += 1
+        self.circuit_open = False
 
 
 class _FakeCore:
@@ -981,15 +999,16 @@ class TestSerialPacing(unittest.TestCase):
 
         asyncio.run(scenario())
 
-    # -- BUG B: anchor-driven pin bounded by generation availability ----------
+    # -- BUG 1: whole-sweep coherence (anchor-driven pin held for the sweep) ---
 
-    def test_anchor_driven_follow_on_refreshes_when_pin_lags_beyond_bound(self):
-        """BUG B regression: once a primary-anchor read sets _cycle_start_seen, a
-        follow-on read must NOT serve a pin more than one generation behind the
-        latest AVAILABLE generation. After an outage/pattern change leaves the pin
-        behind (several newer generations published without a new primary read),
-        the next follow-on refreshes the pin to the latest available generation —
-        instead of serving the stale pinned snapshot indefinitely."""
+    def test_anchor_driven_sweep_holds_one_generation_across_multiple_advances(self):
+        """BUG 1 regression: a primary-anchor-driven client's follow-on reads must
+        ALL serve the generation pinned at the cycle's primary-anchor read, even
+        when MULTIPLE upstream generations land mid-sweep (a multi-block client
+        over 9600 baud takes longer than one 80ms upstream period at ~12.5Hz, so
+        2+ generations can arrive within one sweep). The old generation-delta bound
+        (>1) tripped mid-sweep and tore the sweep across generations. The pin must
+        advance ONLY on the next primary-anchor read."""
 
         async def scenario():
             core, _helper, gate, ctx = self._make(anchors={0x0028, 0x0012}, max_wait_s=0.12)
@@ -1002,18 +1021,94 @@ class TestSerialPacing(unittest.TestCase):
             self.assertTrue(ctx._cycle_start_seen)
             self.assertEqual(power, [100 + 0x0028, 100 + 0x0029])
 
-            # The client stops reading the primary anchor (pattern change). Several
-            # newer generations land, leaving the pin >1 generation behind.
+            # Advance the gate by TWO generations mid-sweep (the worst case the
+            # old bound-of-1 tripped on). No outage occurs (open-count unchanged).
             gate.publish(2, _snapshot(2, length=0x0200))
             gate.publish(3, _snapshot(3, length=0x0200))
             await asyncio.sleep(0)
 
-            # A follow-on read must refresh the pin to the latest available (gen 3)
-            # rather than serving the stale gen-1 snapshot forever.
+            # Every follow-on block of THIS sweep must still come from gen 1 — no
+            # mid-sweep re-pin, no tear across generations.
+            secondary = await asyncio.wait_for(ctx.async_getValues(1, 3, 0x0012, 2), timeout=0.01)
             energy = await asyncio.wait_for(ctx.async_getValues(1, 3, 0x0100, 2), timeout=0.01)
-            self.assertEqual(ctx._pinned_generation, 3, "a pin lagging beyond the bound must refresh to the latest")
-            self.assertEqual(energy, [300 + 0x0100, 300 + 0x0101])
-            self.assertEqual(core.get_calls, [], "bounded refresh never touches the live core")
+            self.assertEqual(ctx._pinned_generation, 1, "pin must be HELD for the whole sweep (no mid-sweep re-pin)")
+            self.assertEqual(secondary, [100 + 0x0012, 100 + 0x0013])
+            self.assertEqual(energy, [100 + 0x0100, 100 + 0x0101])
+
+            # The NEXT primary-anchor read (a genuine new cycle) DOES advance the
+            # pin — to the latest available generation (gen 3), one step per cycle.
+            power2 = await asyncio.wait_for(ctx.async_getValues(1, 3, 0x0028, 2), timeout=0.01)
+            self.assertEqual(ctx._pinned_generation, 3, "next primary-anchor read advances the pin")
+            self.assertEqual(power2, [300 + 0x0028, 300 + 0x0029])
+            self.assertEqual(core.get_calls, [], "gated reads never touch the live core")
+
+        asyncio.run(scenario())
+
+    # -- BUG 2: stale pin invalidated across a short upstream outage ----------
+
+    def test_anchor_driven_pin_refreshes_across_outage_but_stays_coherent_otherwise(self):
+        """BUG 2 regression: holding the pin for the whole sweep (BUG 1) must NOT
+        silently serve a PRE-OUTAGE snapshot after a short upstream outage. After
+        the breaker opens and recovers, the first recovered frame is only ONE
+        generation newer than the pre-outage pin (so a generation-delta check
+        misses it) and the breaker closes on the recovered timestamp (so the
+        outgoing freshness check passes). The pin must be bound by actual
+        FRESHNESS: a follow-on read after an outage re-pins to the current frame.
+        A NORMAL multi-advance sweep WITHOUT an outage stays coherent (BUG 1)."""
+
+        async def scenario():
+            core, helper, gate, ctx = self._make(anchors={0x0028, 0x0012}, max_wait_s=0.12)
+            ctx._primary_anchor = 0x0028
+
+            # Primary-anchor read pins gen 1 and marks the client primary-driven.
+            gate.publish(1, _snapshot(1, length=0x0200))
+            power = await asyncio.wait_for(ctx.async_getValues(1, 3, 0x0028, 2), timeout=1.0)
+            self.assertEqual(ctx._pinned_generation, 1)
+            self.assertTrue(ctx._cycle_start_seen)
+            self.assertEqual(power, [100 + 0x0028, 100 + 0x0029])
+
+            # A SHORT OUTAGE: the upstream breaker opens, then recovers; the first
+            # recovered frame (gen 2) is only ONE generation newer than the pin.
+            helper.simulate_outage_and_recovery()
+            gate.publish(2, _snapshot(2, length=0x0200))
+            await asyncio.sleep(0)
+
+            # A follow-on read must NOT serve the pre-outage gen-1 snapshot: the
+            # outage (open-count advanced) forces a re-pin to the current frame.
+            energy = await asyncio.wait_for(ctx.async_getValues(1, 3, 0x0100, 2), timeout=0.01)
+            self.assertEqual(ctx._pinned_generation, 2, "a follow-on after an outage must re-pin to the current frame")
+            self.assertEqual(energy, [200 + 0x0100, 200 + 0x0101], "must not serve the pre-outage snapshot")
+            self.assertEqual(core.get_calls, [], "re-pin never touches the live core")
+
+        asyncio.run(scenario())
+
+    def test_normal_multi_advance_sweep_stays_coherent_without_outage(self):
+        """BUG 1+BUG 2 together: the BUG 2 outage freshness check must not disturb
+        a NORMAL no-outage sweep. Two generations land mid-sweep (BUG 1 worst case)
+        but the open-count never advances, so every follow-on block stays coherent
+        with the single pinned generation."""
+
+        async def scenario():
+            core, helper, gate, ctx = self._make(anchors={0x0028, 0x0012}, max_wait_s=0.12)
+            ctx._primary_anchor = 0x0028
+
+            gate.publish(1, _snapshot(1, length=0x0200))
+            await asyncio.wait_for(ctx.async_getValues(1, 3, 0x0028, 2), timeout=1.0)
+            self.assertEqual(ctx._pinned_generation, 1)
+
+            # Two mid-sweep advances, NO outage (open-count unchanged).
+            open_count_before = helper.circuit_open_count
+            gate.publish(2, _snapshot(2, length=0x0200))
+            gate.publish(3, _snapshot(3, length=0x0200))
+            await asyncio.sleep(0)
+            self.assertEqual(helper.circuit_open_count, open_count_before, "no outage occurred")
+
+            block_a = await asyncio.wait_for(ctx.async_getValues(1, 3, 0x0012, 2), timeout=0.01)
+            block_b = await asyncio.wait_for(ctx.async_getValues(1, 3, 0x0100, 2), timeout=0.01)
+            self.assertEqual(ctx._pinned_generation, 1, "no outage -> pin held for the whole sweep")
+            self.assertEqual(block_a, [100 + 0x0012, 100 + 0x0013])
+            self.assertEqual(block_b, [100 + 0x0100, 100 + 0x0101])
+            self.assertEqual(core.get_calls, [])
 
         asyncio.run(scenario())
 
@@ -1160,6 +1255,117 @@ class TestSerialPacing(unittest.TestCase):
             result = await asyncio.wait_for(ctx.async_getValues(1, 3, 0x0000, 2), timeout=0.05)
             self.assertEqual(result, [7, 7])
             self.assertEqual(core.get_calls, [(1, 3, 0x0000, 2)])
+
+        asyncio.run(scenario())
+
+    # -- BUG 3: cycle counter advances even when pacing is disabled -----------
+
+    def test_disabled_pacing_still_advances_cycle_counter_on_primary_reads(self):
+        """BUG 3 regression: with pacing DISABLED (HA switch off / cap <= 0) the
+        gated read returns at the pass-through, but a primary cycle-start read must
+        STILL advance the 'Serial Read Rate' counter so the sensor reports the
+        client's NATURAL unpaced per-cycle rate (the documented reason to flip
+        pacing off). It ticks once per NEW upstream generation observed by a
+        primary-anchor read — never on a follow-on/non-anchor read, a same-frame
+        re-read, or a bit/unserved-id read."""
+
+        from app.config import SlaveSerialConfig
+
+        async def scenario():
+            core = _FakeCore(result=[9, 9])
+            helper = _FakePduHelper()
+            gate = FrameGate()
+            ticks: list[int] = []
+            # Pacing DISABLED from the start.
+            serial_config = SlaveSerialConfig(pacing_enabled=False, pacing_max_wait_s=0.12)
+            ctx = SerialPacingContext(
+                core,
+                gate,
+                helper,
+                0.12,
+                reg_start_address=0,
+                anchors={0x0028, 0x0012},
+                primary_anchor=0x0028,
+                on_cycle_advance=lambda: ticks.append(1),
+                serial_config=serial_config,
+            )
+
+            # Frame gen 1 available; a primary-anchor read passes through to the
+            # core (pacing off) AND ticks the cycle counter once.
+            gate.publish(1, _snapshot(1, length=0x0200))
+            await asyncio.sleep(0)
+            r = await asyncio.wait_for(ctx.async_getValues(1, 3, 0x0028, 2), timeout=0.05)
+            self.assertEqual(r, [9, 9], "disabled pacing passes through to the core")
+            self.assertEqual(ctx.cycle_start_advances, 1, "a primary read must tick the counter even when disabled")
+            self.assertEqual(len(ticks), 1)
+
+            # A follow-on (non-anchor) read while disabled must NOT tick.
+            await asyncio.wait_for(ctx.async_getValues(1, 3, 0x0100, 2), timeout=0.05)
+            self.assertEqual(ctx.cycle_start_advances, 1, "follow-on read must not tick while disabled")
+            self.assertEqual(len(ticks), 1)
+
+            # A same-generation re-read of the primary anchor (no newer frame)
+            # must NOT tick — the counter tracks the per-cycle refresh rate.
+            await asyncio.wait_for(ctx.async_getValues(1, 3, 0x0028, 2), timeout=0.05)
+            self.assertEqual(ctx.cycle_start_advances, 1, "same-frame primary re-read must not tick while disabled")
+            self.assertEqual(len(ticks), 1)
+
+            # A new upstream generation -> the next primary read ticks once more.
+            gate.publish(2, _snapshot(2, length=0x0200))
+            await asyncio.sleep(0)
+            await asyncio.wait_for(ctx.async_getValues(1, 3, 0x0028, 2), timeout=0.05)
+            self.assertEqual(ctx.cycle_start_advances, 2, "a new generation advances the disabled-path counter")
+            self.assertEqual(len(ticks), 2)
+
+            # A bit read on the anchor must NOT tick (non-register func code).
+            await asyncio.wait_for(ctx.async_getValues(1, 1, 0x0028, 2), timeout=0.05)
+            self.assertEqual(ctx.cycle_start_advances, 2, "bit read must not tick the counter")
+
+        asyncio.run(scenario())
+
+    def test_counter_consistent_across_live_toggle_off_then_on(self):
+        """BUG 3: toggling pacing off then on must not double-count a cycle. The
+        paced and unpaced paths share one observed-generation sequence, so each
+        new upstream generation is counted exactly once regardless of toggles."""
+
+        from app.config import SlaveSerialConfig
+
+        async def scenario():
+            core = _FakeCore(result=[9, 9])
+            helper = _FakePduHelper()
+            gate = FrameGate()
+            ticks: list[int] = []
+            serial_config = SlaveSerialConfig(pacing_enabled=True, pacing_max_wait_s=0.12)
+            ctx = SerialPacingContext(
+                core,
+                gate,
+                helper,
+                0.0,  # live resolver drives behaviour
+                reg_start_address=0,
+                anchors={0x0028},
+                primary_anchor=0x0028,
+                on_cycle_advance=lambda: ticks.append(1),
+                serial_config=serial_config,
+            )
+
+            # Paced primary read pins gen 1 -> one tick.
+            gate.publish(1, _snapshot(1, length=0x0200))
+            await asyncio.wait_for(ctx.async_getValues(1, 3, 0x0028, 2), timeout=1.0)
+            self.assertEqual(ctx.cycle_start_advances, 1)
+            self.assertEqual(len(ticks), 1)
+
+            # Toggle OFF. A primary re-read of the SAME frame must not tick again.
+            serial_config.pacing_enabled = False
+            await asyncio.wait_for(ctx.async_getValues(1, 3, 0x0028, 2), timeout=0.05)
+            self.assertEqual(ctx.cycle_start_advances, 1, "no double count across a toggle on the same frame")
+            self.assertEqual(len(ticks), 1)
+
+            # A new generation while OFF ticks once (natural unpaced rate).
+            gate.publish(2, _snapshot(2, length=0x0200))
+            await asyncio.sleep(0)
+            await asyncio.wait_for(ctx.async_getValues(1, 3, 0x0028, 2), timeout=0.05)
+            self.assertEqual(ctx.cycle_start_advances, 2)
+            self.assertEqual(len(ticks), 2)
 
         asyncio.run(scenario())
 

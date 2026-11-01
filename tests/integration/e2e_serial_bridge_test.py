@@ -1179,6 +1179,162 @@ def test_serial_anchor_pacing_disabled_sweep_tears_or_duplicates_negative_contro
     )
 
 
+def _poll_serial_sweeps_with_midsweep_advance(client, upstream, *, sweeps: int, max_attempts: int) -> list[dict]:
+    """BUG 1 harness: poll a multi-block sweep but publish EXTRA upstream frames
+    IN THE MIDDLE of each sweep, between the anchor read and the follow-on reads.
+
+    This reproduces the real physics the pin-age-delta bound got wrong: a
+    multi-block client sweep over 9600 baud takes LONGER than one upstream period,
+    so TWO OR MORE upstream generations arrive WITHIN one sweep. The sequence per
+    sweep is:
+      1. publish a fresh frame, then read the POWER ANCHOR (0x0028) — pins gen N;
+      2. publish TWO more frames (gen N+1, N+2) BEFORE the follow-on reads;
+      3. read the voltage block (0x0000) and the energy block (0x0500) — both are
+         follow-ons and MUST still come from gen N (whole-sweep coherence), NOT
+         from N+2.
+    The power and energy blocks carry the SAME per-tick marker, so a coherent
+    sweep returns power == energy even though two newer frames landed mid-sweep.
+    """
+    samples: list[dict] = []
+    attempts = 0
+    while len(samples) < sweeps and attempts < max_attempts:
+        attempts += 1
+        upstream.publish_next()
+        try:
+            power_res = client.read_holding_registers(
+                _MARKER_POWER_BLOCK_ADDRESS, count=_MARKER_POWER_REG_COUNT, device_id=1
+            )
+            if power_res.isError():
+                continue
+            # Two MORE frames land mid-sweep, after the anchor read, before the
+            # follow-ons. latest-pinned now reaches 2 — the delta that used to
+            # trip the old pin-age bound (>1) and tear the sweep.
+            upstream.publish_next()
+            upstream.publish_next()
+            volt_res = client.read_holding_registers(
+                _SWEEP_VOLTAGE_BLOCK_ADDRESS, count=_SWEEP_VOLTAGE_REG_COUNT, device_id=1
+            )
+            energy_res = client.read_holding_registers(_MARKER_BLOCK_ADDRESS, count=_MARKER_REG_COUNT, device_id=1)
+        except (ModbusException, OSError, ConnectionError):
+            continue
+        if volt_res.isError() or energy_res.isError():
+            continue
+        samples.append(
+            {
+                "power": _decode_marker_int32_le(list(power_res.registers)),
+                "energy": _decode_marker_int64_le(list(energy_res.registers)),
+                "voltage": list(volt_res.registers),
+            }
+        )
+    return samples
+
+
+def _run_midsweep_advance_scenario(*, pacing_max_wait_s: float):
+    """Spin up the full service and collect multi-block sweep samples where TWO
+    extra upstream frames are published mid-sweep (BUG 1 worst case). Mirrors
+    _run_sweep_latching_scenario's topology; only the poll pattern differs."""
+    update_interval = 0.1
+
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        tmp_path = Path(tmp_dir)
+
+        em540_tcp_port = find_free_port()
+        em540_rtu_port = find_free_port()
+        ts65a_tcp_port = find_free_port()
+
+        em540_serial = SerialCable("midsweep-em540")
+        ts65a_serial = SerialCable("midsweep-ts65a")
+
+        upstream = Em540UpstreamSimulator(frame_seed=100)
+        upstream.start()
+
+        try:
+            config_path = tmp_path / "config.yaml"
+            generate_config(
+                config_path,
+                upstream.port,
+                em540_tcp_port,
+                em540_rtu_port,
+                ts65a_tcp_port,
+                em540_serial_port=em540_serial.left_path,
+                ts65a_serial_port=ts65a_serial.left_path,
+                update_interval=update_interval,
+                serial_pacing_enabled=True,
+                serial_pacing_max_wait_s=pacing_max_wait_s,
+                serial_timeout=0.5,
+                stale_frame_detection_enabled=True,
+            )
+
+            service = ServiceProcess(config_path)
+            service.start()
+
+            try:
+                wait_for_port(em540_tcp_port, timeout=20.0)
+                wait_for_port(ts65a_tcp_port, timeout=20.0)
+
+                clients = DownstreamClients(
+                    em540_tcp_port,
+                    em540_rtu_port,
+                    ts65a_tcp_port,
+                    em540_serial.right_path,
+                    ts65a_serial.right_path,
+                )
+                clients.connect_all()
+
+                wait_for_downstream_data(clients.em540_tcp, address=0x0000, timeout=120.0)
+
+                wait_for_condition(
+                    lambda: _poll_serial_sweeps(clients.em540_serial, upstream, sweeps=1, max_attempts=10) != [],
+                    timeout=30.0,
+                    message="EM540 serial path did not serve a live sweep before sampling" + service.diagnostics(),
+                )
+
+                samples = _poll_serial_sweeps_with_midsweep_advance(
+                    clients.em540_serial, upstream, sweeps=12, max_attempts=72
+                )
+
+                service.assert_running()
+                clients.disconnect_all()
+                return samples
+            finally:
+                service.stop()
+        finally:
+            upstream.stop()
+            em540_serial.close()
+            ts65a_serial.close()
+
+
+@pytest.mark.integration
+def test_serial_anchor_pacing_coherent_when_multiple_frames_land_mid_sweep() -> None:
+    """BUG 1 regression, end-to-end: a multi-block sweep stays coherent even when
+    TWO upstream generations land BETWEEN the anchor read and the follow-on reads
+    within the SAME sweep (the physical case at ~12.5Hz upstream over 9600 baud,
+    worst in the full-rate unpaced-tick config the README recommends).
+
+    The old follow-on pin-age-delta bound (>1) tripped mid-sweep, re-pinned, and
+    tore the sweep across generations (power from gen N, energy from gen N+2).
+    After the fix the pin is HELD for the whole sweep: every block comes from the
+    generation pinned at the anchor read, so power == energy on every sweep.
+    """
+    samples = _run_midsweep_advance_scenario(pacing_max_wait_s=0.12)
+
+    assert len(samples) >= 8, f"too few successful sweeps to assess mid-sweep coherence (got {len(samples)})"
+
+    # Whole-sweep coherence: within each sweep the anchor (power) and the energy
+    # follow-on carry the SAME marker, despite two newer frames landing mid-sweep.
+    for i, s in enumerate(samples):
+        assert s["power"] == s["energy"], (
+            f"sweep {i} torn across frames despite mid-sweep advances: "
+            f"power {s['power']} != energy {s['energy']} (BUG 1 regression)"
+        )
+
+    # Still tracks upstream: the pin advances on the NEXT anchor read, so sweep
+    # markers remain strictly increasing (no stall, no duplicate).
+    sweep_markers = [s["power"] for s in samples]
+    for prev, cur in zip(sweep_markers, sweep_markers[1:]):
+        assert cur > prev, f"each sweep must still observe a newer frame; saw {prev} -> {cur} in {sweep_markers}"
+
+
 # ---------------------------------------------------------------------------
 # Client-observed cadence / jitter measurement (PR #44 diagnostic)
 # ---------------------------------------------------------------------------
