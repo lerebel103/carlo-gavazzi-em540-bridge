@@ -14,6 +14,9 @@ class SerialActivityTracker:
       - ``connect_count`` / ``disconnect_count``: incremented on the rising
         (idle -> active) and falling (active -> idle) edges of ``active``, so
         they count observed client sessions over time.
+      - ``total_requests``: a monotonic cumulative count of observed requests,
+        from which the diagnostics layer derives a windowed read-rate (Hz),
+        mirroring the upstream master's 'Acq Rate' sensor.
 
     Concurrency (lock-free, matching the master's snapshot model): ``record_request``
     is called from the serial PDU trace hook on the server thread and must not
@@ -31,14 +34,42 @@ class SerialActivityTracker:
         self.active: bool = False
         self.connect_count: int = 0
         self.disconnect_count: int = 0
+        # Monotonic cumulative count of serial requests observed. Single-writer
+        # on the serial server loop (record_request), read lock-free by the
+        # diagnostics thread. Used for client-presence/connect inference only — it
+        # is NO LONGER the Hz read-rate source, because a Victron/Fronius client
+        # issues several sparse reads per polling cycle, so a per-request count
+        # overstates the real refresh rate.
+        self.total_requests: int = 0
+        # Monotonic cumulative count of PRIMARY cycle-start pin advances — one per
+        # client polling cycle (the pin-advance-to-new-generation event in
+        # SerialPacingContext). This is the Hz 'Serial Read Rate' source: it
+        # counts actual refreshed frames delivered, not every sparse inbound read.
+        # Single-writer on the serial server loop (record_cycle_read, called from
+        # the pacing context, which runs on that loop), read lock-free by the
+        # diagnostics thread. A GIL-atomic int, so it never blocks the request
+        # path. Stays 0 when serial is disabled or pacing never advances the pin.
+        self.cycle_read_count: int = 0
 
     def record_request(self, now: float) -> None:
         """Record that a serial request was observed at monotonic time ``now``.
 
-        Lock-free hot path: a single atomic timestamp publication. See the class
-        docstring for the concurrency model.
+        Lock-free hot path: a single atomic timestamp publication plus a
+        cumulative request-count bump. See the class docstring for the
+        concurrency model.
         """
         self._last_request_monotonic = now
+        self.total_requests += 1
+
+    def record_cycle_read(self) -> None:
+        """Record one completed client polling cycle (a primary-anchor pin advance).
+
+        Called from the serial pacing context on the serial server loop when a
+        primary cycle-start anchor read advances the pin to a new upstream
+        generation. Lock-free hot path: a single GIL-atomic increment. This is the
+        counter the Hz read-rate sensor derives its windowed rate from.
+        """
+        self.cycle_read_count += 1
 
     def evaluate(self, idle_timeout: float, now: float) -> None:
         """Recompute ``active`` and update edge counters.

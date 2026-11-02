@@ -261,6 +261,12 @@ def entity_and_value(draw):
     idx = draw(_entity_index)
     entity = entities_obj._entities[idx]
 
+    # Switch entities carry no numeric range; their valid payloads are the
+    # on/off strings HA sends.
+    if entity.entity_type == "switch":
+        value = draw(st.sampled_from(["on", "off"]))
+        return idx, value
+
     # Generate a value within [min_value, max_value] respecting the type
     if entity.parse_value is int:
         value = draw(
@@ -326,6 +332,182 @@ def test_property_valid_command_updates_state_and_triggers_persist(data):
     # 3) Published new value to state topic with retain=True (Req 10.3)
     state_topic = f"lerebel/config/em540_bridge/{entity.safe_name}/state"
     mqtt_client.publish.assert_called_once_with(state_topic, str(value), retain=True)
+
+
+# ---------------------------------------------------------------------------
+# Serial pacing switch entities (FEAT-002)
+# ---------------------------------------------------------------------------
+
+
+def _pacing_switch(entities: HAConfigEntities, field_path: str):
+    return next(e for e in entities._entities if e.field_path == field_path)
+
+
+def test_pacing_switches_advertise_under_homeassistant_switch():
+    entities = _make_entities()
+    for field_path, name, section in (
+        ("em540_slave.serial.pacing_enabled", "EM540 Serial Pacing", "em540_slave"),
+        ("ts65a_slave.serial.pacing_enabled", "TS65A Serial Pacing", "ts65a_slave"),
+    ):
+        entity = _pacing_switch(entities, field_path)
+        assert entity.entity_type == "switch"
+        topic = entities.discovery_topic_for(entity)
+        assert topic.startswith("homeassistant/switch/")
+        payload = json.loads(dict(entities.advertise())[topic])
+        assert payload["name"] == name
+        assert payload["payload_on"] == "on"
+        assert payload["payload_off"] == "off"
+        assert payload["entity_category"] == "config"
+
+
+def test_pacing_switch_off_then_on_flips_config_and_echoes_state():
+    state = AppState()
+    mqtt_client = MagicMock()
+    config_manager = MagicMock(spec=ConfigManager)
+    entities = HAConfigEntities(state, mqtt_client, config_manager)
+
+    entity = _pacing_switch(entities, "em540_slave.serial.pacing_enabled")
+    # Defaults to enabled.
+    assert state.em540_slave.serial.pacing_enabled is True
+
+    # Turn OFF.
+    _send_command(entities, entity, "off")
+    assert state.em540_slave.serial.pacing_enabled is False
+    mqtt_client.publish.assert_called_with(entities.state_topic_for(entity), "off", retain=True)
+
+    # Turn back ON (case-insensitive).
+    _send_command(entities, entity, "ON")
+    assert state.em540_slave.serial.pacing_enabled is True
+    mqtt_client.publish.assert_called_with(entities.state_topic_for(entity), "on", retain=True)
+
+
+def test_ts65a_pacing_switch_binds_to_its_own_serial_config():
+    state = AppState()
+    entities = _make_entities(state)
+    entity = _pacing_switch(entities, "ts65a_slave.serial.pacing_enabled")
+
+    _send_command(entities, entity, "off")
+    assert state.ts65a_slave.serial.pacing_enabled is False
+    # EM540 pacing is untouched.
+    assert state.em540_slave.serial.pacing_enabled is True
+
+
+def test_pacing_switch_rejects_unknown_payload():
+    state = AppState()
+    mqtt_client = MagicMock()
+    config_manager = MagicMock(spec=ConfigManager)
+    entities = HAConfigEntities(state, mqtt_client, config_manager)
+    entity = _pacing_switch(entities, "em540_slave.serial.pacing_enabled")
+
+    _send_command(entities, entity, "maybe")
+    # Unchanged; no persist, no publish.
+    assert state.em540_slave.serial.pacing_enabled is True
+    config_manager.schedule_persist.assert_not_called()
+    mqtt_client.publish.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# BUG 4 — switch-enable must not persist an unstartable pacing config
+# ---------------------------------------------------------------------------
+
+
+def _unstartable_pacing_state() -> AppState:
+    """An AppState whose EM540 serial adapter is enabled with pacing OFF and a
+    pacing_max_wait_s == serial.timeout — valid to LOAD (startup skips the
+    strict-less-than check while pacing is off) but which would FAIL validation
+    if pacing were enabled."""
+    state = AppState()
+    serial = state.em540_slave.serial
+    serial.enabled = True
+    serial.pacing_enabled = False
+    serial.timeout = 0.12
+    serial.pacing_max_wait_s = 0.12  # == timeout -> not strictly less than
+    return state
+
+
+def test_switch_enable_of_unstartable_pacing_is_rejected_and_not_persisted():
+    """BUG 4: flipping the pacing switch ON when the config would fail the
+    enabled-timing constraints must be rejected — the flag is not mutated, not
+    persisted, and the switch is echoed back to off so the HA UI reflects
+    reality."""
+    state = _unstartable_pacing_state()
+    mqtt_client = MagicMock()
+    config_manager = MagicMock(spec=ConfigManager)
+    entities = HAConfigEntities(state, mqtt_client, config_manager)
+    entity = _pacing_switch(entities, "em540_slave.serial.pacing_enabled")
+
+    _send_command(entities, entity, "on")
+
+    # Flag not mutated, nothing persisted.
+    assert state.em540_slave.serial.pacing_enabled is False
+    config_manager.schedule_persist.assert_not_called()
+    # Switch echoed back to its actual (off) state.
+    mqtt_client.publish.assert_called_once_with(entities.state_topic_for(entity), "off", retain=True)
+
+
+def test_rejected_switch_enable_config_still_loads_on_simulated_restart():
+    """BUG 4: after the rejected enable, the persisted/live config is unchanged
+    (pacing still off), so ConfigManager validation still passes — a simulated
+    restart is not blocked."""
+    state = _unstartable_pacing_state()
+    mqtt_client = MagicMock()
+    config_manager = MagicMock(spec=ConfigManager)
+    entities = HAConfigEntities(state, mqtt_client, config_manager)
+    entity = _pacing_switch(entities, "em540_slave.serial.pacing_enabled")
+
+    _send_command(entities, entity, "on")
+
+    # The (unchanged) config must still validate, i.e. startup would not be blocked.
+    real_manager = ConfigManager.__new__(ConfigManager)
+    # _validate_serial_pacing is a pure method; call it directly on the live config.
+    real_manager._validate_serial_pacing("em540_slave.serial", state.em540_slave.serial)  # must not raise
+    assert state.em540_slave.serial.pacing_enabled is False
+
+
+def test_valid_switch_enable_is_applied_and_persisted():
+    """BUG 4: a switch-enable that satisfies the timing constraints IS applied and
+    persisted, and the resulting config validates."""
+    state = AppState()
+    serial = state.em540_slave.serial
+    serial.enabled = True
+    serial.pacing_enabled = False
+    serial.timeout = 0.5
+    serial.pacing_max_wait_s = 0.12  # strictly < timeout, within client deadline
+    mqtt_client = MagicMock()
+    config_manager = MagicMock(spec=ConfigManager)
+    entities = HAConfigEntities(state, mqtt_client, config_manager)
+    entity = _pacing_switch(entities, "em540_slave.serial.pacing_enabled")
+
+    _send_command(entities, entity, "on")
+
+    assert state.em540_slave.serial.pacing_enabled is True
+    config_manager.schedule_persist.assert_called_once()
+    mqtt_client.publish.assert_called_with(entities.state_topic_for(entity), "on", retain=True)
+
+    # The now-enabled config validates (would load on restart).
+    real_manager = ConfigManager.__new__(ConfigManager)
+    real_manager._validate_serial_pacing("em540_slave.serial", state.em540_slave.serial)  # must not raise
+
+
+def test_switch_enable_on_disabled_adapter_is_allowed():
+    """BUG 4: a DISABLED serial adapter can load with any pacing flag (startup
+    skips the enabled-timing checks), so the switch must not be stricter — it may
+    enable pacing on a disabled adapter even with a borderline cap."""
+    state = AppState()
+    serial = state.em540_slave.serial
+    serial.enabled = False
+    serial.pacing_enabled = False
+    serial.timeout = 0.12
+    serial.pacing_max_wait_s = 0.12  # would be invalid IF the adapter were enabled
+    mqtt_client = MagicMock()
+    config_manager = MagicMock(spec=ConfigManager)
+    entities = HAConfigEntities(state, mqtt_client, config_manager)
+    entity = _pacing_switch(entities, "em540_slave.serial.pacing_enabled")
+
+    _send_command(entities, entity, "on")
+
+    assert state.em540_slave.serial.pacing_enabled is True
+    config_manager.schedule_persist.assert_called_once()
 
 
 def test_master_update_interval_command_converts_ms_payload_to_seconds_internal_value():

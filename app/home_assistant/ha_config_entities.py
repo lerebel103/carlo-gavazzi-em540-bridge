@@ -12,7 +12,7 @@ import math
 from dataclasses import dataclass
 from typing import Any, Callable
 
-from app.config import AppState, ConfigManager
+from app.config import AppState, ConfigManager, SlaveSerialConfig, serial_pacing_enabled_error
 from app.home_assistant.ha_topics import discovery_model_name, prefix_topic, topic_namespace
 from app.version import __version__
 
@@ -34,6 +34,23 @@ DEVICE_INFO: dict[str, Any] = {
 # ---------------------------------------------------------------------------
 # ConfigEntity dataclass
 # ---------------------------------------------------------------------------
+
+
+def _parse_switch_payload(raw: str) -> bool:
+    """Map an MQTT switch payload ('on'/'off', case-insensitive) to a bool.
+
+    HA publishes the configured ``payload_on``/``payload_off`` ('on'/'off') to a
+    switch command topic. ``_on_command`` calls ``entity.parse_value(raw_value)``,
+    so a switch entity needs a parser mapping those payloads to the bool stored on
+    the SlaveSerialConfig field. Any other payload raises ValueError so
+    ``_on_command`` logs and ignores it like other invalid values.
+    """
+    normalized = raw.strip().lower()
+    if normalized == "on":
+        return True
+    if normalized == "off":
+        return False
+    raise ValueError(f"Invalid switch payload: {raw!r}")
 
 
 @dataclass
@@ -192,6 +209,27 @@ class HAConfigEntities:
                 unit="s",
                 parse_value=float,
             ),
+            # Dynamic per-serial-client pacing enable/disable toggles. Bound to the
+            # SAME SlaveSerialConfig.pacing_enabled instance each bridge's
+            # SerialPacingContext reads LIVE, so flipping these switches enables or
+            # disables serial pacing with no proxy reconstruction and no restart
+            # (lets an operator observe the natural, unpaced read rate).
+            ConfigEntity(
+                name="EM540 Serial Pacing",
+                field_path="em540_slave.serial.pacing_enabled",
+                config_section=self._state.em540_slave.serial,
+                field_name="pacing_enabled",
+                parse_value=_parse_switch_payload,
+                entity_type="switch",
+            ),
+            ConfigEntity(
+                name="TS65A Serial Pacing",
+                field_path="ts65a_slave.serial.pacing_enabled",
+                config_section=self._state.ts65a_slave.serial,
+                field_name="pacing_enabled",
+                parse_value=_parse_switch_payload,
+                entity_type="switch",
+            ),
         ]
         return defs
 
@@ -308,6 +346,21 @@ class HAConfigEntities:
             logger.warning("Rejected out-of-range value for %s: %s", entity.name, message.payload)
             return
 
+        # BUG 4: a switch-enable of serial pacing must be validated against the
+        # SAME timing constraints the startup validator enforces, BEFORE it is
+        # applied or persisted. An enabled serial adapter can LOAD with
+        # pacing_enabled:false and pacing_max_wait_s == serial.timeout (the
+        # startup validator skips the strict-less-than/wire-budget checks when
+        # pacing is disabled); flipping this switch to true would then persist a
+        # config that FAILS validation on the NEXT restart and blocks startup. If
+        # enabling would be invalid, reject it: do NOT mutate/persist the flag,
+        # echo the switch back to its ACTUAL (unchanged) state so HA reflects
+        # reality, and log a clear reason. The check is the shared
+        # config.serial_pacing_enabled_error() so the switch and the startup
+        # validator can never diverge.
+        if not self._apply_pacing_enable_guard(entity, value):
+            return
+
         # Update the AppState field
         setattr(entity.config_section, entity.field_name, value)
 
@@ -322,3 +375,51 @@ class HAConfigEntities:
             # Echo the user-entered numeric payload so HA reflects exactly what was set.
             state_value = raw_value
         self._mqtt_client.publish(state_topic, state_value, retain=True)
+
+    def _apply_pacing_enable_guard(self, entity: ConfigEntity, value: Any) -> bool:
+        """Gate a switch-enable of serial pacing on the shared timing constraints.
+
+        Returns True when the command may proceed (not a pacing-enable, or the
+        enable is valid), False when it was rejected. On rejection it does NOT
+        mutate or persist the flag; it echoes the switch back to its current
+        (unchanged) state so the HA UI reflects reality, and logs the reason.
+
+        Identifies the pacing switch structurally: a switch entity whose backing
+        section is a ``SlaveSerialConfig`` and whose field is ``pacing_enabled``.
+        Only a transition to ``True`` is gated — turning pacing OFF is always
+        allowed (it is the documented way to observe the natural unpaced rate).
+        """
+        if entity.entity_type != "switch" or entity.field_name != "pacing_enabled":
+            return True
+        serial = entity.config_section
+        if not isinstance(serial, SlaveSerialConfig):
+            return True
+        if value is not True:
+            # Disabling pacing (or any non-True value) is always permitted.
+            return True
+        if not serial.enabled:
+            # The startup validator only enforces the pacing-enabled timing
+            # constraints when the serial adapter itself is enabled, so a
+            # disabled adapter can load with pacing_enabled:true regardless. Match
+            # that: do not be stricter than startup validation here.
+            return True
+
+        # Validate the PROPOSED enabled state against the shared constraint used
+        # by the startup validator. ``field_path`` is e.g.
+        # "em540_slave.serial.pacing_enabled"; strip the trailing field so the
+        # error message matches the validator's "<section>.pacing_max_wait_s".
+        section_name = entity.field_path.rsplit(".", 1)[0]
+        error = serial_pacing_enabled_error(section_name, serial)
+        if error is None:
+            return True
+
+        logger.warning(
+            "Rejected enabling %s via Home Assistant: %s. The pacing switch was reverted; "
+            "fix the serial pacing timing config before enabling.",
+            entity.name,
+            error,
+        )
+        # Echo the switch back to its ACTUAL (still-off) state so HA does not show
+        # it as on. State is read from the unchanged config_section.
+        self._mqtt_client.publish(self.state_topic_for(entity), self.state_value_for(entity), retain=True)
+        return False

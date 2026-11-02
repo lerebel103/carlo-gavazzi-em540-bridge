@@ -31,6 +31,7 @@ readings (see `config-default.yaml`).
 - **Home Assistant integration:** Publishes measurements and diagnostics as MQTT sensors.
 - **High-rate acquisition:** Targets a 10 Hz (100 ms) polling interval for near real-time updates.
 - **Concurrent client support:** Serves multiple downstream clients without increasing load on the EM540 meter.
+- **Serial frame latching:** Downstream Modbus-over-serial clients are latched to the upstream meter refresh rate, so they never receive duplicate frames and a multi-block polling sweep always reads one coherent snapshot (serial clients only — see below).
 - **Stale-data protection:** A circuit breaker blocks downstream Modbus responses when upstream data is stale or unavailable, preventing silent delivery of bad values.
 
 ## Configuration
@@ -54,6 +55,48 @@ See [config-default.yaml](config-default.yaml) for the full sample layout.
 - These can run concurrently with each slave's TCP endpoint.
 
 When running with Docker, map each enabled serial adapter device into the container (for example `/dev/ttyUSB1` for EM540 slave serial and `/dev/ttyUSB2` for TS65A slave serial).
+
+### Serial Frame Latching (serial clients only)
+
+Downstream Modbus-over-**serial** clients have their read rate latched to the upstream meter so they
+never receive duplicate frames, and each multi-block polling sweep returns one coherent snapshot
+(all blocks from the same upstream frame). This is **Victron-compatible and has been tested with a
+Victron GX** reading the EM540 serial bridge; it keeps Victron's energy algorithm from ingesting
+repeated frames. It applies to serial clients only — TCP and RTU-over-TCP are not latched (many
+concurrent connections make per-connection latching much harder; possible future work).
+
+Two Home Assistant helpers accompany it: **EM540/TS65A Serial Read Rate** sensors (Hz, the client's
+true per-cycle refresh rate) and **EM540/TS65A Serial Pacing** switches that enable/disable latching
+live with no restart (turn off to observe a client's natural unpaced rate). Pacing options live under
+each bridge's `serial:` block (`pacing_enabled`, `pacing_max_wait_s`); see
+[config-default.yaml](config-default.yaml).
+
+#### Getting the full 12.5 Hz (Victron GX + EM540/EM530)
+
+The EM540/EM530 can be read at its natural ~12.5 Hz, but by default you'll see only **~8.5 Hz** at a
+Victron GX: the GX runs the meter link at 9600 baud, and its multi-block read cycle doesn't fit in
+the 80 ms window at that speed. To get the full 12.5 Hz end-to-end, do **both** of these:
+
+1. **Run the bridge unpaced** — read the meter at its natural rate instead of the 10 Hz default:
+
+   ```yaml
+   em540_master:
+     update_interval: 0   # 0 = read as fast as the meter produces (~12.5 Hz)
+   ```
+
+2. **Raise the serial link to 115200 baud on both ends.** On the GX, edit
+   `/opt/victronenergy/dbus-cgwacs/start-cgwacs.sh` and add `--baud 115200` to the driver line
+   (default `args="/dev/$tty"` → `args="/dev/$tty --baud 115200"`), then set the matching bridge
+   baud:
+
+   ```yaml
+   em540_slave:
+     serial:
+       baudrate: 115200   # must match the GX --baud setting
+   ```
+
+Both ends must agree on the baud or you'll get framing errors. Do only step 1 (leave 9600) and you
+still get the smooth, duplicate-free stream, just wire-bound to ~8.5 Hz.
 
 ### Meter Configuration Enforcement (Victron setups)
 
@@ -271,6 +314,7 @@ state classes are `measurement`; monotonic counters (e.g. RS485 Invalid Frames) 
 | EM540 Serial Active               |      |              | 0         | yes                |
 | EM540 Serial Connects             |      |              | 0         | yes                |
 | EM540 Serial Disconnects          |      |              | 0         | yes                |
+| EM540 Serial Read Rate            | Hz   | frequency    | 2         | yes                |
 | EM540 Circuit Breaker Open        |      |              | 0         | no                 |
 | EM540 Circuit Breaker Open Count  |      |              | 0         | no                 |
 | EM540 Stale Data Age              | ms   | duration     | 1         | yes                |
@@ -281,6 +325,7 @@ state classes are `measurement`; monotonic counters (e.g. RS485 Invalid Frames) 
 | TS65A Serial Active               |      |              | 0         | yes                |
 | TS65A Serial Connects             |      |              | 0         | yes                |
 | TS65A Serial Disconnects          |      |              | 0         | yes                |
+| TS65A Serial Read Rate            | Hz   | frequency    | 2         | yes                |
 | Overfeed Limit Count              |      |              | 0         | yes                |
 | Overfeed Limit Max Duration       | ms   | duration     | 2         | yes                |
 | TS65A Circuit Breaker Open        |      |              | 0         | no                 |
@@ -296,6 +341,10 @@ Transport diagnostics distinguish the downstream channels each bridge can serve:
   connect/disconnect event, so `Serial Active` (1/0), `Serial Connects`, and `Serial Disconnects`
   are inferred from request activity: a client is considered connected while requests arrive within
   `serial_idle_timeout` seconds, and the connect/disconnect counters increment on the activity edges.
+  `Serial Read Rate` (Hz) reports a downstream serial client's true per-cycle refresh rate (counted
+  once per polling cycle, not per raw request, so a client's several reads per cycle don't inflate
+  it). Handy for confirming the serial frame latch is pacing a fast client
+  (see [Serial Frame Latching](#serial-frame-latching-serial-clients-only)).
 
 In addition, per-quantity **daily min/max extrema** are published for Power, Current, Voltage L-N,
 and Voltage L-L, at both system and per-phase (L1/L2/L3) scope (for example `Daily Power Min`,

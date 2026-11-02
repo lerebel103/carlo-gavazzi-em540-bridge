@@ -91,8 +91,7 @@ class TestEm540Slave(unittest.TestCase):
         # Both server references point to the same context object
         self.assertIs(slave._tcp_server.context, slave._rtu_server.context)
 
-    def test_serial_server_shares_context_when_enabled(self):
-        frame = Em540Frame()
+    def _make_serial_enabled_config(self):
         config = self._make_config()
         config.serial = SimpleNamespace(
             enabled=True,
@@ -101,10 +100,14 @@ class TestEm540Slave(unittest.TestCase):
             parity="N",
             bytesize=8,
             stopbits=1,
-            timeout=0.25,
+            timeout=0.5,
             handle_local_echo=False,
+            pacing_enabled=True,
+            pacing_max_wait_s=0.12,
         )
+        return config
 
+    def _build_serial_enabled_slave(self, config, frame):
         from pymodbus.simulator.simcore import SimCore
 
         simdata = _build_simdata(frame)
@@ -125,8 +128,35 @@ class TestEm540Slave(unittest.TestCase):
             mock_serial_server_cls.return_value = serial_mock
             slave = Em540Slave(config, frame)
             serial_server = slave._build_serial_server()
+        return slave, serial_server
 
-        self.assertIs(serial_server.context, slave._rtu_server.context)
+    def test_serial_server_uses_pacing_proxy_scoped_to_serial_only(self):
+        """Serial frame-latching is structural: only the serial server's context is
+        the SerialPacingContext proxy, wrapping the shared SimCore. TCP and
+        RTU-over-TCP keep the plain shared SimCore (byte-for-byte unaffected)."""
+        from app.utils.serial_pacing import SerialPacingContext
+
+        frame = Em540Frame()
+        config = self._make_serial_enabled_config()
+        slave, serial_server = self._build_serial_enabled_slave(config, frame)
+
+        # Serial context IS the pacing proxy, wrapping the shared RTU SimCore.
+        self.assertIsInstance(serial_server.context, SerialPacingContext)
+        self.assertIs(serial_server.context._core, slave._rtu_server.context)
+
+        # TCP and RTU-over-TCP contexts are NOT the proxy — serial-only scoping.
+        self.assertNotIsInstance(slave._rtu_server.context, SerialPacingContext)
+        self.assertNotIsInstance(slave._tcp_server.context, SerialPacingContext)
+
+        # Gate was created on build (bound to the server loop at first await).
+        self.assertIsNotNone(slave._serial_gate)
+
+        # Anchor-based pacing: the proxy is wired with the EM540 power anchors
+        # (system power 0x0028 and the per-phase power block start 0x0012).
+        from app.carlo_gavazzi.em540_slave_bridge import _SERIAL_PACING_ANCHORS
+
+        self.assertEqual(_SERIAL_PACING_ANCHORS, frozenset({0x0028, 0x0012}))
+        self.assertEqual(serial_server.context._anchors, frozenset({0x0028, 0x0012}))
 
     # --- Requirement 12.4: REG_OFFSET is 0 ---
 
@@ -372,6 +402,86 @@ class TestEm540Slave(unittest.TestCase):
         asyncio.run(slave.new_data(meter_data))
 
         self.assertFalse(slave._stats.circuit_breaker_open)
+
+    # --- Serial frame-latching: generation bump + cross-thread wake ---
+
+    def _successful_frame(self):
+        frame = Em540Frame()
+        first_static_addr = next(iter(frame.static_reg_map))
+        reg = frame.static_reg_map[first_static_addr]
+        reg.values = [42] * len(reg.values)  # non-zero so initial static sync fires
+        meter_data = MeterData()
+        meter_data.frame = frame
+        meter_data._timestamp = 123.0
+        return frame, meter_data
+
+    def test_new_data_bumps_generation_on_successful_write(self):
+        frame, meter_data = self._successful_frame()
+        slave, _ = self._build_slave(frame)
+
+        self.assertEqual(slave._frame_generation, 0)
+        asyncio.run(slave.new_data(meter_data))
+        self.assertTrue(slave._static_synced)
+        self.assertEqual(slave._frame_generation, 1)
+        asyncio.run(slave.new_data(meter_data))
+        self.assertEqual(slave._frame_generation, 2)
+
+    def test_new_data_does_not_bump_generation_on_failed_write(self):
+        frame, meter_data = self._successful_frame()
+        slave, _ = self._build_slave(frame)
+
+        # Force the flush to report failure.
+        async def _fail(_writes):
+            return False
+
+        slave._flush_writes = _fail
+
+        asyncio.run(slave.new_data(meter_data))
+        self.assertEqual(slave._frame_generation, 0)
+        self.assertTrue(slave._stats.circuit_breaker_open)
+
+    def test_new_data_schedules_publish_when_serial_enabled(self):
+        frame = Em540Frame()
+        config = self._make_serial_enabled_config()
+        slave, _ = self._build_serial_enabled_slave(config, frame)
+
+        # Stub the server loop to capture call_soon_threadsafe scheduling.
+        scheduled: list[tuple] = []
+        slave._server_loop = SimpleNamespace(call_soon_threadsafe=lambda fn, *a: scheduled.append((fn, a)))
+
+        first_static_addr = next(iter(frame.static_reg_map))
+        reg = frame.static_reg_map[first_static_addr]
+        reg.values = [42] * len(reg.values)
+        meter_data = MeterData()
+        meter_data.frame = frame
+        meter_data._timestamp = 123.0
+
+        asyncio.run(slave.new_data(meter_data))
+
+        self.assertEqual(slave._frame_generation, 1)
+        self.assertEqual(len(scheduled), 1)
+        fn, args = scheduled[0]
+        self.assertEqual(fn, slave._serial_gate.publish)
+        # publish now carries BOTH the generation AND an immutable register
+        # snapshot (Finding 1): (generation, snapshot_tuple).
+        self.assertEqual(args[0], 1)
+        self.assertIsInstance(args[1], tuple)
+        self.assertEqual(len(args[1]), len(slave._registers))
+
+    def test_new_data_does_not_schedule_publish_when_serial_disabled(self):
+        frame, meter_data = self._successful_frame()
+        slave, _ = self._build_slave(frame)  # serial disabled fixture; no gate
+
+        scheduled: list[tuple] = []
+        slave._server_loop = SimpleNamespace(call_soon_threadsafe=lambda fn, *a: scheduled.append((fn, a)))
+
+        asyncio.run(slave.new_data(meter_data))
+
+        # Generation still bumps (cheap int), but no publish is scheduled and no
+        # gate exists when serial is disabled.
+        self.assertEqual(slave._frame_generation, 1)
+        self.assertEqual(scheduled, [])
+        self.assertIsNone(slave._serial_gate)
 
 
 if __name__ == "__main__":

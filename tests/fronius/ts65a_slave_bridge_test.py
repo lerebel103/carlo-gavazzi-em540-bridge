@@ -113,26 +113,30 @@ class TestTs65aSlaveBridge(unittest.TestCase):
         # At least some registers should be non-zero after writing real meter data
         self.assertTrue(any(v != 0 for v in written), "Register writes should produce non-zero values")
 
-    def test_serial_server_shares_context_when_enabled(self):
-        bridge_config = self._make_config()
-        bridge_config.serial = SimpleNamespace(
+    def _make_serial_enabled_config(self):
+        config = self._make_config()
+        config.serial = SimpleNamespace(
             enabled=True,
             port="/dev/ttyUSB7",
             baudrate=115200,
             parity="N",
             bytesize=8,
             stopbits=1,
-            timeout=0.25,
+            timeout=0.5,
             handle_local_echo=False,
+            pacing_enabled=True,
+            pacing_max_wait_s=0.12,
         )
+        return config
 
+    def _build_serial_enabled_bridge(self, config):
         with (
             patch("app.fronius.ts65a_slave_bridge.ModbusTcpServer") as mock_server_cls,
             patch("app.fronius.ts65a_slave_bridge.ModbusSerialServer") as mock_serial_server_cls,
         ):
             from pymodbus.simulator.simcore import SimCore
 
-            real_device = _build_ts65a_simdata(bridge_config.slave_id)
+            real_device = _build_ts65a_simdata(config.slave_id)
             real_sim_core = SimCore(real_device)
 
             mock_server = MagicMock()
@@ -141,10 +145,88 @@ class TestTs65aSlaveBridge(unittest.TestCase):
             serial_mock.context = real_sim_core
             mock_server_cls.return_value = mock_server
             mock_serial_server_cls.return_value = serial_mock
-            bridge = Ts65aSlaveBridge(bridge_config)
+            bridge = Ts65aSlaveBridge(config)
             serial_server = bridge._build_serial_server()
+        return bridge, serial_server
 
-        self.assertIs(serial_server.context, bridge._server.context)
+    def test_serial_server_uses_pacing_proxy_scoped_to_serial_only(self):
+        """Serial frame-latching is structural: only the serial server's context is
+        the SerialPacingContext proxy, wrapping the shared SimCore. The TCP server
+        keeps the plain shared SimCore (byte-for-byte unaffected)."""
+        from app.utils.serial_pacing import SerialPacingContext
+
+        config = self._make_serial_enabled_config()
+        bridge, serial_server = self._build_serial_enabled_bridge(config)
+
+        self.assertIsInstance(serial_server.context, SerialPacingContext)
+        self.assertIs(serial_server.context._core, bridge._server.context)
+        # TCP context is NOT the proxy — serial-only scoping.
+        self.assertNotIsInstance(bridge._server.context, SerialPacingContext)
+        self.assertIsNotNone(bridge._serial_gate)
+
+        # Anchor-based pacing: the proxy is wired with the Fronius AC-power anchors
+        # (Ac power value 40097 plus the three per-phase AC power starts).
+        from app.fronius.ts65a_slave_bridge import _SERIAL_PACING_ANCHORS
+
+        self.assertEqual(_SERIAL_PACING_ANCHORS, frozenset({40097, 40099, 40101, 40103}))
+        self.assertEqual(serial_server.context._anchors, frozenset({40097, 40099, 40101, 40103}))
+
+    def test_new_data_bumps_generation_on_successful_write(self):
+        bridge, _ = self._build_bridge()
+        data = MeterData()
+        data._timestamp = 123.0
+
+        self.assertEqual(bridge._frame_generation, 0)
+        asyncio.run(bridge.new_data(data))
+        self.assertEqual(bridge._frame_generation, 1)
+        asyncio.run(bridge.new_data(data))
+        self.assertEqual(bridge._frame_generation, 2)
+
+    def test_new_data_does_not_bump_generation_on_failed_write(self):
+        bridge, _ = self._build_bridge()
+        data = MeterData()
+        data._timestamp = 123.0
+
+        # Force the register write out of bounds so write_ok is False.
+        bridge._dynamic_start_address = 10**9
+
+        asyncio.run(bridge.new_data(data))
+        self.assertEqual(bridge._frame_generation, 0)
+        self.assertTrue(bridge._stats.circuit_breaker_open)
+
+    def test_new_data_schedules_publish_when_serial_enabled(self):
+        config = self._make_serial_enabled_config()
+        bridge, _ = self._build_serial_enabled_bridge(config)
+
+        scheduled: list[tuple] = []
+        bridge._server_loop = SimpleNamespace(call_soon_threadsafe=lambda fn, *a: scheduled.append((fn, a)))
+
+        data = MeterData()
+        data._timestamp = 123.0
+        asyncio.run(bridge.new_data(data))
+
+        self.assertEqual(bridge._frame_generation, 1)
+        self.assertEqual(len(scheduled), 1)
+        fn, args = scheduled[0]
+        self.assertEqual(fn, bridge._serial_gate.publish)
+        # publish now carries BOTH the generation AND an immutable register
+        # snapshot (Finding 1): (generation, snapshot_tuple).
+        self.assertEqual(args[0], 1)
+        self.assertIsInstance(args[1], tuple)
+        self.assertEqual(len(args[1]), len(bridge._registers))
+
+    def test_new_data_does_not_schedule_publish_when_serial_disabled(self):
+        bridge, _ = self._build_bridge()  # serial disabled; no gate
+        scheduled: list[tuple] = []
+        bridge._server_loop = SimpleNamespace(call_soon_threadsafe=lambda fn, *a: scheduled.append((fn, a)))
+
+        data = MeterData()
+        data._timestamp = 123.0
+        asyncio.run(bridge.new_data(data))
+
+        self.assertEqual(bridge._frame_generation, 1)
+        self.assertEqual(scheduled, [])
+        self.assertIsNone(bridge._serial_gate)
 
     def test_compatibility_register_50000_is_served_as_zeros(self):
         # A Fronius client polls register 50000, which the proprietary TS65A

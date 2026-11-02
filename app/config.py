@@ -137,6 +137,137 @@ class SlaveSerialConfig:
     stopbits: float = 1
     timeout: float = 0.5
     handle_local_echo: bool = False
+    # Serial-only frame-latching. A serial read blocks at most this many seconds
+    # waiting for a fresh upstream frame before releasing, so serial clients
+    # latch to the upstream refresh rate instead of receiving duplicate frames.
+    # Default 0.12s ~= 1.5x the ~80ms (12.5Hz) upstream period and must stay well
+    # below the real downstream serial client READ TIMEOUT of 200ms (and below
+    # this bridge's serial.timeout and the 0.5s downstream breaker
+    # update_timeout). A value <= 0 disables latching (today's behaviour,
+    # duplicate frames possible). Validation rejects pacing_max_wait_s >=
+    # serial.timeout when serial and pacing are both enabled.
+    pacing_enabled: bool = True
+    pacing_max_wait_s: float = 0.12
+    # The downstream serial CLIENT's read timeout (milliseconds) — the real wire
+    # deadline the frame latch must respect, NOT this bridge's own adapter
+    # ``timeout`` above. A latched read spends time waiting for a fresh frame AND
+    # then serializing the response over the serial line; at 9600 8N1 a worst-case
+    # response takes well over 100ms to clock out (10 bits/byte / 9600 baud per
+    # byte). So the effective latch wait is clamped below
+    # ``client_read_timeout_ms - serialization_time - turnaround_margin`` and
+    # validation rejects a pacing cap that cannot fit the response inside this
+    # deadline. Default 200ms matches a typical downstream serial client read
+    # timeout; raise it only if the real client tolerates longer reads.
+    client_read_timeout_ms: int = 200
+
+
+# Fixed small margin (seconds) added to the serialization time to cover the
+# request Tx, serial line turnaround, and scheduling jitter when computing the
+# available latch-wait budget. Conservative; keeps the effective cap safely below
+# the client read deadline.
+_SERIAL_TURNAROUND_MARGIN_S: float = 0.02
+
+# Smallest meaningful served response size (registers) used for the CONFIG-LEVEL
+# viability check. The actual latch wait is budgeted PER REQUEST at runtime from
+# the request's own register count (see app.utils.serial_pacing.SerialWireBudget),
+# so a large read is automatically clamped to fit its longer response inside the
+# client deadline. Config validation only needs to confirm there is usable latch
+# budget for at least a minimal read; a 2-register read is the smallest a client
+# would meaningfully poll. (At 9600 baud a wide 90-register response takes ~190ms
+# to serialize, which alone approaches a 200ms client deadline — per-request
+# clamping handles that at runtime rather than forbidding the whole config.)
+_SERIAL_MIN_RESPONSE_REGISTERS: int = 2
+
+
+def serial_bits_per_byte(bytesize: int, parity: str, stopbits: float) -> float:
+    """Return the number of bits on the wire per transmitted byte.
+
+    1 start bit + data bits + parity bit (0 for 'N', else 1) + stop bits.
+    For 8N1 this is 1 + 8 + 0 + 1 = 10.
+    """
+    parity_bits = 0 if parity == "N" else 1
+    return 1 + bytesize + parity_bits + stopbits
+
+
+def serial_serialization_seconds(
+    baudrate: int,
+    bytesize: int,
+    parity: str,
+    stopbits: float,
+    worst_resp_registers: int,
+) -> float:
+    """Worst-case on-wire serialization time (seconds) for a served response.
+
+    RTU framing for an FC3/FC4 response is 1 addr + 1 func + 1 bytecount + N*2
+    data bytes + 2 CRC = ``worst_resp_registers * 2 + 5`` bytes.
+    """
+    byte_time_s = serial_bits_per_byte(bytesize, parity, stopbits) / baudrate
+    worst_resp_bytes = worst_resp_registers * 2 + 5
+    return worst_resp_bytes * byte_time_s
+
+
+def serial_pacing_enabled_error(name: str, serial: "SlaveSerialConfig") -> str | None:
+    """Return the reason pacing CANNOT be enabled for ``serial``, or None if OK.
+
+    This is the SINGLE source of truth for the pacing-ENABLED timing constraints
+    (BUG 4) so the startup validator (``ConfigManager._validate_serial_pacing``)
+    and the Home Assistant pacing SWITCH command path
+    (``HAConfigEntities._on_command``) share ONE check and can never diverge. It
+    evaluates the config AS IF pacing were enabled, regardless of the live
+    ``pacing_enabled`` flag, so the HA path can validate a PROPOSED enable before
+    committing/persisting it (an enabled adapter could load with
+    ``pacing_enabled: false`` and ``pacing_max_wait_s == serial.timeout``; the
+    switch must not flip it to an unstartable state).
+
+    Returns a human-readable error string when enabling pacing would be invalid:
+      - ``pacing_max_wait_s`` is a bool / non-number / non-finite / <= 0;
+      - it is not strictly less than ``serial.timeout``;
+      - it plus the worst-case minimal-response serialization plus the turnaround
+        margin would meet or exceed the client read deadline.
+    Returns ``None`` when enabling pacing is viable. Only meaningful when the
+    serial adapter itself is enabled; callers that care only about an enabled
+    adapter should gate on ``serial.enabled`` first.
+    """
+    value = serial.pacing_max_wait_s
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return f"{name}.pacing_max_wait_s must be a number, got {value!r}"
+    if not math.isfinite(value):
+        return f"{name}.pacing_max_wait_s must be finite, got {value}"
+    if value <= 0:
+        return f"{name}.pacing_max_wait_s must be > 0 to enable pacing, got {value} (a value <= 0 disables latching)"
+
+    crt = serial.client_read_timeout_ms
+    if isinstance(crt, bool) or not isinstance(crt, (int, float)):
+        return f"{name}.client_read_timeout_ms must be a number, got {crt!r}"
+    if not math.isfinite(crt):
+        return f"{name}.client_read_timeout_ms must be finite, got {crt}"
+    if crt <= 0:
+        return f"{name}.client_read_timeout_ms must be > 0, got {crt}"
+
+    if value >= serial.timeout:
+        return (
+            f"{name}.pacing_max_wait_s must be strictly less than {name}.timeout "
+            f"(the serial client response timeout), got pacing_max_wait_s={value} timeout={serial.timeout}"
+        )
+
+    serialization_s = serial_serialization_seconds(
+        serial.baudrate,
+        serial.bytesize,
+        serial.parity,
+        serial.stopbits,
+        _SERIAL_MIN_RESPONSE_REGISTERS,
+    )
+    deadline_s = crt / 1000.0
+    if value + serialization_s + _SERIAL_TURNAROUND_MARGIN_S >= deadline_s:
+        return (
+            f"{name}.pacing_max_wait_s={value}s plus minimal response serialization "
+            f"({serialization_s * 1000:.1f}ms at {serial.baudrate} baud, {serial.bytesize}"
+            f"{serial.parity}{serial.stopbits} framing, {_SERIAL_MIN_RESPONSE_REGISTERS}-register "
+            f"response) plus {_SERIAL_TURNAROUND_MARGIN_S * 1000:.0f}ms turnaround margin would meet or "
+            f"exceed the {name}.client_read_timeout_ms={crt}ms client read deadline, leaving no latch "
+            f"budget even for a minimal read; lower pacing_max_wait_s or raise client_read_timeout_ms"
+        )
+    return None
 
 
 @dataclass
@@ -221,6 +352,8 @@ PERSISTED_FIELDS: set[str] = {
     "em540_master.timeout",
     "em540_slave.update_timeout",
     "ts65a_slave.update_timeout",
+    "em540_slave.serial.pacing_enabled",
+    "ts65a_slave.serial.pacing_enabled",
 }
 
 # ---------------------------------------------------------------------------
@@ -382,6 +515,12 @@ class ConfigManager:
             self._check_serial_device_reachable("ts65a_slave.serial.port", state.ts65a_slave.serial.port)
             self._validate_serial_idle_timeout("ts65a_slave.serial_idle_timeout", state.ts65a_slave.serial_idle_timeout)
 
+        # Serial frame-latching cap. The finiteness/type check runs regardless of
+        # enabled state; the strict-less-than-serial-timeout check only applies
+        # when the serial adapter and pacing are both enabled.
+        self._validate_serial_pacing("em540_slave.serial", state.em540_slave.serial)
+        self._validate_serial_pacing("ts65a_slave.serial", state.ts65a_slave.serial)
+
         # 5. grid_feed_in_hard_limit  (<= 0)
         if state.ts65a_slave.grid_feed_in_hard_limit > 0:
             raise ConfigError(
@@ -533,6 +672,55 @@ class ConfigManager:
         if value <= 0:
             raise ConfigError(f"{name} must be > 0 when serial is enabled, got {value}")
 
+    def _validate_serial_pacing(self, name: str, serial: SlaveSerialConfig) -> None:
+        """Validate the serial frame-latching cap pacing_max_wait_s.
+
+        pacing_max_wait_s must always be a finite, non-bool number (bool is an
+        int subclass and is rejected explicitly; NaN/inf and non-numeric values
+        would silently break the bounded asyncio.wait_for). A value <= 0 disables
+        latching and is accepted regardless of enabled state.
+
+        ``client_read_timeout_ms`` (the downstream serial client's wire read
+        deadline) must likewise be a finite, non-bool number > 0.
+
+        When the serial adapter is enabled AND pacing is enabled
+        (pacing_max_wait_s > 0 and pacing_enabled):
+          - pacing_max_wait_s MUST be strictly less than serial.timeout — the
+            safety margin below the serial client response timeout; AND
+          - the latch wait plus the worst-case on-wire response serialization
+            time plus a turnaround margin MUST stay strictly below the client
+            read deadline (client_read_timeout_ms), computed from the serial line
+            settings (8N1 = 10 bits/byte) and a worst-case served response size.
+            A config whose effective wait cannot fit the response inside the
+            client deadline is REJECTED (explicit misconfiguration) rather than
+            silently clamped.
+        """
+        value = serial.pacing_max_wait_s
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ConfigError(f"{name}.pacing_max_wait_s must be a number, got {value!r}")
+        if not math.isfinite(value):
+            raise ConfigError(f"{name}.pacing_max_wait_s must be finite, got {value}")
+
+        if not isinstance(serial.pacing_enabled, bool):
+            raise ConfigError(f"{name}.pacing_enabled must be a boolean (true/false), got {serial.pacing_enabled!r}")
+
+        crt = serial.client_read_timeout_ms
+        if isinstance(crt, bool) or not isinstance(crt, (int, float)):
+            raise ConfigError(f"{name}.client_read_timeout_ms must be a number, got {crt!r}")
+        if not math.isfinite(crt):
+            raise ConfigError(f"{name}.client_read_timeout_ms must be finite, got {crt}")
+        if crt <= 0:
+            raise ConfigError(f"{name}.client_read_timeout_ms must be > 0, got {crt}")
+
+        # Only enforce the margin-below-timeout + wire-budget checks when latching
+        # is actually active. The enabled-timing constraints live in the shared
+        # serial_pacing_enabled_error() helper (BUG 4) so this startup validator
+        # and the HA pacing SWITCH command path use ONE check and cannot diverge.
+        if serial.enabled and serial.pacing_enabled and value > 0:
+            error = serial_pacing_enabled_error(name, serial)
+            if error is not None:
+                raise ConfigError(error)
+
     def _validate_serial_config(self, name: str, serial: SlaveSerialConfig) -> None:
         if not serial.enabled:
             return
@@ -603,18 +791,45 @@ class ConfigManager:
                 self._dirty = True
 
     def _write(self) -> None:
-        """Write current PERSISTED_FIELDS values back to the YAML config file."""
+        """Write current PERSISTED_FIELDS values back to the YAML config file.
+
+        Each persisted field is an arbitrary-depth dotted path (e.g.
+        ``mqtt.update_interval`` or ``em540_slave.serial.pacing_enabled``). The
+        intermediate segments are walked through the AppState dataclass tree via
+        getattr to read the live value, and the matching nested YAML dicts are
+        created on demand so a 3-level path writes
+        ``data['em540_slave']['serial']['pacing_enabled']`` while existing
+        2-level paths keep working.
+        """
         path = Path(self._path)
         raw = path.read_text()
         data = yaml.safe_load(raw) or {}
 
         for field_path in PERSISTED_FIELDS:
-            section, key = field_path.split(".")
-            sub_config = getattr(self._state, section, None)
-            if sub_config is not None and hasattr(sub_config, key):
-                if section not in data:
-                    data[section] = {}
-                data[section][key] = getattr(sub_config, key)
+            segments = field_path.split(".")
+            # Resolve the live value by walking the AppState dataclass tree. A
+            # missing segment skips the field (defensive against a stale
+            # PERSISTED_FIELDS entry), matching the previous hasattr() guard.
+            source = self._state
+            missing = False
+            for segment in segments:
+                if not hasattr(source, segment):
+                    missing = True
+                    break
+                source = getattr(source, segment)
+            if missing:
+                continue
+
+            # Walk/create the nested YAML dicts for every segment except the last,
+            # which holds the value.
+            target = data
+            for segment in segments[:-1]:
+                existing = target.get(segment)
+                if not isinstance(existing, dict):
+                    existing = {}
+                    target[segment] = existing
+                target = existing
+            target[segments[-1]] = source
 
         with open(self._path, "w") as f:
             yaml.safe_dump(data, f, default_flow_style=False, sort_keys=False)
